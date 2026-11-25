@@ -65,6 +65,7 @@ REQUIRED_SCRIPT_DEPENDENCIES: dict[str, tuple[str, ...]] = {
         "gateway_capture.py",
         "training_capture.py",
         "harbor.toml",
+        "cached_pi.py",
     ),
     "synthesize.py": (
         "synthesize.py",
