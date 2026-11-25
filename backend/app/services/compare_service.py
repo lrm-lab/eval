@@ -527,6 +527,7 @@ class CompareService:
         payload: dict[str, Any],
         *,
         persist_ephemeral: bool = True,
+        exact_batch_context: tuple[str, str] | None = None,
     ) -> dict[str, Any]:
         subjects = payload.get("subjects") or []
         if len(subjects) < 2:
@@ -590,6 +591,12 @@ class CompareService:
                             "current_generation_id": b["generation_id"],
                         },
                     )
+                if exact_batch_context is not None:
+                    release, protocol = exact_batch_context
+                    if b["dataset_release_id"] != release:
+                        raise AppError(400, "INCOMPARABLE_RELEASE", "所选批次的数据集发行版不同")
+                    if b["scoring_protocol"] != protocol:
+                        raise AppError(400, "INCOMPARABLE_PROTOCOL", "所选批次的评分协议不同")
                 subj_batches[sid] = b
                 bound_batches.append(
                     {
@@ -625,6 +632,8 @@ class CompareService:
                 rel_is_ho = self._is_holdout_release(rel_id, conn=snap_conn) or any(
                     self._is_holdout_batch(subj_batches[str(s["id"])], conn=snap_conn) for s in rel_subjs_snap
                 )
+                if exact_batch_context is not None and rel_is_ho:
+                    require_scope(user, "dataset:holdout_read")
                 rel_whole_holdout_map[rel_id] = rel_is_ho
                 rel_holdout_tids_map[rel_id] = (
                     set() if rel_is_ho else self._holdout_task_ids_for_releases({rel_id}, conn=snap_conn)
@@ -824,6 +833,7 @@ class CompareService:
                 "dataset_release_id": rel_id,
                 "raw_dataset_name": rel["bm_display_name"],
                 "scoring_protocol": eff_proto,
+                "metric_name": rel["metric_name"],
                 "comparable": comparable,
                 "comparison_issue": issue,
                 "intersection": {
@@ -1994,12 +2004,18 @@ class CompareService:
             )
 
             if cand_id and baseline_id in raw_scores and cand_id in raw_scores:
+                baseline_entry = subj_scores_map[baseline_id][rel_id]
+                candidate_entry = subj_scores_map[cand_id][rel_id]
+                metric_name = baseline_entry["metric"] if (
+                    baseline_entry["metric"], baseline_entry["scale_type"]
+                ) == (candidate_entry["metric"], candidate_entry["scale_type"]) else None
                 b_val, c_val = raw_scores[baseline_id], raw_scores[cand_id]
                 d_pp, r_pct = compute_unrounded_delta(b_val, c_val)
                 st_v = "regressed" if d_pp < regression_threshold_pp else "pass"
                 v_item = {
                     "benchmark_slug": meta["benchmark_slug"],
                     "dataset_release_id": rel_id,
+                    "metric_name": metric_name,
                     "track_slug": meta["track_slug"],
                     "scoring_protocol": "legacy-20261120-csv",
                     "denominator_kind": "legacy_20261120_csv",

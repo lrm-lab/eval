@@ -127,7 +127,7 @@ def _dataset_performance(batches: list[dict[str, Any]], *, can_holdout: bool) ->
             **{field: b[field] for field in (
                 "benchmark_slug", "dataset_release_id", "dataset_version", "split", "known_task_count",
                 "scoring_protocol", "run_scope", "batch_status", "scored", "recorded", "planned", "unique_tasks",
-                "batch_id", "generation_id", "batch_name", "identity_status",
+                "batch_id", "generation_id", "batch_name", "identity_status", "finished_at", "indexed_at",
             )},
             "display_name": b["bm_display_name"] or b["raw_dataset_name"] or b["benchmark_slug"],
             "metric_name": metric_name,
@@ -374,9 +374,11 @@ class ProfileService:
             leg_rows = self.db.fetchall(
                 """
                 SELECT lr.*, bm.display_name AS bm_display_name, bm.track_slug,
-                       bm.track_display_name, bm.goal_type, bm.capability
+                       bm.track_display_name, bm.goal_type, bm.capability,
+                       r.dataset_version, r.split
                 FROM legacy_leaderboard_rows lr
                 LEFT JOIN benchmarks bm ON bm.benchmark_slug = lr.benchmark_slug
+                LEFT JOIN dataset_releases r ON r.dataset_release_id = lr.dataset_release_id
                 WHERE lr.model_canonical = ?
                 ORDER BY bm.track_slug, lr.benchmark
                 """,
@@ -491,6 +493,9 @@ class ProfileService:
             entry = {
                 "benchmark_slug": lr["benchmark_slug"],
                 "dataset_release_id": lr["dataset_release_id"],
+                "dataset_version": lr["dataset_version"],
+                "split": lr["split"],
+                "metric_name": lr["metric"],
                 "display_name": lr["bm_display_name"] or lr["benchmark"],
                 "track_slug": lr["track_slug"] or "extended",
                 "track_display_name": lr["track_display_name"] or "Extended",
@@ -996,6 +1001,18 @@ class ProfileService:
                     }
                 )
         mini_lb.sort(key=lambda x: (x["score"] is not None, x["score"] if x["score"] is not None else -1.0), reverse=True)
+        release_by_id = {r["dataset_release_id"]: r for r in rels}
+        performance_batches = [
+            {
+                **batch,
+                "bm_display_name": bm["display_name"],
+                **{
+                    field: release_by_id.get(batch["dataset_release_id"], {}).get(field)
+                    for field in ("scale_type", "dataset_version", "split", "metric_name", "known_task_count")
+                },
+            }
+            for batch in batch_rows if not batch["is_running_placeholder"]
+        ]
 
         # Task metadata breakdown (category & difficulty counts across non-holdout releases, or all if holdout_read)
         rel_ids = [
@@ -1043,6 +1060,7 @@ class ProfileService:
             "releases": rels,
             "scatter_configs": scatter_configs,
             "mini_leaderboard": mini_lb,
+            "dataset_performance": _dataset_performance(performance_batches, can_holdout=can_holdout),
             "grouped_comparison": _grouped_comparison(rels, batch_rows, historical, can_holdout=can_holdout),
             "task_summary": {
                 "indexed_tasks": task_total,

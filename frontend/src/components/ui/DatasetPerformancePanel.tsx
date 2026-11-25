@@ -37,6 +37,8 @@ export interface DatasetPerformanceRow {
   batch_id: string;
   generation_id: string;
   batch_name: string;
+  finished_at?: string | null;
+  indexed_at?: string | null;
 }
 
 const selectClass = 'w-full min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]';
@@ -52,7 +54,7 @@ function harnessLabel(row: DatasetPerformanceRow) {
   return row.harness_key && row.harness ? [row.harness, row.harness_version].filter(Boolean).join(' @ ') : 'Harness 未确认';
 }
 
-function benchmarkLink(row: DatasetPerformanceRow) {
+export function benchmarkGroupLink(row: DatasetPerformanceRow) {
   if (!row.benchmark_slug || !row.dataset_release_id) return null;
   const query = new URLSearchParams({
     tab: 'groups',
@@ -175,7 +177,7 @@ export function DatasetPerformancePanel({
       ) : (
         <ul aria-label="各数据集批次表现" className="m-0 list-none space-y-2 p-0">
           {ordered.map((row) => {
-            const benchmark = benchmarkLink(row);
+            const benchmark = benchmarkGroupLink(row);
             const peer = peerLink(row, axis);
             const focused = isFocused(row);
             const modelLabel = [row.model_key ? row.model_canonical : null, row.checkpoint, row.thinking_mode].filter(Boolean).join(' · ');

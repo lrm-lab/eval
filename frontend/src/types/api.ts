@@ -123,6 +123,7 @@ export type CompareIssue =
 export interface VerdictItem {
   benchmark_slug: string;
   dataset_release_id: string | null;
+  metric_name?: string | null;
   track_slug: string;
   scoring_protocol: string | null;
   denominator_kind: string | null;
