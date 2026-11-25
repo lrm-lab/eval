@@ -173,5 +173,8 @@ class RunnerIPCClient:
     def get_events(self, job_id: str, *, after_seq: int = 0, timeout: float = 5.0) -> tuple[int, dict[str, Any]]:
         return self.request_json("GET", f"/v1/jobs/{job_id}/events?after_seq={int(after_seq)}", timeout=timeout)
 
+    def recover_job(self, job_id: str) -> tuple[int, dict[str, Any]]:
+        return self.request_json("POST", f"/v1/jobs/{job_id}/recover", {}, timeout=2.0)
+
     def cancel_job(self, job_id: str, *, timeout: float = 5.0) -> tuple[int, dict[str, Any]]:
         return self.request_json("POST", f"/v1/jobs/{job_id}/cancel", {}, timeout=timeout)

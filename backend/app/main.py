@@ -206,11 +206,13 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
+        ctx.execution.start_recovery()
         if run_startup_scan:
             ctx.coordinator.start()
         try:
             yield
         finally:
+            ctx.execution.stop()
             ctx.coordinator.stop()
             ctx.db.close_thread_connection()
 
