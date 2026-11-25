@@ -7,6 +7,7 @@ import { fmtDateShort, fmtPct, runScopeLabel } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import type { BatchDTO } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
 interface BatchListResp {
@@ -119,7 +120,7 @@ export function ReportsPage() {
             <tr
               key={b.batch_id}
               onClick={() => navigate(`/eval/batches/${b.batch_id}`)}
-              className="hover:bg-[var(--bg-elevated)]/65 cursor-pointer transition-colors"
+              className="group/row-action hover:bg-[var(--bg-elevated)]/65 cursor-pointer transition-colors"
             >
               <td className="py-2.5 px-3.5 max-w-[260px]">
                 <div className="font-semibold text-[var(--text-primary)] truncate" title={b.batch_name}>
@@ -162,12 +163,17 @@ export function ReportsPage() {
                   </div>
                 )}
               </td>
-              <td className="py-2.5 px-3.5 text-right" onClick={(e) => e.stopPropagation()}>
+              <td className="py-2.5 px-3.5 text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
+                <RowActionIcon
+                  variant="details"
+                  label={`查看批次详情：${b.batch_name}`}
+                  to={`/eval/batches/${b.batch_id}`}
+                />
                 {!b.is_running_placeholder && (
                   <button
                     type="button"
                     onClick={() => addToCompare({ id: b.batch_id, kind: 'batch', batch_id: b.batch_id, alias: b.batch_name })}
-                    className="inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--brand-primary)] cursor-pointer"
+                    className="ml-2 inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--brand-primary)] cursor-pointer"
                   >
                     <Plus className="w-3 h-3" /> 对比
                   </button>

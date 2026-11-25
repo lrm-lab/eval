@@ -31,6 +31,7 @@ import { CHART_PALETTE, escapeHtml, fmtDeltaPP, fmtPct, fmtTokens, stableColorFo
 import { useAppStore } from '../lib/store';
 import { PageTransition } from '../components/motion/primitives';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { CardGridSkeleton, ChartSkeleton, StateNoticeCard } from '../components/ui/Skeletons';
 
 interface TrainingRunSummary {
@@ -1541,18 +1542,17 @@ export function TrainingOpdPage() {
                               </span>
                             </div>
 
-                            <div className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2.5 tabular-nums">
+                            <div className="group/row-action flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2.5 tabular-nums">
                               <div className="min-w-0">
                                 <div className="text-[10px] text-[var(--text-muted)]">Base ({item.base_checkpoint})</div>
                                 <div className="text-base font-bold text-[var(--text-primary)]">
                                   {fmtPct(item.base_score_pct)}
                                 </div>
-                                <Link
+                                <RowActionIcon
+                                  variant="details"
+                                  label="查看 Base 批次"
                                   to={`/eval/batches/${encodeURIComponent(item.base_batch_id)}`}
-                                  className="text-[10px] font-mono text-[var(--brand-primary)] no-underline hover:underline"
-                                >
-                                  查看 Base 批次 →
-                                </Link>
+                                />
                               </div>
 
                               <ArrowRight className="w-4 h-4 text-[var(--text-muted)] shrink-0" />
@@ -1564,12 +1564,11 @@ export function TrainingOpdPage() {
                                 <div className="text-base font-bold text-[var(--text-primary)]">
                                   {fmtPct(item.candidate_score_pct)}
                                 </div>
-                                <Link
+                                <RowActionIcon
+                                  variant="details"
+                                  label="查看 Candidate 批次"
                                   to={`/eval/batches/${encodeURIComponent(item.candidate_batch_id)}`}
-                                  className="text-[10px] font-mono text-[var(--brand-primary)] no-underline hover:underline"
-                                >
-                                  查看 Candidate 批次 →
-                                </Link>
+                                />
                               </div>
                             </div>
                           </div>

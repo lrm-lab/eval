@@ -17,6 +17,7 @@ import { apiFetch } from '../lib/api';
 import { trackDisplayName } from '../lib/format';
 import type { BenchmarkTreeNode, DatasetReleaseDTO, DatasetTreeTrack } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { SlideOverDrawer } from '../components/ui/SlideOverDrawer';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
@@ -134,6 +135,11 @@ export function DatasetsPage() {
       ),
   });
 
+  const openRelease = (bm: BenchmarkTreeNode, rel: DatasetReleaseDTO) => {
+    setTaskPage(1);
+    setDrawerRelease({ bm, rel });
+  };
+
   const legacyDirsQ = useQuery({
     queryKey: ['legacy-dirs'],
     enabled: view === 'legacy',
@@ -151,6 +157,10 @@ export function DatasetsPage() {
     if (legacyDirOptions.length === 0) return '';
     return legacyDirOptions.includes(legacyDir) ? legacyDir : legacyDirOptions[0];
   }, [legacyDirOptions, legacyDir]);
+
+  const openLegacySample = (row: LegacySampleRow) => {
+    setSelectedLegacySample({ dir: activeLegacyDir, modelFile: row.model_file, sampleId: row.sample_id });
+  };
 
   const legacyListQ = useQuery({
     queryKey: ['legacy-samples', activeLegacyDir, legacyPage],
@@ -403,10 +413,7 @@ export function DatasetsPage() {
                                 <button
                                   key={rel.dataset_release_id}
                                   type="button"
-                                  onClick={() => {
-                                    setTaskPage(1);
-                                    setDrawerRelease({ bm, rel });
-                                  }}
+                                  onClick={() => openRelease(bm, rel)}
                                   className="w-full text-left rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--brand-primary)] px-2.5 py-1.5 text-[11px] transition-colors cursor-pointer"
                                 >
                                   <div className="flex items-center justify-between gap-1 font-mono text-[var(--text-primary)]">
@@ -444,6 +451,7 @@ export function DatasetsPage() {
                 <th className="py-2.5 px-3">dataset_release_id</th>
                 <th className="py-2.5 px-3">默认协议 / 标尺</th>
                 <th className="py-2.5 px-3 text-right">题数 / 批次数</th>
+                <th className="w-12 py-2.5 px-2 text-center">操作</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)]">
@@ -451,12 +459,9 @@ export function DatasetsPage() {
                 <tr
                   key={`${bm.benchmark_slug}-${rel.dataset_release_id}`}
                   onClick={() => {
-                    if (!rel.dataset_release_id.endsWith('__unintegrated')) {
-                      setTaskPage(1);
-                      setDrawerRelease({ bm, rel });
-                    }
+                    if (!rel.dataset_release_id.endsWith('__unintegrated')) openRelease(bm, rel);
                   }}
-                  className="hover:bg-[var(--bg-elevated)]/65 cursor-pointer"
+                  className="group/row-action hover:bg-[var(--bg-elevated)]/65 cursor-pointer"
                 >
                   <td className="py-2 px-3.5 text-[var(--text-secondary)]">{trackDisplayName(track.track_slug)}</td>
                   <td className="py-2 px-3">
@@ -469,6 +474,18 @@ export function DatasetsPage() {
                   </td>
                   <td className="py-2 px-3 text-right tabular-nums text-[var(--text-secondary)]">
                     {rel.known_task_count ?? '—'} 题 / {rel.batch_count ?? 0} 批
+                  </td>
+                  <td className="px-2 text-center">
+                    {!rel.dataset_release_id.endsWith('__unintegrated') && (
+                      <RowActionIcon
+                        variant="details"
+                        label={`查看发行版详情：${rel.dataset_release_id}`}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openRelease(bm, rel);
+                        }}
+                      />
+                    )}
                   </td>
                 </tr>
               ))}
@@ -520,15 +537,15 @@ export function DatasetsPage() {
                     <th className="py-2.5 px-3">Sample ID</th>
                     <th className="py-2.5 px-3">状态 / Reward</th>
                     <th className="py-2.5 px-3">多模态图像匹配</th>
-                    <th className="py-2.5 px-3.5 text-right">操作</th>
+                    <th className="w-12 py-2.5 px-2 text-center">操作</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border-subtle)]">
                   {legacyListQ.data!.items.map((row) => (
                     <tr
                       key={`${row.model_file}-${row.sample_id}`}
-                      onClick={() => setSelectedLegacySample({ dir: activeLegacyDir, modelFile: row.model_file, sampleId: row.sample_id })}
-                      className="hover:bg-[var(--bg-elevated)]/65 cursor-pointer"
+                      onClick={() => openLegacySample(row)}
+                      className="group/row-action hover:bg-[var(--bg-elevated)]/65 cursor-pointer"
                     >
                       <td className="py-2 px-3.5 font-mono text-[11px] text-[var(--text-secondary)]">{row.model_file}</td>
                       <td className="py-2 px-3 font-mono font-semibold text-[var(--text-primary)]">{row.sample_id}</td>
@@ -569,7 +586,16 @@ export function DatasetsPage() {
                           return <span className="text-[var(--text-muted)]">{row.media_match_status || '无图像'}</span>;
                         })()}
                       </td>
-                      <td className="py-2 px-3.5 text-right text-[var(--brand-primary)]">秒开详情</td>
+                      <td className="px-2 text-center">
+                        <RowActionIcon
+                          variant="details"
+                          label={`秒开详情：${row.sample_id}`}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            openLegacySample(row);
+                          }}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>

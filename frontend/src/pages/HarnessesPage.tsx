@@ -8,6 +8,7 @@ import { fmtDuration, fmtPct, runScopeLabel, stableColorForKey } from '../lib/fo
 import { useAppStore } from '../lib/store';
 import type { BatchDTO } from '../types/api';
 import { PageTransition, SpotlightCard } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
 interface HarnessSummary {
@@ -212,6 +213,7 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
                     <th className="py-2 px-3">协议 / 范围</th>
                     <th className="py-2 px-3 text-right">覆盖</th>
                     <th className="py-2 px-3.5 text-right">得分</th>
+                    <th className="w-12 py-2 px-2 text-center">操作</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-[var(--border-subtle)]">
@@ -219,7 +221,7 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
                     <tr
                       key={`${row.dataset_release_id}-${row.model_canonical}-${i}`}
                       onClick={() => row.batch_id && navigate(`/eval/batches/${row.batch_id}`)}
-                      className="hover:bg-[var(--bg-elevated)]/70 cursor-pointer"
+                      className={`group/row-action hover:bg-[var(--bg-elevated)]/70 ${row.batch_id ? 'cursor-pointer' : ''}`}
                     >
                       <td className="py-2 px-3.5 font-medium text-[var(--text-primary)]">{row.display_name}</td>
                       <td className="py-2 px-3 text-[var(--text-secondary)]">{row.model_canonical || '—'}</td>
@@ -231,6 +233,15 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
                       </td>
                       <td className="py-2 px-3.5 text-right font-bold tabular-nums text-[var(--text-primary)]">
                         {fmtPct(row.score)}
+                      </td>
+                      <td className="px-2 text-center" onClick={(event) => event.stopPropagation()}>
+                        {row.batch_id && (
+                          <RowActionIcon
+                            variant="details"
+                            label={`查看批次详情：${row.display_name}`}
+                            to={`/eval/batches/${row.batch_id}`}
+                          />
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -245,22 +256,27 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
             </div>
             <div className="divide-y divide-[var(--border-subtle)]">
               {data.batches.map((b) => (
-                <div key={b.batch_id} className="px-4 py-2.5 flex items-center justify-between gap-3 text-xs hover:bg-[var(--bg-elevated)]/50">
+                <div key={b.batch_id} className="group/row-action px-4 py-2.5 flex items-center justify-between gap-3 text-xs hover:bg-[var(--bg-elevated)]/50">
                   <div className="min-w-0">
-                    <Link to={`/eval/batches/${b.batch_id}`} className="font-semibold text-[var(--brand-primary)] no-underline hover:underline">
-                      {b.batch_name}
-                    </Link>
+                    <div className="font-semibold text-[var(--text-primary)]">{b.batch_name}</div>
                     <div className="text-[11px] text-[var(--text-muted)]">
                       {b.model_canonical || '—'} · {b.benchmark_slug || b.raw_dataset_name} · {b.scored}/{b.planned || b.recorded}
                     </div>
                   </div>
-                  <button
-                    type="button"
-                    onClick={() => addToCompare({ id: b.batch_id, kind: 'batch', batch_id: b.batch_id, alias: b.batch_name })}
-                    className="inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--brand-primary)] cursor-pointer"
-                  >
-                    <Plus className="w-3 h-3" /> 对比
-                  </button>
+                  <div className="flex shrink-0 items-center gap-2">
+                    <RowActionIcon
+                      variant="details"
+                      label={`查看批次详情：${b.batch_name}`}
+                      to={`/eval/batches/${b.batch_id}`}
+                    />
+                    <button
+                      type="button"
+                      onClick={() => addToCompare({ id: b.batch_id, kind: 'batch', batch_id: b.batch_id, alias: b.batch_name })}
+                      className="inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--brand-primary)] cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" /> 对比
+                    </button>
+                  </div>
                 </div>
               ))}
             </div>

@@ -1,5 +1,4 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import type * as echarts from 'echarts';
 import { AlertCircle, BookmarkPlus, Layers, Lock, SlidersHorizontal } from 'lucide-react';
@@ -8,6 +7,7 @@ import { escapeHtml, fmtPct } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import { PageTransition } from '../components/motion/primitives';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { CardGridSkeleton, StateNoticeCard } from '../components/ui/Skeletons';
 
 interface SelBatchItem {
@@ -314,9 +314,11 @@ export function SelectionBoardPage() {
               )}
               <div className="px-4 py-2.5 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex items-center justify-between text-xs">
                 <span className="font-bold">逐题分桶明细（显示 {visibleTasks.length} / {board.tasks.length} 题）</span>
-                <Link to={`/eval/batches/${encodeURIComponent(board.batch_id)}`} className="text-[var(--brand-primary)] no-underline hover:underline">
-                  查看批次完整报告 →
-                </Link>
+                <RowActionIcon
+                  variant="open"
+                  label="查看批次完整报告"
+                  to={`/eval/batches/${encodeURIComponent(board.batch_id)}`}
+                />
               </div>
               <div className="overflow-x-auto">
                 <table className="w-full text-left border-collapse text-xs">

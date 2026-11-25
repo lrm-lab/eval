@@ -5,6 +5,7 @@ import { apiFetch } from '../lib/api';
 import { fmtDateShort, fmtPct } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
 type VerifyTab = 'calc' | 'report' | 'manage';
@@ -311,28 +312,26 @@ export function ToolkitVerifyPage() {
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)]">
                 {reportsQ.data!.items.map((r) => (
-                  <tr key={r.report_id} className="hover:bg-[var(--bg-elevated)]/60">
-                    <td className="py-2 px-3 font-medium">
-                      <button
-                        type="button"
+                  <tr key={r.report_id} className="group/row-action hover:bg-[var(--bg-elevated)]/60">
+                    <td className="py-2 px-3 font-medium">{r.report_name}</td>
+                    <td className="py-2 px-3 font-mono text-[11px]">{r.upload_format}</td>
+                    <td className="py-2 px-3 font-mono text-[11px]">{r.adapter_used}</td>
+                    <td className="py-2 px-3 text-[var(--text-muted)]">{fmtDateShort(r.created_at)}</td>
+                    <td className="py-2 px-3 text-right whitespace-nowrap">
+                      <RowActionIcon
+                        variant="details"
+                        label={`查看离线报告：${r.report_name}`}
                         onClick={() => {
                           setActiveReport(r);
                           setTab('report');
                         }}
-                        className="text-[var(--brand-primary)] hover:underline cursor-pointer"
-                      >
-                        {r.report_name}
-                      </button>
-                    </td>
-                    <td className="py-2 px-3 font-mono text-[11px]">{r.upload_format}</td>
-                    <td className="py-2 px-3 font-mono text-[11px]">{r.adapter_used}</td>
-                    <td className="py-2 px-3 text-[var(--text-muted)]">{fmtDateShort(r.created_at)}</td>
-                    <td className="py-2 px-3 text-right">
+                      />
                       {canWrite && (
                         <button
                           type="button"
+                          aria-label={`删除离线报告：${r.report_name}`}
                           onClick={() => deleteOffMut.mutate(r.report_id)}
-                          className="text-[var(--text-muted)] hover:text-[var(--sem-err-fg)] cursor-pointer"
+                          className="ml-2 text-[var(--text-muted)] hover:text-[var(--sem-err-fg)] cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5 inline" />
                         </button>
