@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+import certifi
 import pytest
 import yaml
 from fastapi.testclient import TestClient
@@ -1393,6 +1394,8 @@ def dump(data, path):
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(body, encoding="utf-8")
 
+        trusted_ca = openenv_root / "trusted-ca.pem"
+        shutil.copyfile(certifi.where(), trusted_ca)
         runner_extra_env = {
             "PATH": f"{mock_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
             "PI_BENCH_RUNNER_BIN": str(mock_bin),
@@ -1400,7 +1403,7 @@ def dump(data, path):
             "VLMEVALKIT_PYTHON": sys.executable,
             "LRM_RUNNER_OPENENV_PYTHON": sys.executable,
             "LRM_RUNNER_OPENENV_PYTHONPATH": str(openenv_root),
-            "SSL_CERT_FILE": str(openenv_root / "trusted-ca.pem"),
+            "SSL_CERT_FILE": str(trusted_ca),
         }
         with _start_external_runner_daemon(isolated_settings, extra_env=runner_extra_env):
             app_h = create_app(isolated_settings, run_startup_scan=False)
