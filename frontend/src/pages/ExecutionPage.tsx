@@ -105,6 +105,10 @@ export interface CgroupTelemetry {
   source: string;
   cpu_usage_usec: number | null;
   memory_peak_bytes: number | null;
+  memory_current_bytes?: number | null;
+  memory_max_bytes?: number | null;
+  pids_current?: number | null;
+  scope?: string;
   note?: string;
 }
 
@@ -112,6 +116,22 @@ export interface StreamTelemetry {
   source: string;
   ttft_ms: number | null;
   tps: number | null;
+  ttft_p95_ms?: number | null;
+  sample_count?: number;
+  tps_sample_count?: number;
+  note?: string;
+}
+
+export interface JobStdioStatus {
+  present: boolean;
+  total_bytes: number;
+  segments: number;
+  rotated: boolean;
+  per_job_cap_bytes: number;
+  segment_bytes: number;
+  backup_segments: number;
+  cumulative_cap_bytes: number;
+  detail_read_bytes: number;
 }
 
 export interface IsolationProbeResult {
@@ -307,9 +327,12 @@ export interface ExecutionJobDetail extends ExecutionJobSummary {
   };
   events: ExecutionJobEvent[];
   redacted_stdio_logs: string[];
+  stdio_log_truncated?: boolean;
+  stdio_log_cap_bytes?: number;
   telemetry: {
     cgroup: CgroupTelemetry;
     streaming_ttft_tps: StreamTelemetry;
+    stdio?: JobStdioStatus;
   };
 }
 
@@ -1355,20 +1378,11 @@ export function ExecutionPage() {
     return rows;
   }, [liveOverlay]);
 
-  const activeCgroup: CgroupTelemetry =
-    liveOverlay?.cgroup ??
-    selectedJobDetail?.telemetry.cgroup ??
-    capsQ.data?.runner_environment.telemetry.container_cgroup ?? {
-      source: 'unavailable',
-      cpu_usage_usec: null,
-      memory_peak_bytes: null,
-    };
-
-  const activeStreamTelemetry: StreamTelemetry = selectedJobDetail?.telemetry.streaming_ttft_tps ?? {
-    source: 'unavailable',
-    ttft_ms: null,
-    tps: null,
-  };
+  const activeCgroup = liveOverlay?.cgroup ?? selectedJobDetail?.telemetry.cgroup;
+  const activeStreamTelemetry = selectedJobDetail?.telemetry.streaming_ttft_tps;
+  const activeStdio = selectedJobDetail?.telemetry.stdio;
+  const stdioCapBytes = activeStdio?.per_job_cap_bytes ?? selectedJobDetail?.stdio_log_cap_bytes ?? null;
+  const stdioTruncated = selectedJobDetail?.stdio_log_truncated;
 
   const canStopActive = Boolean(
     canWrite && selectedJobId && activeStatus && (activeStatus === 'queued' || activeStatus === 'running')
@@ -2332,50 +2346,50 @@ export function ExecutionPage() {
               />
             </div>
 
-            {/* Optional Telemetry Badges (Honestly displays `unavailable` when unmeasured) */}
-            <div className="flex flex-wrap items-center gap-2.5 text-[11px]">
+            <div className="grid grid-cols-1 gap-2.5 text-[11px] sm:grid-cols-2">
               <div
-                aria-label="Streaming TTFT 和 TPS 遥测状态"
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono"
+                aria-label="流式 TTFT 和 TPS 遥测状态"
+                aria-busy={jobDetailQ.isPending}
+                title={activeStreamTelemetry?.note || '按 SSE 输出到达时间采样，TPS 取网关返回的输出 token 数'}
+                className="min-w-0 h-14 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono"
               >
-                <Zap className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                <span className="text-[var(--text-secondary)]">Streaming TTFT/TPS:</span>
-                {activeStreamTelemetry.source !== 'unavailable' &&
-                (activeStreamTelemetry.ttft_ms !== null || activeStreamTelemetry.tps !== null) ? (
-                  <span className="text-[var(--text-primary)] font-semibold">
-                    TTFT {activeStreamTelemetry.ttft_ms ?? '—'} ms · {activeStreamTelemetry.tps ?? '—'} tok/s
-                  </span>
-                ) : (
-                  <span className="rounded bg-[var(--sem-unscored-bg)] text-[var(--sem-unscored-fg)] px-1.5 py-0.2">
-                    unavailable
-                  </span>
-                )}
-              </div>
-
-              <div
-                aria-label="Container cgroup v2 遥测状态"
-                title={activeCgroup.note || '容器 cgroup v2 资源遥测'}
-                className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono"
-              >
-                <Cpu className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                <span className="text-[var(--text-secondary)]">Container cgroup v2:</span>
-                {activeCgroup.source === 'cgroup_v2' ? (
-                  <span className="text-[var(--text-primary)] font-semibold">
-                    CPU {formatCpuUsec(activeCgroup.cpu_usage_usec)} · Mem Peak {formatBytes(activeCgroup.memory_peak_bytes)}
-                  </span>
-                ) : (
-                  <span className="rounded bg-[var(--sem-unscored-bg)] text-[var(--sem-unscored-fg)] px-1.5 py-0.2">
-                    unavailable
-                  </span>
-                )}
-              </div>
-
-              {activeSnapshot?.reconciled && activeSnapshot.snapshot_digest && (
-                <div className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--sem-pass-border)] bg-[var(--sem-pass-bg)] px-2.5 py-1.5 font-mono text-[var(--sem-pass-fg)]">
-                  <Server className="w-3.5 h-3.5" />
-                  <span>digest={activeSnapshot.snapshot_digest.slice(0, 22)}…</span>
+                <div className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+                  <Zap className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                  流式 TTFT / TPS
                 </div>
-              )}
+                <div className="mt-0.5 truncate text-[var(--text-primary)] font-semibold tabular-nums">
+                  {activeStreamTelemetry?.ttft_ms != null ? (
+                    <>
+                      {activeStreamTelemetry.ttft_ms} ms
+                      {activeStreamTelemetry.ttft_p95_ms != null && ` (p95 ${activeStreamTelemetry.ttft_p95_ms})`} ·{' '}
+                      {activeStreamTelemetry.tps != null ? `${activeStreamTelemetry.tps} tok/s` : 'TPS 缺测'}
+                      {activeStreamTelemetry.sample_count != null && ` · n=${activeStreamTelemetry.sample_count}`}
+                    </>
+                  ) : (jobDetailQ.isPending ? '读取中…' : jobDetailQ.isError ? '读取失败' : 'unavailable')}
+                </div>
+              </div>
+
+              <div
+                aria-label="隔离 Runner cgroup v2 遥测状态"
+                aria-busy={jobDetailQ.isPending}
+                title={activeCgroup?.note || '隔离 Runner 容器启动时快照'}
+                className="min-w-0 h-14 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono"
+              >
+                <div className="flex items-center gap-1.5 text-[var(--text-secondary)]">
+                  <Cpu className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                  Runner cgroup v2
+                </div>
+                <div className="mt-0.5 truncate text-[var(--text-primary)] font-semibold tabular-nums">
+                  {activeCgroup?.source === 'cgroup_v2' && ['container', 'container_namespace_root'].includes(activeCgroup.scope ?? '') ? (
+                    <>CPU {formatCpuUsec(activeCgroup.cpu_usage_usec)} · 内存峰值 {formatBytes(activeCgroup.memory_peak_bytes)}</>
+                  ) : (jobDetailQ.isPending ? '读取中…' : jobDetailQ.isError ? '读取失败' : 'unavailable')}
+                </div>
+              </div>
+
+              <div className="h-8 min-w-0 flex items-center gap-1.5 font-mono text-[var(--text-muted)] sm:col-span-2">
+                <Server className="w-3.5 h-3.5 shrink-0" />
+                <span className="truncate">快照摘要 {activeSnapshot?.snapshot_digest ?? '—'}</span>
+              </div>
             </div>
 
             {/* Redacted Stdio Log Viewer (Explicitly NEVER drives progress/state machine) */}
@@ -2393,6 +2407,21 @@ export function ExecutionPage() {
                 >
                   <RefreshCw className="w-3 h-3" /> 刷新日志
                 </button>
+              </div>
+              <div
+                role="status"
+                aria-label="stdout/stderr 截断与限额提示"
+                className="h-14 sm:h-10 px-3 py-1 border-b border-[var(--border-subtle)] text-[11px] leading-4 text-[var(--text-muted)]"
+              >
+                <div>
+                  单作业留存上限 {formatBytes(stdioCapBytes)}
+                  {activeStdio?.present && ` · 已留存 ${formatBytes(activeStdio.total_bytes)}（${activeStdio.segments} 段）`}
+                </div>
+                <div className={stdioTruncated ? 'font-semibold text-[var(--sem-zero-fg)]' : undefined}>
+                  {stdioTruncated
+                    ? `已截断 · 仅展示末尾至多 ${formatBytes(activeStdio?.detail_read_bytes ?? 128 * 1024)}、200 行`
+                    : activeStdio?.rotated ? '日志已轮转' : '详情仅展示日志尾部'}
+                </div>
               </div>
               <pre
                 aria-label="脱敏 stdout 与 stderr 日志输出"

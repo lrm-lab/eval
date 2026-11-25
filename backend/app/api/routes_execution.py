@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from app.api.deps import enforce_csrf, get_current_user, require_researcher
 from app.security.auth import AuthUser
 from app.services.execution_service import TERMINAL_STATUSES
+from app.services.telemetry_service import execution_telemetry_overview, job_telemetry, normalize_cgroup_telemetry
 
 router = APIRouter(prefix="/api/v1/execution", tags=["execution"])
 
@@ -19,7 +20,19 @@ def execution_capabilities(
     request: Request,
     user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return request.app.state.ctx.execution.get_capabilities(user)
+    capabilities = request.app.state.ctx.execution.get_capabilities(user)
+    telemetry = capabilities["runner_environment"]["telemetry"]
+    telemetry["container_cgroup"] = normalize_cgroup_telemetry(telemetry["container_cgroup"])
+    return capabilities
+
+
+@router.get("/telemetry")
+def execution_telemetry(
+    request: Request,
+    user: AuthUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Read-only optional telemetry: web cgroup v2 scope, stdio caps; admin additionally sees log/backup ops status."""
+    return execution_telemetry_overview(request.app.state.ctx.settings, include_ops=user.role == "admin")
 
 
 @router.post("/plan", dependencies=[Depends(enforce_csrf)])
@@ -65,7 +78,10 @@ def execution_get_job(
     request: Request,
     user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return request.app.state.ctx.execution.get_job_detail(user, job_id)
+    ctx = request.app.state.ctx
+    detail = ctx.execution.get_job_detail(user, job_id)
+    detail["telemetry"].update(job_telemetry(ctx.settings, job_id, detail["events"]))
+    return detail
 
 
 @router.post("/jobs/{job_id}/cancel", dependencies=[Depends(enforce_csrf)])
