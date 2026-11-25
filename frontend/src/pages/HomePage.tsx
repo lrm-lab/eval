@@ -5,11 +5,10 @@ import {
   AlertTriangle,
   ArrowRight,
   Clock,
-  Database,
   GitCompareArrows,
   Layers,
   ShieldCheck,
-  Sparkles,
+  Play,
   Trophy,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
@@ -142,56 +141,42 @@ export function HomePage() {
 
   return (
     <PageTransition>
-      {/* Hero Banner with GPU-only ambient drift & geometric grid */}
-      <section className="relative overflow-hidden border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]">
-        <div className="lrm-hero-ambient pointer-events-none" />
-        <div className="lrm-hero-grid pointer-events-none" />
-        <div className="relative z-10 max-w-7xl mx-auto px-5 py-10 md:py-12">
-          <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-6">
-            <div className="max-w-3xl">
-              <div className="inline-flex items-center gap-2 rounded-full border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/90 px-3 py-1 text-xs font-medium text-[var(--text-secondary)] mb-4">
-                <Sparkles className="w-3.5 h-3.5 text-[var(--brand-primary)]" />
-                <span>Harbor · Direct · VLMEvalKit · 2026-11-20 历史基线统一分析台</span>
-              </div>
-              <h1 className="m-0 text-3xl md:text-4xl font-bold tracking-tight text-[var(--text-primary)] leading-tight">
-                Agentic 提分主线 × 通用文本 &amp; 多模态护栏
-              </h1>
-              <p className="m-0 mt-3 text-sm md:text-base text-[var(--text-secondary)] leading-relaxed">
-                以严谨口径隔离多协议、多范围与运行故障，支持从宏观排行榜与 ARC Prize 效率前沿一键下钻至逐题 Split Diff 与 ATIF 工具轨迹显微镜。
-              </p>
-            </div>
-
-            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
-              <Link
-                to="/leaderboard"
-                className="inline-flex items-center gap-2 rounded-xl bg-[var(--brand-primary)] hover:bg-[var(--brand-hover)] px-4 py-2.5 text-sm font-semibold text-white no-underline lrm-press shadow-sm"
-              >
-                <Trophy className="w-4 h-4" />
-                <span>浏览综合主榜</span>
-              </Link>
-              <Link
-                to="/leaderboard?view=scatter"
-                className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] no-underline lrm-press"
-              >
-                <Sparkles className="w-4 h-4 text-[var(--best-cell)]" />
-                <span>ARC 效率前沿图</span>
-              </Link>
-              <Link
-                to="/eval/compare"
-                className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] no-underline lrm-press"
-              >
-                <GitCompareArrows className="w-4 h-4 text-[var(--brand-primary)]" />
-                <span>动态自由对比</span>
-              </Link>
-              <Link
-                to="/datasets"
-                className="inline-flex items-center gap-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-[var(--border-strong)] px-4 py-2.5 text-sm font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] no-underline lrm-press"
-              >
-                <Database className="w-4 h-4" />
-                <span>三线数据集树</span>
-              </Link>
-            </div>
-          </div>
+      <section aria-labelledby="home-hero-title" className="lrm-hero-bg">
+        <div aria-hidden="true" className="lrm-hero-grid" />
+        <div className="relative mx-auto max-w-7xl px-5 py-12 text-center sm:px-8 sm:py-16 lg:py-20">
+          <h1
+            id="home-hero-title"
+            className="m-0 text-[clamp(2rem,5.6vw,4.75rem)] leading-[1.12] font-bold tracking-[-0.045em] text-[var(--text-primary)]"
+          >
+            <span className="inline-block">大模型与 <span className="text-[var(--brand-primary)]">Agent</span></span>{' '}
+            <span className="inline-block">评测平台</span>
+          </h1>
+          <p className="mx-auto mt-4 mb-0 max-w-prose text-base leading-relaxed text-[var(--text-secondary)] sm:text-lg lg:text-xl">
+            运行评测、对比模型、追查每道题的证据
+          </p>
+          <nav aria-label="首页常用操作" className="mx-auto mt-7 grid max-w-sm grid-cols-2 gap-2.5 sm:flex sm:max-w-none sm:flex-wrap sm:justify-center">
+            <Link
+              to="/eval/execution"
+              className="lrm-press col-span-2 inline-flex min-h-11 items-center justify-center gap-2 rounded-xl bg-[color-mix(in_srgb,var(--brand-primary),black_24%)] px-5 py-2.5 text-sm font-semibold text-white no-underline shadow-sm hover:bg-[color-mix(in_srgb,var(--brand-primary),black_18%)]"
+            >
+              <Play aria-hidden="true" className="size-4" />
+              运行评测
+            </Link>
+            <Link
+              to="/leaderboard"
+              className="lrm-press inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] no-underline hover:border-[var(--brand-primary)] hover:bg-[var(--bg-elevated)]"
+            >
+              <Trophy aria-hidden="true" className="size-4 text-[var(--brand-primary)]" />
+              查看主榜
+            </Link>
+            <Link
+              to="/eval/compare"
+              className="lrm-press inline-flex min-h-11 items-center justify-center gap-2 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] px-4 py-2.5 text-sm font-semibold text-[var(--text-primary)] no-underline hover:border-[var(--brand-primary)] hover:bg-[var(--bg-elevated)]"
+            >
+              <GitCompareArrows aria-hidden="true" className="size-4 text-[var(--brand-primary)]" />
+              对比模型
+            </Link>
+          </nav>
         </div>
       </section>
 
@@ -317,7 +302,7 @@ export function HomePage() {
                   aria-label="选择三线对比组合"
                   value={selectedPresetIdx}
                   onChange={(e) => setSelectedPresetIdx(Number(e.target.value))}
-                  className="h-[30px] w-60 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-1 text-xs text-[var(--text-primary)] cursor-pointer"
+                  className="h-[30px] w-60 max-w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-1 text-xs text-[var(--text-primary)] cursor-pointer"
                 >
                   {presets.map((p, idx) => (
                     <option key={p.preset_id} value={idx}>
@@ -325,9 +310,12 @@ export function HomePage() {
                     </option>
                   ))}
                 </select>
-              ) : optsQ.isLoading ? (
-                <div className="lrm-skeleton h-[30px] w-60 rounded-lg" aria-hidden="true" />
-              ) : null}
+              ) : (
+                <div
+                  className={`h-[30px] w-60 max-w-full rounded-lg ${optsQ.isLoading ? 'lrm-skeleton' : 'invisible'}`}
+                  aria-hidden="true"
+                />
+              )}
 
               <SlidingTabs
                 layoutId="home-threshold-tabs"
