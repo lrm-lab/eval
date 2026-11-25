@@ -2360,7 +2360,9 @@ class ExecutionService:
         ]
         return str(row["status"]), events
 
-    def get_authorized_trial_evidence(self, user: AuthUser, job_id: str, trial_id: str) -> dict[str, Any]:
+    def get_authorized_trial_evidence(
+        self, user: AuthUser, job_id: str, trial_id: str, *, expected_batch: tuple[str, str] | None = None,
+    ) -> dict[str, Any]:
         """Serve restricted trial evidence from 0700 isolated evidence_store ONLY after:
         1. Project + Scope + Holdout authorization (S-02 / S-06), AND
         2. STRICT FAIL-CLOSED verification against committed `generation_id` (batches + reconciled),
@@ -2389,6 +2391,8 @@ class ExecutionService:
             )
         b_row = self.db.fetchone("SELECT generation_id FROM batches WHERE batch_id = ?", (batch_id,))
         committed_gen_id = str(b_row["generation_id"]).strip() if (b_row and b_row.get("generation_id")) else ""
+        if expected_batch is not None and (batch_id, committed_gen_id) != expected_batch:
+            raise AppError(409, "GENERATION_MISMATCH", "Runner 作业与试验的批次或发布代不一致，请刷新后重试")
         if not committed_gen_id:
             raise AppError(
                 409,

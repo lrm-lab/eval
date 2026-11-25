@@ -40,6 +40,18 @@ _GAIA_ATTACHMENT_EXTENSIONS = {
     ".csv", ".docx", ".jpg", ".jsonld", ".mp3", ".pdf", ".png",
     ".pdb", ".pptx", ".py", ".txt", ".xlsx", ".zip",
 }
+_TASK_BUNDLES = {
+    "gaia-validation-20261124.tar": {(): "gaia__2026-11-24__val"},
+    "wildclawbench-20261120-tasks.tar.zst": {(): "wildclawbench__2026-11-20__default"},
+    "pi-openclaw-20261120-core.tar": {
+        ("datasets", "deepswe", "tasks"): "deepswe__1.1__default",
+        ("datasets", "terminal-bench-2.1", "tasks"): "terminal-bench__2.1__default",
+    },
+}
+_CORE_TASK_ID_PREFIXES = {
+    "deepswe__1.1__default": "",
+    "terminal-bench__2.1__default": "terminal-bench/",
+}
 
 
 def _parse_iso_dt(val: str | None) -> float | None:
@@ -1281,11 +1293,8 @@ class ColdIndexer:
         if not b_dir.is_dir():
             return 0
         count = 0
-        bundle_map = {
-            "gaia-validation-20261124.tar": "gaia__2026-11-24__val",
-            "wildclawbench-20261120-tasks.tar.zst": "wildclawbench__2026-11-20__default",
-        }
-        for fname, rel_id in bundle_map.items():
+        for fname, task_releases in _TASK_BUNDLES.items():
+            release_ids = tuple(task_releases.values())
             if fname.endswith(".zst") and not include_large_zst:
                 continue
             fpath = b_dir / fname
@@ -1303,11 +1312,11 @@ class ColdIndexer:
                 )
                 if cached and (
                     cached["item_count"] == 0
-                    or self.db.fetchone(
+                    or all(self.db.fetchone(
                         """SELECT 1 FROM dataset_bundle_task_content
                            WHERE dataset_release_id = ? AND archive_path = ? LIMIT 1""",
                         (rel_id, cache_key),
-                    )
+                    ) for rel_id in release_ids)
                 ):
                     if cached["cache_kind"] != "bundle_tar":
                         with self.db.transaction() as conn:
@@ -1320,20 +1329,21 @@ class ColdIndexer:
                 if fname.endswith(".zst"):
                     dctx = zstd.ZstdDecompressor()
                     with open(fpath, "rb") as raw_fh, dctx.stream_reader(raw_fh) as zr, tarfile.open(fileobj=zr, mode="r|") as tf:
-                        tasks, content = self._read_bundle_tasks(tf, rel_id, fpath)
+                        tasks, content = self._read_bundle_tasks(tf, task_releases, fpath)
                 else:
                     with tarfile.open(fpath, "r:") as tf:
-                        tasks, content = self._read_bundle_tasks(tf, rel_id, fpath)
+                        tasks, content = self._read_bundle_tasks(tf, task_releases, fpath)
             except Exception as exc:
                 with self.db.transaction() as conn:
                     self._upsert_cache(conn, cache_key, "bundle_tar", st[1], st[2], 0, "error", str(exc))
                 continue
 
             with self.db.transaction() as conn:
-                rel_exists = conn.execute(
-                    "SELECT 1 FROM dataset_releases WHERE dataset_release_id = ?", (rel_id,)
-                ).fetchone()
-                if rel_exists:
+                for rel_id in release_ids:
+                    if not conn.execute(
+                        "SELECT 1 FROM dataset_releases WHERE dataset_release_id = ?", (rel_id,)
+                    ).fetchone():
+                        continue
                     conn.executemany(
                         """
                         INSERT INTO task_definitions (
@@ -1345,7 +1355,7 @@ class ColdIndexer:
                             category = excluded.category,
                             tags_json = excluded.tags_json
                         """,
-                        tasks,
+                        (row for row in tasks if row[0] == rel_id),
                     )
                     conn.execute("DELETE FROM dataset_bundle_task_content WHERE dataset_release_id = ?", (rel_id,))
                     conn.executemany(
@@ -1354,14 +1364,14 @@ class ColdIndexer:
                             (dataset_release_id, task_id, archive_path, instruction, attachments_json)
                         VALUES (?, ?, ?, ?, ?)
                         """,
-                        content,
+                        (row for row in content if row[0] == rel_id),
                     )
                 self._upsert_cache(conn, cache_key, "bundle_tar", st[1], st[2], len(tasks))
             count += len(tasks)
         return count
 
     def _read_bundle_tasks(
-        self, archive: tarfile.TarFile, release_id: str, path: Path
+        self, archive: tarfile.TarFile, task_releases: dict[tuple[str, ...], str], path: Path
     ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
         tasks: dict[PurePosixPath, tuple[Any, ...]] = {}
         instructions: dict[PurePosixPath, str] = {}
@@ -1373,14 +1383,22 @@ class ColdIndexer:
             if name.is_absolute() or ".." in name.parts:
                 continue
             if name.name in {"task.toml", "instruction.md"} and member.size <= _MAX_TASK_INSTRUCTION_BYTES:
+                task_prefix = name.parts[:-2]
+                release_id = task_releases.get(task_prefix) or task_releases.get(())
+                if release_id is None:
+                    continue
                 with archive.extractfile(member) as stream:
                     text = stream.read().decode("utf-8", errors="replace")
                 if name.name == "task.toml":
-                    tasks[name.parent] = self._toml_to_row(release_id, member.name, tomllib.loads(text))
+                    # Match the task IDs already published by each Harbor adapter.
+                    id_prefix = _CORE_TASK_ID_PREFIXES.get(release_id)
+                    task_id = None if id_prefix is None else f"{id_prefix}{name.parent.name}"
+                    tasks[name.parent] = self._toml_to_row(release_id, member.name, tomllib.loads(text), task_id=task_id)
                 else:
                     instructions[name.parent] = redact_text(text).strip()
             elif (
-                len(name.parts) == 5 and name.parts[0] == "gaia"
+                task_releases.get(()) == "gaia__2026-11-24__val"
+                and len(name.parts) == 5 and name.parts[0] == "gaia"
                 and name.parts[2:4] == ("environment", "workspace")
                 and name.stem == name.parts[1]
                 and name.suffix.lower() in _GAIA_ATTACHMENT_EXTENSIONS
@@ -1392,17 +1410,19 @@ class ColdIndexer:
                 attachments.setdefault(task_folder, {})[name.name] = {"member": member.name, "sha256": digest}
         # Keep one content row for each task ID, matching the upsert order of its metadata.
         content_by_id = {
-            row[1]: (release_id, row[1], str(path), instructions.get(folder), json.dumps(attachments.get(folder, {})))
+            (row[0], row[1]): (row[0], row[1], str(path), instructions.get(folder), json.dumps(attachments.get(folder, {})))
             for folder, row in tasks.items()
         }
         return list(tasks.values()), list(content_by_id.values())
 
     @staticmethod
-    def _toml_to_row(rel_id: str, member_name: str, parsed: dict[str, Any]) -> tuple[Any, ...]:
+    def _toml_to_row(
+        rel_id: str, member_name: str, parsed: dict[str, Any], *, task_id: str | None = None,
+    ) -> tuple[Any, ...]:
         task_sec = parsed.get("task") or {}
         meta_sec = parsed.get("metadata") or {}
         tdir = Path(member_name).parent.name
-        task_id = str(task_sec.get("name") or tdir)
+        task_id = task_id or str(task_sec.get("name") or tdir)
         return (
             rel_id,
             task_id,
@@ -1496,15 +1516,17 @@ class ColdIndexer:
                 prefix = f"{leg_root_str}/{dname}"
                 matched = [r for k, r in cache_rows.items() if k == prefix or k.startswith(prefix + "/")]
                 ready = [r for r in matched if r["status"] in ("ready", "partial_permission_denied")]
-                partial = [r for r in matched if r["status"] == "partial_permission_denied"]
-                errs = [r for r in matched if r["status"] in ("error", "permission_denied")]
+                denied = [r for r in matched if r["status"] in ("permission_denied", "partial_permission_denied")]
+                errors = [r for r in matched if r["status"] == "error"]
                 items_total = sum(int(r["item_count"] or 0) for r in ready)
-                if (ready and errs) or partial:
+                if ready and denied:
                     st = "partial_permission_denied"
+                elif denied:
+                    st = "permission_denied"
+                elif errors:
+                    st = "error"
                 elif ready:
                     st = "indexed"
-                elif errs:
-                    st = "error_or_permission_denied"
                 else:
                     st = "pending_cold_scan"
                 report.append(
@@ -1512,7 +1534,7 @@ class ColdIndexer:
                         "source": f"2026-11-20/{dname}",
                         "status": st,
                         "cached_files": len(ready),
-                        "error_files": len(errs),
+                        "error_files": len(errors) + len(denied),
                         "indexed_items": items_total,
                     }
                 )
@@ -1526,7 +1548,11 @@ class ColdIndexer:
                         "source": f"bundles/{bname}",
                         "status": c["status"]
                         if c
-                        else ("non_task_bundle" if any(k in bname for k in ("opencode", "pi-openclaw", "images")) else "pending_cold_scan"),
+                        else (
+                            "non_task_bundle"
+                            if bname not in _TASK_BUNDLES and any(k in bname for k in ("opencode", "pi-openclaw", "images"))
+                            else "pending_cold_scan"
+                        ),
                         "size_mb": round(bsize / (1024**2), 1),
                         "indexed_items": int(c["item_count"]) if c else 0,
                     }

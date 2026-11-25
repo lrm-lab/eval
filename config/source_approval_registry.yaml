@@ -86,6 +86,42 @@ sources:
     approval_status: "approved_restricted"
     approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
 
+  # Fourteen previously indexed non-holdout trajectories in these exact batches contain the recorded prompts and predictions.
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/ai2d-vlmkit-shared-single-20261124"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/cmmmu-vlmkit-qwen38-27b-20261124-nonthinking"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/cmmmu-vlmkit-qwen38-27b-20261124-verified"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/mm-ifeval-vlmkit-qwen38-27b-20261124"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/mmmu-pro-vlmkit-qwen38-27b-20261124"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
   # Failed 197 verification runs: result metadata only, with no captured trajectory.
   - source_root: "/home/share-data/tianxi_benches/harbor-runs/verify-ai2d-test-smoke-20261125T060504Z-35747"
     match_mode: "dir"
@@ -386,6 +422,14 @@ sources:
     approved_evidence_classes: ["public_task_metadata", "public_task_attachments"]
 
   - source_root: "/home/share-data/tianxi_benches/bundles/wildclawbench-20261120-tasks.tar.zst"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["public_task_metadata"]
+
+  # The cold index only extracts task metadata and instructions under the two registered task prefixes.
+  - source_root: "/home/share-data/tianxi_benches/bundles/pi-openclaw-20261120-core.tar"
     match_mode: "dir"
     project_id: "default"
     owner_id: "system"

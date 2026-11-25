@@ -21,9 +21,17 @@ interface TaskDetailResp {
   tags: string[];
   resources: Record<string, unknown>;
   instruction: string | null;
-  instruction_status: 'ready' | 'restricted' | 'unavailable';
+  instruction_status: 'ready' | 'restricted' | 'unavailable' | 'source_permission_denied' | 'source_unavailable';
   attachments: string[];
 }
+
+const INSTRUCTION_NOTICES = {
+  ready: '当前数据集版本未提供题干文件。',
+  restricted: '该题题干尚未开放读取。',
+  unavailable: '当前数据集版本未提供题干文件。',
+  source_permission_denied: '评测服务无权读取题干来源。',
+  source_unavailable: '题干来源暂时无法读取。',
+} satisfies Record<TaskDetailResp['instruction_status'], string>;
 
 export function TaskDetailPage() {
   const { datasetReleaseId = '', taskId = '' } = useParams<{ datasetReleaseId: string; taskId: string }>();
@@ -71,7 +79,7 @@ export function TaskDetailPage() {
               </article>
             ) : (
               <p className="m-0 text-sm text-[var(--text-muted)]">
-                {data.instruction_status === 'restricted' ? '该题题干尚未开放读取。' : '当前数据集版本尚无可读取的题干。'}
+                {INSTRUCTION_NOTICES[data.instruction_status] || INSTRUCTION_NOTICES.unavailable}
               </p>
             )}
             {data.attachments?.length > 0 && (

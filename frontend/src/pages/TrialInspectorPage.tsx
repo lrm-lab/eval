@@ -22,6 +22,7 @@ import { useAppStore } from '../lib/store';
 import type { AtifStep, BatchDTO, BatchTasksResponse, TrialDetailDTO } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { PairedAtifStepCard } from '../components/ui/PairedAtifStepCard';
+import { RunnerTrialEvidence } from '../components/ui/RunnerTrialEvidence';
 import { TokenBreakdownBar } from '../components/ui/TokenBreakdownBar';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
@@ -132,7 +133,7 @@ function getMissingEvidence(trial: TrialDetailDTO, batch?: BatchDTO): Partial<Re
       : '该试验未记录网关抓包。可在 gateway-* 批次查找。';
   }
 
-  if (!qaData && !trial.qa_redacted) {
+  if (!qaData && !trial.qa_redacted && !trial.qa_unavailable_reason) {
     if (qaBatch && trial.has_inline_media) {
       missing.qa = '该试验已索引内联图像，当前详情未提供可预览的图像。';
     } else if (batch?.runner === 'harbor' || batch?.runner === 'harbor_gateway') {
@@ -188,12 +189,27 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
     queryFn: () => apiFetch<BatchDTO>(`/api/v1/batches/${encodeURIComponent(batchId)}`),
   });
   const trial = trialQ.data;
+  const batch = batchQ.data;
+  const runnerQa = batch?.source_namespace === 'runner_published' &&
+    (batch.runner === 'direct' || batch.runner === 'vlmevalkit');
   const qaBody = trial?.qa?.vlmeval_result ?? trial?.qa?.direct_result;
-  const missing = useMemo(() => trial ? getMissingEvidence(trial, batchQ.data) : {}, [trial, batchQ.data]);
+  const missing = useMemo(() => {
+    const result = trial ? getMissingEvidence(trial, batch) : {};
+    if (runnerQa) delete result.qa;
+    return result;
+  }, [trial, batch, runnerQa]);
   const tab = selectedTab ?? (anchorStep ? 'atif' : 'overview');
   const missingReason = missing[tab];
   const hasTrial = Boolean(trial);
   const canReadTraining = user?.role === 'researcher' || user?.role === 'admin';
+  const needsRunnerEvidence = runnerQa && (tab === 'qa' || tab === 'verifier');
+  const runnerEvidenceQ = useQuery({
+    queryKey: ['runner-trial-evidence', batchId, trialId, trial?.generation_id, user?.user_id],
+    enabled: hasTrial && needsRunnerEvidence,
+    queryFn: () => apiFetch<{ evidence: Record<string, unknown> }>(
+      `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/runner-evidence`,
+    ),
+  });
 
   // SlidingTabs exposes a badge and icon slot. Attach the explanation to the whole tab button.
   useEffect(() => {
@@ -239,7 +255,7 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
 
   const verQ = useQuery({
     queryKey: ['trial-verifier', batchId, trialId],
-    enabled: hasTrial && tab === 'verifier',
+    enabled: hasTrial && tab === 'verifier' && !needsRunnerEvidence,
     queryFn: () =>
       apiFetch<VerifierOutResp>(
         `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/verifier-output`
@@ -248,7 +264,7 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
 
   const artQ = useQuery({
     queryKey: ['trial-artifacts', batchId, trialId],
-    enabled: hasTrial && tab === 'verifier',
+    enabled: hasTrial && tab === 'verifier' && !needsRunnerEvidence,
     queryFn: () =>
       apiFetch<ArtifactsResp>(
         `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/artifacts`
@@ -662,6 +678,21 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
             )}
           </div>
         ) : null
+      ) : needsRunnerEvidence ? (
+        runnerEvidenceQ.isLoading ? (
+          <TableSkeleton rows={3} cols={2} />
+        ) : runnerEvidenceQ.error instanceof ApiError && runnerEvidenceQ.error.status === 404 ? (
+          <StateNoticeCard title="暂无 Runner 证据" description={runnerEvidenceQ.error.message} />
+        ) : runnerEvidenceQ.isError ? (
+          <StateNoticeCard
+            kind={runnerEvidenceQ.error instanceof ApiError && runnerEvidenceQ.error.status === 403 ? 'forbidden' : 'error'}
+            title="Runner 证据读取失败"
+            description={runnerEvidenceQ.error.message}
+            onRetry={() => runnerEvidenceQ.refetch()}
+          />
+        ) : runnerEvidenceQ.data ? (
+          <RunnerTrialEvidence evidence={runnerEvidenceQ.data.evidence} verifier={tab === 'verifier'} />
+        ) : null
       ) : tab === 'verifier' ? (
         <div className="space-y-4 text-xs">
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4">
@@ -717,6 +748,8 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
         <div className="space-y-4 text-xs">
           {trial.qa_redacted ? (
             <StateNoticeCard kind="forbidden" title="Direct / VLMEvalKit 问答正文已脱敏" description={trial.qa_redacted_reason} />
+          ) : trial.qa_unavailable_reason ? (
+            <StateNoticeCard title="问答来源不可用" description={trial.qa_unavailable_reason} />
           ) : trial.qa ? (
             <>
               {trial.qa.media_count > 0 && (

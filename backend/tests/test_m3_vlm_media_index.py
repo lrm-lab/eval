@@ -43,10 +43,19 @@ def test_197_vlm_approvals_are_exact_and_limited_to_captured_evidence(tmp_path):
     ai2d = harbor_runs / "ai2d-vlmkit-qwen38-27b-20261124"
     assert registry.lookup_full(ai2d) == (*approval, captured)
     assert registry.lookup_full(ai2d.with_name(f"{ai2d.name}-rerun")) == (*approval, qa)
+    for name in (
+        "ai2d-vlmkit-shared-single-20261124",
+        "cmmmu-vlmkit-qwen38-27b-20261124-nonthinking",
+        "cmmmu-vlmkit-qwen38-27b-20261124-verified",
+        "mm-ifeval-vlmkit-qwen38-27b-20261124",
+        "mmmu-pro-vlmkit-qwen38-27b-20261124",
+    ):
+        assert registry.lookup_full(harbor_runs / name) == (*approval, captured)
+        assert registry.lookup_full(harbor_runs / f"{name}-rerun") == (*approval, qa)
     assert registry.lookup_full(harbor_runs / "vlmkit-qwen-ca-ai2d-holdout") == pending
 
 
-def test_legacy_vlm_media_indexed_and_backfilled_on_hot_scan(tmp_path, isolated_settings):
+def test_legacy_vlm_media_indexed_and_backfilled_on_hot_scan(tmp_path, isolated_settings, monkeypatch):
     cfg = isolated_settings
     cfg.tianxi_root = tmp_path / "external"
     cfg.dataset_root = tmp_path / "datasets"
@@ -170,3 +179,28 @@ def test_legacy_vlm_media_indexed_and_backfilled_on_hot_scan(tmp_path, isolated_
         assert media.content == image
         trajectory = client.get(f"{url}/trajectory")
         assert trajectory.status_code == 403 and trajectory.json()["error"]["code"] == "SCOPE_FORBIDDEN"
+
+        result_ref = json.loads(ctx.db.fetchone(
+            "SELECT evidence_refs_json FROM episodes WHERE batch_id = ? AND trial_id = ?",
+            (batch_id, trials["file"]),
+        )["evidence_refs_json"])["result"]
+        result_path = (batch / result_ref["rel_path"]).resolve()
+        read_bytes = Path.read_bytes
+
+        def deny_result(path):
+            if path == result_path:
+                raise PermissionError("internal source path")
+            return read_bytes(path)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(Path, "read_bytes", deny_result)
+            detail = client.get(url)
+            assert detail.status_code == 200
+            assert detail.json()["reward"] is not None
+            assert detail.json()["qa_unavailable_reason"] == "评测服务无权读取来源证据文件"
+            assert "qa" not in detail.json()
+
+        result_path.unlink()
+        detail = client.get(url)
+        assert detail.status_code == 200
+        assert detail.json()["qa_unavailable_reason"] == "目标证据文件不存在"

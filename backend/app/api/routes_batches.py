@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi.responses import Response
 
 from app.api.deps import get_current_user, require_researcher
@@ -86,6 +86,22 @@ def get_trial_detail(
     user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     return request.app.state.ctx.query.get_trial_detail(user, batch_id, trial_id)
+
+
+@router.get("/{batch_id}/trials/{trial_id}/runner-evidence")
+def get_runner_trial_evidence(
+    batch_id: str,
+    trial_id: str,
+    request: Request,
+    response: Response,
+    user: AuthUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    ctx = request.app.state.ctx
+    job_id, generation = ctx.query.get_runner_trial_binding(user, batch_id, trial_id)
+    response.headers["Cache-Control"] = "private, no-store"
+    return ctx.execution.get_authorized_trial_evidence(
+        user, job_id, trial_id, expected_batch=(batch_id, generation),
+    )
 
 
 @router.get("/{batch_id}/trials/{trial_id}/trajectory")
