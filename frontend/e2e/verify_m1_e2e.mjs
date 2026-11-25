@@ -147,14 +147,15 @@ async function main() {
   );
   await page.waitForTimeout(300);
 
+  assert((await page.getAttribute('html', 'data-theme')) === 'dark', 'Theme must default to dark');
   inpSamples.push(
     await sampleEventTimingInp(page, 'theme-toggle', async () => {
       await page.click('button[aria-label="切换明暗主题"]');
     })
   );
-  assert((await page.getAttribute('html', 'data-theme')) === 'dark', 'Theme did not switch to dark');
+  assert((await page.getAttribute('html', 'data-theme')) === 'light', 'Theme did not switch to light');
   await page.click('button[aria-label="切换明暗主题"]');
-  assert((await page.getAttribute('html', 'data-theme')) === 'light', 'Theme did not switch back to light');
+  assert((await page.getAttribute('html', 'data-theme')) === 'dark', 'Theme did not switch back to dark');
 
   await page.click('button[role="tab"]:has-text("Trend")');
   await page.waitForSelector('canvas', { timeout: 5000 });
@@ -182,7 +183,8 @@ async function main() {
   await page.mouse.click(shiftPoint.x, shiftPoint.y);
   await page.keyboard.up('Shift');
   await page.waitForSelector('text=已选 1 组', { timeout: 5000 });
-  const scatterSelectBtns = page.locator('button[aria-pressed="false"]');
+  const scatterSelectBtns = page.getByText('框选 / Shift+点选送对比：', { exact: true })
+    .locator('..').getByRole('button', { pressed: false });
   assert((await scatterSelectBtns.count()) >= 1, 'Expected >=1 remaining selectable scatter point on TB2.1');
   await scatterSelectBtns.nth(0).click();
   await page.waitForSelector('text=已选 2 组', { timeout: 5000 });
@@ -372,7 +374,7 @@ async function main() {
   await page.locator('#compare-task-diff tbody tr').first().click();
   await page.waitForSelector('[role="dialog"]:has-text("展开双栏 ATIF 轨迹 Diff")', { timeout: 8000 });
 
-  await page.locator('[role="dialog"] a:has-text("打开显微镜")').first().click();
+  await page.getByRole('dialog').getByRole('link', { name: '打开 Trial 显微镜' }).first().click();
   await page.waitForURL(/\/eval\/batches\/.*\/trials\//, { timeout: 10000 });
   await page.waitForSelector('text=总览 / 4阶段耗时 / 故障', { timeout: 10000 });
   await page.click('a:has-text("返回来源页")');

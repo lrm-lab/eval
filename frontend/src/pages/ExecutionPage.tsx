@@ -20,7 +20,6 @@ import {
   RefreshCw,
   RotateCcw,
   Server,
-  ShieldAlert,
   ShieldCheck,
   Square,
   Terminal,
@@ -751,7 +750,7 @@ export function ExecutionPage() {
   const canWrite = Boolean(user && ['researcher', 'admin'].includes(user.role));
 
   // ---------- Section 1: Test Configuration State ----------
-  const [kind, setKind] = useState<RunnerKind>('harbor');
+  const [runnerChoice, setKind] = useState<RunnerKind | null>(null);
   const [suiteId, setSuiteId] = useState<string>('');
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('all');
   const [tasksInput, setTasksInput] = useState<string>('');
@@ -792,6 +791,11 @@ export function ExecutionPage() {
     queryKey: ['execution-capabilities'],
     queryFn: () => apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities'),
   });
+  const configuredRunners = capsQ.data?.runner_environment.supported_runners ?? [];
+  const suggestedKind = capsQ.data?.runner_environment.isolated_runner_ready
+    ? capsQ.data.runner_kinds.find((runner) => configuredRunners.includes(runner.kind))?.kind
+    : undefined;
+  const kind = runnerChoice ?? suggestedKind ?? 'harbor';
 
   const jobsQ = useQuery({
     queryKey: ['execution-jobs'],
@@ -838,6 +842,7 @@ export function ExecutionPage() {
   useEffect(() => {
     const caps = capsQ.data;
     if (!caps) return;
+    if (runnerChoice === null && suggestedKind) setKind(suggestedKind);
     if (!suiteId && caps.suites.length > 0) {
       const targetRunner = kind === 'harbor_gateway' ? 'harbor' : kind;
       const match = caps.suites.find((s) => s.runner === targetRunner) || caps.suites[0];
@@ -849,7 +854,7 @@ export function ExecutionPage() {
         setGatewayProfileId(caps.gateway_profiles[0].profile_id);
       }
     }
-  }, [capsQ.data, gatewayProfileId, kind, suiteId]);
+  }, [capsQ.data, gatewayProfileId, kind, runnerChoice, suggestedKind, suiteId]);
 
   // Auto-select latest job from history if none selected yet
   useEffect(() => {
@@ -1351,24 +1356,14 @@ export function ExecutionPage() {
 
   // ---------- Computed View Data ----------
   const runnerKinds = capsQ.data?.runner_kinds ?? FALLBACK_RUNNER_KINDS;
-  const activeRunnerMeta = runnerKinds.find((r) => r.kind === kind) ?? FALLBACK_RUNNER_KINDS[0];
   const selectedSuite = capsQ.data?.suites.find((suite) => suite.suite_id === suiteId);
   const dockerGroupAttached =
     planResult?.docker_group_attached ?? capsQ.data?.runner_environment.docker_group_attached ?? false;
   const isolatedRunnerReady = Boolean(capsQ.data?.runner_environment.isolated_runner_ready);
-  const runnerPid = capsQ.data?.runner_environment.runner_pid;
-  const supportedRunners = capsQ.data?.runner_environment.supported_runners ?? [];
-  const activeRunnerAvailable = isolatedRunnerReady && supportedRunners.includes(kind);
+  const activeRunnerAvailable = isolatedRunnerReady && configuredRunners.includes(kind);
   const runnerStatus = capsQ.isPending
-    ? '正在检查运行器状态'
-    : !isolatedRunnerReady
-      ? '隔离 Runner 未连接'
-      : activeRunnerAvailable ? '隔离 Runner 就绪' : '当前运行器未启用';
-  const runnerDisconnectReason =
-    capsQ.data?.runner_environment.reason ??
-    (isolatedRunnerReady && !activeRunnerAvailable
-      ? `当前隔离 Runner 未启用 ${kind} 运行能力（已就绪: ${supportedRunners.join(', ') || '无'}）`
-      : null);
+    ? '正在检查运行状态'
+    : activeRunnerAvailable && !dockerGroupAttached ? '评测可启动' : '此模式暂不可启动';
   const workProbeOk = capsQ.data?.runner_environment.runner_work_isolation?.ok ?? true;
   const evProbeOk = capsQ.data?.runner_environment.evidence_store_isolation?.ok ?? true;
 
@@ -1528,23 +1523,17 @@ export function ExecutionPage() {
                     <span className="min-w-0">
                       <span className="block font-bold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[runner.kind]}</span>
                       <span className="block text-[11px] text-[var(--text-secondary)]">
-                        {runner.requires_docker ? '需隔离容器' : '无需容器'}
+                        {capsQ.isPending
+                          ? '正在检查状态'
+                          : isolatedRunnerReady && configuredRunners.includes(runner.kind)
+                            ? '已就绪 · 可启动'
+                            : '仅可预检'}
                       </span>
                     </span>
                   </button>
                 );
               })}
             </div>
-            <details className="group mt-2 text-[11px] text-[var(--text-secondary)]">
-              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md p-1 font-medium">
-                <Info aria-hidden="true" className="size-3.5" />
-                运行器能力与限制
-                <ChevronDown aria-hidden="true" className="size-3.5 group-open:rotate-180" />
-              </summary>
-              <p className="mt-1 rounded-md bg-[var(--bg-elevated)] px-3 py-2 leading-relaxed">
-                {activeRunnerMeta.notes}
-              </p>
-            </details>
           </ExecutionStep>
 
           <ExecutionStep number={2} title="选择题库与范围">
@@ -2068,33 +2057,15 @@ export function ExecutionPage() {
               {activeRunnerAvailable && !dockerGroupAttached
                 ? <CheckCircle2 aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
                 : <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />}
-              <span>
-                {runnerStatus}{isolatedRunnerReady && runnerPid ? ` (PID ${runnerPid})` : ''}
-              </span>
+              <span>{runnerStatus}</span>
             </div>
             <p className="text-[11px] leading-4">
               {capsQ.isPending
-                ? '稍候即可查看可用的运行能力。'
-                : dockerGroupAttached
-                  ? '检测到 Web 进程加入 Docker 组。请联系管理员移除该权限。'
-                  : activeRunnerAvailable
-                    ? '当前运行器可启动，作业将在独立进程执行。'
-                    : (
-                      <>
-                        {runnerDisconnectReason && <span className="block break-words">{runnerDisconnectReason}</span>}
-                        {isolatedRunnerReady ? '请选择已启用的运行器，或联系管理员开通。' : '请联系管理员启动隔离 Runner。仍可生成 --plan。'}
-                      </>
-                    )}
+                ? '正在查询当前可用的评测模式。'
+                : activeRunnerAvailable && !dockerGroupAttached
+                  ? '配置确认后即可启动，页面会实时更新进度。'
+                  : '可以选择其他已就绪的模式，或先生成本次评测的预检。'}
             </p>
-            <span
-              aria-label={`docker_group_attached: ${String(dockerGroupAttached)}`}
-              title="docker_group_attached"
-              className="flex flex-wrap items-center gap-x-1.5 text-[11px]"
-            >
-              {dockerGroupAttached ? <ShieldAlert aria-hidden="true" className="size-3 shrink-0" /> : <ShieldCheck aria-hidden="true" className="size-3 shrink-0" />}
-              <span>Web 进程{dockerGroupAttached ? '已加入 Docker 组' : '未加入 Docker 组'}</span>
-              <code className="text-[10px] text-[var(--text-secondary)]">docker_group_attached: {String(dockerGroupAttached)}</code>
-            </span>
           </div>
           {!canWrite && (
             <p className="flex items-start gap-1.5 text-[11px] text-[var(--text-secondary)]">
