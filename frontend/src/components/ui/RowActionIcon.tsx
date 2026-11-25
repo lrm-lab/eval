@@ -1,10 +1,11 @@
 import type { MouseEventHandler } from 'react';
-import { ArrowUpRight, ListTree, Microscope } from 'lucide-react';
+import { ArrowUpRight, Columns2, ListTree, Microscope } from 'lucide-react';
 import { Link, type To } from 'react-router-dom';
 import { useAppStore } from '../../lib/store';
 
 const variants = {
   microscope: { icon: Microscope, label: '打开 Trial 显微镜', color: 'from-indigo-600 to-violet-700' },
+  compare: { icon: Columns2, label: '打开同题对比', color: 'from-blue-600 to-violet-700' },
   details: { icon: ListTree, label: '查看详情', color: 'from-teal-600 to-cyan-700' },
   open: { icon: ArrowUpRight, label: '打开链接', color: 'from-blue-600 to-indigo-700' },
 };
