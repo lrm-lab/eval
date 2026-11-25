@@ -173,7 +173,7 @@ async function main() {
   await page.getByRole('heading', { name: '报告详情' }).waitFor({ timeout: 15000 });
   await page.getByText('summary_passthrough', { exact: true }).waitFor({ timeout: 15000 });
   await page.getByRole('button', { name: '返回报告列表' }).click();
-  await page.getByRole('link', { name: '查看离线报告：' + reportName }).waitFor({ timeout: 15000 });
+  await page.getByRole('button', { name: '查看离线报告：' + reportName }).waitFor({ timeout: 15000 });
   console.log('[OK] 6. Toolkit Verify 3 tabs + offline calc verified');
 
   // 7. Toolkit Params + Manuals + Upgraded Admin Health
