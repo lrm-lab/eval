@@ -173,8 +173,9 @@ async function main() {
   await recordCls('/toolkit/params');
 
   await page.goto(`${BASE_URL}/toolkit/manuals`, { waitUntil: 'networkidle' });
-  await page.waitForSelector('text=Manuals 框架与平台手册中心', { timeout: 15000 });
-  await page.waitForSelector('text=On this page', { timeout: 15000 });
+  const manual = page.getByRole('region', { name: '手册正文' });
+  await manual.getByRole('heading').first().waitFor({ timeout: 15000 });
+  await page.getByRole('navigation', { name: '章节目录' }).waitFor({ timeout: 15000 });
   await recordCls('/toolkit/manuals');
 
   await page.goto(`${BASE_URL}/admin/health`, { waitUntil: 'networkidle' });

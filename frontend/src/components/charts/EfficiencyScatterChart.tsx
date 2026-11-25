@@ -443,7 +443,7 @@ export function EfficiencyScatterChart({
         <ChartSkeleton height={height} />
       ) : query.isError ? (
         <StateNoticeCard kind="error" title="效率前沿数据加载失败" description={(query.error as Error).message} onRetry={() => query.refetch()} />
-      ) : !hasCoordinates ? (
+      ) : !data || !hasCoordinates ? (
         <div className="rounded-lg border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] px-4 py-6 text-center text-xs">
           <Sparkles className="mx-auto mb-2 h-6 w-6 text-[var(--sem-zero-fg)]" aria-hidden="true" />
           <div className="mb-1 font-semibold text-[var(--text-primary)]">

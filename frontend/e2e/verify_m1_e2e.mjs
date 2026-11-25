@@ -189,9 +189,14 @@ async function main() {
   await page.getByRole('button', { name: '选中项加入对比', exact: true }).click();
   await page.waitForSelector('[aria-label="悬浮对比停靠栏"]', { timeout: 5000 });
 
-  // Recorded cost coverage guardrail (0 plottable full coverage points -> honest warning!)
+  // Partial cost observations can be shown, but cannot enter the frontier.
   await page.selectOption('select[aria-label="切换 X 轴指标"]', 'recorded_cost_usd');
-  await page.waitForSelector('text=严禁绘制误导性前沿', { timeout: 8000 });
+  await page.getByText(/空心点使用部分试题|共同有效题缺少/).waitFor({ timeout: 8000 });
+  const hasCostFrontier = await page.evaluate(() => {
+    const element = Array.from(document.querySelectorAll('div')).find((el) => el.__lrmChart && el.querySelector('canvas'));
+    return Boolean(element?.__lrmChart.getOption().series?.some((series) => series.name === 'Pareto Frontier'));
+  });
+  assert(!hasCostFrontier, 'Partial recorded cost cannot contribute to the Pareto frontier');
   await page.selectOption('select[aria-label="切换 X 轴指标"]', 'duration_p50_sec');
   await page.waitForSelector('canvas', { timeout: 8000 });
 
