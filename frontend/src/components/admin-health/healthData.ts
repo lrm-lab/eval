@@ -229,8 +229,8 @@ export const BACKUPS: Record<string, { label: string; tone: Tone }> = {
 };
 
 export const SOURCE_STATUS: Record<string, string> = {
-  indexed: '已索引', ready: '就绪', running: '处理中', error: '失败', partial_permission_denied: '部分目录不可读',
-  permission_denied: '不可读', error_or_permission_denied: '失败或不可读', pending_cold_scan: '等待冷层扫描',
+  indexed: '已索引', ready: '就绪', running: '处理中', error: '索引失败', partial_permission_denied: '部分来源读取被拒',
+  permission_denied: '来源读取被拒', error_or_permission_denied: '失败或不可读', pending_cold_scan: '等待冷层扫描',
   non_task_bundle: '非任务归档', empty_contract_ready: '已接入 · 暂无数据',
   registered_media_source: '已登记媒体源', raw_visible_unintegrated: '尚未接入索引',
 };

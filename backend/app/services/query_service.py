@@ -190,12 +190,16 @@ class QueryService:
     def _verify_lazy_file(self, target_path: Path, expected_sha256: str | None) -> bytes:
         """Read lazy evidence file and verify sha256 against generation digest if recorded (I-01).
         Raises 409 GENERATION_MISMATCH on cross-generation overwrite!"""
-        if not target_path.is_file():
-            raise AppError(404, "RESOURCE_NOT_FOUND", "目标证据文件不存在")
         try:
+            if not target_path.is_file():
+                raise AppError(404, "RESOURCE_NOT_FOUND", "目标证据文件不存在")
             data = target_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise AppError(404, "RESOURCE_NOT_FOUND", "目标证据文件不存在") from exc
+        except PermissionError as exc:
+            raise AppError(503, "SOURCE_PERMISSION_DENIED", "评测服务无权读取来源证据文件") from exc
         except OSError as exc:
-            raise AppError(404, "RESOURCE_NOT_FOUND", f"证据文件无法读取: {exc}") from exc
+            raise AppError(503, "SOURCE_UNAVAILABLE", "来源证据文件暂时无法读取") from exc
         if expected_sha256:
             actual = _sha256_bytes(data)
             if actual != expected_sha256:
@@ -808,6 +812,27 @@ class QueryService:
             require_scope(user, "dataset:holdout_read")
         return batch, ep
 
+    def get_runner_trial_binding(self, user: AuthUser, batch_id: str, trial_id: str) -> tuple[str, str]:
+        batch, episode = self._load_batch_and_episode(user, batch_id, trial_id)
+        if batch["source_namespace"] != "runner_published":
+            raise AppError(404, "RESOURCE_NOT_FOUND", "该试验没有受管 Runner 证据")
+        generation = batch["generation_id"]
+        if not generation or episode["generation_id"] != generation:
+            raise AppError(409, "GENERATION_MISMATCH", "试验与批次发布代不一致，请刷新后重试")
+        jobs = self.db.fetchall(
+            """
+            SELECT job_id FROM exec_jobs
+            WHERE batch_id = ? AND project_id = ? AND owner_id = ? AND kind = ?
+            LIMIT 2
+            """,
+            (batch_id, batch["project_id"], batch["owner_id"], batch["runner"]),
+        )
+        if not jobs:
+            raise AppError(404, "RESOURCE_NOT_FOUND", "该试验没有已对账的 Runner 作业")
+        if len(jobs) != 1:
+            raise AppError(409, "GENERATION_MISMATCH", "该试验无法唯一匹配 Runner 作业")
+        return jobs[0]["job_id"], generation
+
     def get_trial_detail(self, user: AuthUser, batch_id: str, trial_id: str) -> dict[str, Any]:
         batch, ep = self._load_batch_and_episode(user, batch_id, trial_id)
         ev_refs = json.loads(ep.get("evidence_refs_json") or "{}")
@@ -879,7 +904,13 @@ class QueryService:
                 b_root = self._resolve_batch_root(batch)
                 if b_root and res_ref.get("rel_path"):
                     target = resolve_within_root(b_root, res_ref["rel_path"])
-                    raw = self._verify_lazy_file(target, res_ref.get("sha256"))
+                    try:
+                        raw = self._verify_lazy_file(target, res_ref.get("sha256"))
+                    except AppError as exc:
+                        if exc.status_code not in (404, 503):
+                            raise
+                        dto["qa_unavailable_reason"] = exc.message
+                        return dto
                     obj = json.loads(raw.decode("utf-8", errors="replace"))
                     strip_ans = not has_scope(user, "dataset:answer_read")
                     qa: dict[str, Any] = {}
@@ -2207,7 +2238,14 @@ class QueryService:
         )
         if row is None:
             raise AppError(404, "RESOURCE_NOT_FOUND", "历史样本偏移记录不存在")
-        raw_obj = read_legacy_sample_by_offset(target_file, int(row["start_offset"]), int(row["end_offset"]))
+        try:
+            raw_obj = read_legacy_sample_by_offset(target_file, int(row["start_offset"]), int(row["end_offset"]))
+        except FileNotFoundError as exc:
+            raise AppError(404, "RESOURCE_NOT_FOUND", "历史样本来源文件不存在") from exc
+        except PermissionError as exc:
+            raise AppError(503, "SOURCE_PERMISSION_DENIED", "评测服务无权读取历史样本来源文件") from exc
+        except OSError as exc:
+            raise AppError(503, "SOURCE_UNAVAILABLE", "历史样本来源文件暂时无法读取") from exc
         strip_ans = not has_scope(user, "dataset:answer_read")
         cleaned = redact_json_recursive(raw_obj, strip_answers=strip_ans)
         raw_refs = json.loads(row["media_refs_json"] or "[]")
@@ -2436,8 +2474,12 @@ class QueryService:
             else:
                 try:
                     instruction_text = redact_text(p.read_text(encoding="utf-8", errors="replace")).strip()
-                except OSError:
+                except FileNotFoundError:
                     pass
+                except PermissionError:
+                    instruction_status = "source_permission_denied"
+                except OSError:
+                    instruction_status = "source_unavailable"
         else:
             bundle, classes = self._get_dataset_bundle_content(
                 user, dataset_release_id, task_id, is_holdout=is_task_holdout
@@ -2490,6 +2532,8 @@ class QueryService:
                     raise AppError(404, "RESOURCE_NOT_FOUND", "题目附件不可读取")
                 with archive.extractfile(member) as stream:
                     data = stream.read()
+        except PermissionError as exc:
+            raise AppError(503, "SOURCE_PERMISSION_DENIED", "评测服务无权读取题目附件来源文件") from exc
         except (OSError, tarfile.TarError, KeyError):
             raise AppError(404, "RESOURCE_NOT_FOUND", "题目附件不可读取") from None
         if _sha256_bytes(data) != attachment["sha256"]:

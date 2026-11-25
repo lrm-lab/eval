@@ -443,6 +443,28 @@ def test_m3_i05_real_external_runner_direct_spoof_immunity_sse_replay_and_defaul
             assert ev_ok.json()["generation_id"] == generation_id
             assert ev_ok.json()["evidence"]["response"] == "4"
 
+            runner_evidence = f"/api/v1/batches/{batch_id}/trials/{tid1}/runner-evidence"
+            assert client.get(runner_evidence).json() == ev_ok.json()
+            for name, projects, scopes, code in (
+                ("evidence_viewer", ["default"], ["direct_vlm_qa:read"], None),
+                ("plain_viewer", ["default"], [], "SCOPE_FORBIDDEN"),
+                ("outside_viewer", ["other"], ["direct_vlm_qa:read"], "PROJECT_FORBIDDEN"),
+            ):
+                password = "RunnerViewerForEvidence!1"
+                create_user(ctx.db, username=name, password=password, projects=projects, scopes=scopes)
+                viewer = TestClient(app)
+                login_client(viewer, name, password)
+                evidence_response = viewer.get(runner_evidence)
+                if code:
+                    assert evidence_response.status_code == 403
+                    assert evidence_response.json()["error"]["code"] == code
+                else:
+                    assert evidence_response.status_code == 200
+                    evidence = evidence_response.json()["evidence"]
+                    assert evidence["response"] == "4"
+                    assert "answer" not in evidence
+                    assert evidence["verifier_log_redacted"] is True
+
             digest_file = ctx.settings.runner_work_dir / job_id / ".evidence-digests.json"
             orig_digest_text = digest_file.read_text(encoding="utf-8")
             orig_digest_obj = json.loads(orig_digest_text)
@@ -476,6 +498,7 @@ def test_m3_i05_real_external_runner_direct_spoof_immunity_sse_replay_and_defaul
             r_tamper = client.get(f"/api/v1/execution/jobs/{job_id}/evidence/{tid1}")
             assert r_tamper.status_code == 409
             assert r_tamper.json()["error"]["code"] == "GENERATION_MISMATCH"
+            assert client.get(runner_evidence).status_code == 409
 
             ctx.db.close_thread_connection()
 

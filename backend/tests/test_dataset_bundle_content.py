@@ -71,3 +71,57 @@ def test_existing_bundle_cache_upgrades_public_tasks_for_viewers(
     settings.source_approval_file.write_text("{}")
     ctx.query.approval_registry.reload()
     assert client.get(f"{api}/tasks/{task_id}").status_code == 403
+
+
+def test_core_bundle_indexes_only_task_folders_by_release(
+    isolated_settings: Settings, tmp_path: Path
+) -> None:
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    shutil.copyfile(isolated_settings.taxonomy_file, config_dir / "taxonomy.yaml")
+    settings = replace(isolated_settings, config_dir=config_dir, tianxi_root=tmp_path / "tianxi")
+    settings.bundles_dir.mkdir(parents=True)
+    archive = settings.bundles_dir / "pi-openclaw-20261120-core.tar"
+    roots = {
+        "datasets/deepswe/tasks/same-id": "DeepSWE task",
+        "datasets/terminal-bench-2.1/tasks/same-id": "Terminal task",
+        "datasets/terminal-bench-2.1/leaderboard/ci/template": "Internal template",
+    }
+    with tarfile.open(archive, "w") as bundle:
+        for folder, title in roots.items():
+            for basename, data in {
+                "task.toml": b'[task]\nname = "Human-readable title"\n',
+                "instruction.md": title.encode(),
+                "tests/expected_answer.txt": b"private test answer",
+            }.items():
+                member = tarfile.TarInfo(f"{folder}/{basename}")
+                member.size = len(data)
+                bundle.addfile(member, io.BytesIO(data))
+    settings.source_approval_file.write_text(json.dumps({
+        "sources": [{
+            "source_root": str(archive),
+            "approval_status": "approved_public",
+            "approved_evidence_classes": ["public_task_metadata"],
+        }],
+    }))
+    app = create_app(settings, run_startup_scan=False)
+    ctx = app.state.ctx
+    assert ctx.coordinator.cold.index_bundles_metadata() == 2
+    assert ctx.coordinator.cold.index_bundles_metadata() == 0
+
+    password = "ViewerForCoreTasks!1"
+    create_user(ctx.db, username="core_viewer", password=password, projects=["other-team"])
+    client = TestClient(app)
+    login_client(client, "core_viewer", password)
+    for release, task_id, expected in (
+        ("deepswe__1.1__default", "same-id", "DeepSWE task"),
+        ("terminal-bench__2.1__default", "terminal-bench/same-id", "Terminal task"),
+    ):
+        base = f"/api/v1/datasets/{release}"
+        rows = client.get(f"{base}/tasks").json()["items"]
+        assert [row["task_id"] for row in rows] == [task_id]
+        response = client.get(f"{base}/tasks/{task_id}")
+        assert response.status_code == 200
+        assert response.json()["instruction"] == expected
+        assert response.json()["attachments"] == []
+        assert client.get(f"{base}/task-attachments/expected_answer.txt", params={"task_id": task_id}).status_code == 403

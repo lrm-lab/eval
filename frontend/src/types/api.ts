@@ -387,6 +387,7 @@ export interface TrialDetailDTO {
   };
   qa_redacted?: boolean;
   qa_redacted_reason?: string;
+  qa_unavailable_reason?: string;
   methodology_version: string;
 }
 
