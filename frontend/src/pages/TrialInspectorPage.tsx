@@ -1,5 +1,5 @@
-import React, { useEffect, useMemo, useState } from 'react';
-import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import {
   AlertTriangle,
@@ -16,10 +16,10 @@ import {
   Radio,
   Terminal,
 } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import { ApiError, apiFetch } from '../lib/api';
 import { fmtDuration } from '../lib/format';
 import { useAppStore } from '../lib/store';
-import type { AtifStep, BatchTasksResponse, TrialDetailDTO } from '../types/api';
+import type { AtifStep, BatchDTO, BatchTasksResponse, TrialDetailDTO } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { PairedAtifStepCard } from '../components/ui/PairedAtifStepCard';
 import { TokenBreakdownBar } from '../components/ui/TokenBreakdownBar';
@@ -64,9 +64,98 @@ interface TrainingCaptureResp {
   summary?: Record<string, unknown>;
 }
 
+const TABS = [
+  { id: 'overview', label: '总览 / 4阶段耗时 / 故障', icon: Clock },
+  { id: 'atif', label: 'ATIF 工具轨迹', icon: Terminal },
+  { id: 'gateway', label: 'OpenEnv 网关抓包', icon: Radio },
+  { id: 'verifier', label: '验证器日志 & 产物', icon: FileCode2 },
+  { id: 'qa', label: 'Direct / VLM 问答与图像', icon: ImageIcon },
+  { id: 'training', label: '训练轨迹采集', icon: Cpu },
+] as const;
+
+type TrialTab = (typeof TABS)[number]['id'];
+type EvidenceTab = 'atif' | 'gateway' | 'qa' | 'training';
+
+const EMPTY_NOTICES: Record<EvidenceTab, { title: string; label: string; to: string }> = {
+  atif: {
+    title: '暂无 ATIF 工具轨迹',
+    label: '查看 Harbor 批次',
+    to: '/eval/reports?runner=harbor',
+  },
+  gateway: {
+    title: '暂无 OpenEnv 网关抓包',
+    label: '查看含网关抓包的批次',
+    to: '/eval/reports?has_gateway=true',
+  },
+  qa: {
+    title: '暂无 Direct / VLM 问答与图像',
+    label: '查看 VLMEvalKit 批次',
+    to: '/eval/reports?runner=vlmevalkit',
+  },
+  training: {
+    title: '暂无训练轨迹',
+    label: '查看训练轨迹采集条件',
+    to: '/training/opd',
+  },
+};
+
+function TrialDataNotice({ tab, reason }: { tab: EvidenceTab; reason: string }) {
+  const { title, label, to } = EMPTY_NOTICES[tab];
+  return (
+    <StateNoticeCard
+      title={title}
+      description={reason}
+      action={<Link to={to} className="font-medium text-xs text-[var(--brand-primary)] hover:underline">{label}</Link>}
+    />
+  );
+}
+
+function getMissingEvidence(trial: TrialDetailDTO, batch?: BatchDTO): Partial<Record<TrialTab, string>> {
+  const { trajectory_status: trajectory, gateway_status: gateway, training_status: training } = trial;
+  const missing: Partial<Record<TrialTab, string>> = {};
+  const qaBatch = batch?.runner === 'direct' || batch?.runner === 'vlmevalkit';
+  const qaIndexed = trajectory === 'direct_response' || trajectory === 'model_request_response';
+  const qaData = trial.qa?.direct_result || trial.qa?.vlmeval_result || (trial.qa?.media_count ?? 0) > 0;
+
+  if (trajectory === 'invalid') missing.atif = '已采集的 ATIF 轨迹无法解析。';
+  if (trajectory === 'missing' || qaIndexed) {
+    missing.atif = qaBatch || qaIndexed
+      ? '该试验的模型请求与回答在 Direct / VLM 标签下查看。'
+      : '该试验未导出 ATIF 工具轨迹。';
+  }
+
+  if (gateway === 'invalid') missing.gateway = '该试验的网关抓包无法解析。';
+  if (gateway === 'empty') missing.gateway = '网关采集已开启，但本次未记录有效请求轮次。';
+  if (gateway === 'not_captured' || (gateway == null && batch?.has_gateway === false)) {
+    missing.gateway = batch?.has_gateway === false
+      ? '该批次未经网关采集。可在 gateway-* 批次查找。'
+      : '该试验未记录网关抓包。可在 gateway-* 批次查找。';
+  }
+
+  if (!qaData && !trial.qa_redacted) {
+    if (qaBatch && trial.has_inline_media) {
+      missing.qa = '该试验已索引内联图像，当前详情未提供可预览的图像。';
+    } else if (batch?.runner === 'harbor' || batch?.runner === 'harbor_gateway') {
+      missing.qa = 'Agentic 任务无 Direct / VLM 问答结构。多模态样本见 *-vlmkit-* 批次。';
+    } else {
+      missing.qa = '该试验暂无结构化问答或可预览图像。可查看 Direct 或 *-vlmkit-* 批次。';
+    }
+  }
+
+  if (training === 'not_captured' || training === 'missing' || training == null) {
+    missing.training = training == null ? '该试验暂无已索引的训练采集记录。' : '该试验未开启训练采集。';
+  }
+  return missing;
+}
+
 export function TrialInspectorPage() {
   const { batchId = '', trialId = '' } = useParams<{ batchId: string; trialId: string }>();
+  return <TrialInspector key={JSON.stringify([batchId, trialId])} batchId={batchId} trialId={trialId} />;
+}
+
+function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string }) {
   const [searchParams] = useSearchParams();
+  const { hash } = useLocation();
   const navigate = useNavigate();
   const pushToast = useAppStore((s) => s.pushToast);
   const user = useAppStore((s) => s.user);
@@ -77,7 +166,9 @@ export function TrialInspectorPage() {
       ? returnToRaw
       : `/eval/batches/${encodeURIComponent(batchId)}`;
 
-  const [tab, setTab] = useState<'overview' | 'atif' | 'gateway' | 'verifier' | 'qa' | 'training'>('overview');
+  const [selectedTab, setSelectedTab] = useState<TrialTab | null>(null);
+  const tabsRef = useRef<HTMLDivElement>(null);
+  const anchorStep = /^#step-(\d+)$/.exec(hash)?.[1];
   const [onlyTools, setOnlyTools] = useState(false);
   const [stepOffset, setStepOffset] = useState(0);
   const [globalReasonOpen, setGlobalReasonOpen] = useState<boolean | undefined>(undefined);
@@ -92,6 +183,32 @@ export function TrialInspectorPage() {
       apiFetch<TrialDetailDTO>(`/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}`),
   });
 
+  const batchQ = useQuery({
+    queryKey: ['batch-detail', batchId],
+    queryFn: () => apiFetch<BatchDTO>(`/api/v1/batches/${encodeURIComponent(batchId)}`),
+  });
+  const trial = trialQ.data;
+  const qaBody = trial?.qa?.vlmeval_result ?? trial?.qa?.direct_result;
+  const missing = useMemo(() => trial ? getMissingEvidence(trial, batchQ.data) : {}, [trial, batchQ.data]);
+  const tab = selectedTab ?? (anchorStep ? 'atif' : 'overview');
+  const missingReason = missing[tab];
+  const hasTrial = Boolean(trial);
+  const canReadTraining = user?.role === 'researcher' || user?.role === 'admin';
+
+  // SlidingTabs exposes a badge and icon slot. Attach the explanation to the whole tab button.
+  useEffect(() => {
+    tabsRef.current?.querySelectorAll<HTMLElement>('[role="tab"]').forEach((button) => {
+      const reason = button.querySelector<HTMLElement>('[data-trial-empty]')?.dataset.trialEmpty;
+      if (reason) {
+        button.title = reason;
+        button.setAttribute('aria-description', reason);
+      } else {
+        button.removeAttribute('title');
+        button.removeAttribute('aria-description');
+      }
+    });
+  }, [missing]);
+
   // Load batch tasks for Prev/Next & keyboard shortcuts j/k, [/]
   const batchTasksQ = useQuery({
     queryKey: ['batch-tasks', batchId],
@@ -100,7 +217,7 @@ export function TrialInspectorPage() {
 
   const trajQ = useQuery({
     queryKey: ['trial-traj', batchId, trialId, stepOffset, onlyTools],
-    enabled: tab === 'atif',
+    enabled: hasTrial && tab === 'atif' && !missingReason,
     queryFn: () =>
       apiFetch<TrajectoryResp>(
         `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(
@@ -111,7 +228,7 @@ export function TrialInspectorPage() {
 
   const gwQ = useQuery({
     queryKey: ['trial-gw', batchId, trialId, includeGwTools],
-    enabled: tab === 'gateway',
+    enabled: hasTrial && tab === 'gateway' && !missingReason,
     queryFn: () =>
       apiFetch<GatewayResp>(
         `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(
@@ -122,7 +239,7 @@ export function TrialInspectorPage() {
 
   const verQ = useQuery({
     queryKey: ['trial-verifier', batchId, trialId],
-    enabled: tab === 'verifier',
+    enabled: hasTrial && tab === 'verifier',
     queryFn: () =>
       apiFetch<VerifierOutResp>(
         `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/verifier-output`
@@ -131,7 +248,7 @@ export function TrialInspectorPage() {
 
   const artQ = useQuery({
     queryKey: ['trial-artifacts', batchId, trialId],
-    enabled: tab === 'verifier',
+    enabled: hasTrial && tab === 'verifier',
     queryFn: () =>
       apiFetch<ArtifactsResp>(
         `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/artifacts`
@@ -140,7 +257,7 @@ export function TrialInspectorPage() {
 
   const trainQ = useQuery({
     queryKey: ['trial-training', batchId, trialId],
-    enabled: tab === 'training' && Boolean(user && ['researcher', 'admin'].includes(user.role)),
+    enabled: hasTrial && tab === 'training' && !missingReason && canReadTraining,
     queryFn: () =>
       apiFetch<TrainingCaptureResp>(
         `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/training-capture`
@@ -190,7 +307,6 @@ export function TrialInspectorPage() {
     return () => window.removeEventListener('keydown', onKey);
   }, [navInfo]);
 
-  const trial = trialQ.data;
   const phaseTimings = trial?.phase_timings || null;
   const phaseEntries = phaseTimings
     ? Object.entries(phaseTimings).filter(([, v]) => v !== null && v !== undefined && Number.isFinite(v))
@@ -206,20 +322,11 @@ export function TrialInspectorPage() {
     }
   };
 
-  // Honor deep-link anchor #step-N on mount or tab load (02-3 §3)
   useEffect(() => {
-    const hash = window.location.hash;
-    const m = /^#step-(\d+)$/.exec(hash);
-    if (!m) return;
-    const sid = Number(m[1]);
-    if (tab !== 'atif') {
-      setTab('atif');
-      return;
-    }
-    if (trajQ.data?.steps?.length) {
-      window.setTimeout(() => jumpToStep(sid), 120);
-    }
-  }, [tab, trajQ.data]);
+    if (tab !== 'atif' || !anchorStep || !trajQ.data?.steps.length) return;
+    const timer = window.setTimeout(() => jumpToStep(Number(anchorStep)), 120);
+    return () => window.clearTimeout(timer);
+  }, [tab, anchorStep, trajQ.data]);
 
   return (
     <PageTransition className="max-w-7xl mx-auto px-5 py-5 space-y-5">
@@ -282,20 +389,18 @@ export function TrialInspectorPage() {
         </div>
       </div>
 
-      <div className="overflow-x-auto pb-1">
+      <div ref={tabsRef} className="overflow-x-auto pb-1 [&_[role=tab]]:whitespace-nowrap [&_[role=tab]:not([aria-selected=true]):has([data-trial-empty])]:text-[var(--text-muted)]!">
         <SlidingTabs
           layoutId="trial-microscope-tabs"
           size="sm"
           value={tab}
-          onChange={(v) => setTab(v as typeof tab)}
-          options={[
-            { id: 'overview', label: '总览 / 4阶段耗时 / 故障', icon: <Clock className="w-3.5 h-3.5" /> },
-            { id: 'atif', label: 'ATIF 工具轨迹', icon: <Terminal className="w-3.5 h-3.5" /> },
-            { id: 'gateway', label: 'OpenEnv 网关抓包', icon: <Radio className="w-3.5 h-3.5" /> },
-            { id: 'verifier', label: '验证器日志 & 产物', icon: <FileCode2 className="w-3.5 h-3.5" /> },
-            { id: 'qa', label: 'Direct / VLM 问答与图像', icon: <ImageIcon className="w-3.5 h-3.5" /> },
-            { id: 'training', label: '训练轨迹采集', icon: <Cpu className="w-3.5 h-3.5" /> },
-          ]}
+          onChange={(value) => setSelectedTab(value as TrialTab)}
+          options={TABS.map(({ id, label, icon: Icon }) => ({
+            id,
+            label,
+            icon: <span className="inline-flex shrink-0" data-trial-empty={missing[id]}><Icon className="w-3.5 h-3.5" /></span>,
+            badge: missing[id] ? '无数据' : undefined,
+          }))}
         />
       </div>
 
@@ -303,7 +408,9 @@ export function TrialInspectorPage() {
         <TableSkeleton rows={6} cols={3} />
       ) : trialQ.isError ? (
         <StateNoticeCard kind="error" title="Trial 详情加载失败" description={(trialQ.error as Error).message} onRetry={() => trialQ.refetch()} />
-      ) : !trial ? null : tab === 'overview' ? (
+      ) : !trial ? null : missingReason && tab !== 'overview' && tab !== 'verifier' ? (
+        <TrialDataNotice tab={tab} reason={missingReason} />
+      ) : tab === 'overview' ? (
         <div className="space-y-4 text-xs">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 space-y-2">
@@ -407,7 +514,11 @@ export function TrialInspectorPage() {
         trajQ.isLoading ? (
           <TableSkeleton rows={6} cols={2} />
         ) : trajQ.isError ? (
-          <StateNoticeCard kind="forbidden" title="ATIF 轨迹不可用或无 trace:read 权限" description={(trajQ.error as Error).message} />
+          trajQ.error instanceof ApiError && trajQ.error.status === 404 ? (
+            <TrialDataNotice tab="atif" reason="该试验未导出 ATIF 工具轨迹。" />
+          ) : (
+            <StateNoticeCard kind="error" title="ATIF 轨迹读取失败" description={trajQ.error.message} onRetry={() => trajQ.refetch()} />
+          )
         ) : trajQ.data ? (
           <div className="space-y-4">
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 flex flex-wrap items-center justify-between gap-2 text-xs">
@@ -510,7 +621,11 @@ export function TrialInspectorPage() {
         gwQ.isLoading ? (
           <TableSkeleton rows={5} cols={2} />
         ) : gwQ.isError ? (
-          <StateNoticeCard kind="empty" title="该 Trial 无 OpenEnv 网关抓包" description={(gwQ.error as Error).message} />
+          gwQ.error instanceof ApiError && gwQ.error.status === 404 ? (
+            <TrialDataNotice tab="gateway" reason="该试验未记录网关抓包。可在 gateway-* 批次查找。" />
+          ) : (
+            <StateNoticeCard kind="error" title="网关抓包读取失败" description={gwQ.error.message} onRetry={() => gwQ.refetch()} />
+          )
         ) : gwQ.data ? (
           <div className="space-y-4 text-xs">
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 flex flex-wrap items-center justify-between gap-3">
@@ -628,27 +743,29 @@ export function TrialInspectorPage() {
                 </div>
               )}
 
-              <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4">
-                <div className="font-bold text-[var(--text-primary)] mb-2">问答记录正文</div>
-                <pre className="m-0 rounded-lg bg-[var(--bg-elevated)] p-3 text-[11px] font-mono whitespace-pre-wrap break-words max-h-[60vh] overflow-y-auto">
-                  {JSON.stringify(trial.qa.vlmeval_result || trial.qa.direct_result || trial.qa, null, 2)}
-                </pre>
-              </div>
+              {qaBody && (
+                <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4">
+                  <div className="font-bold text-[var(--text-primary)] mb-2">问答记录正文</div>
+                  <pre className="m-0 rounded-lg bg-[var(--bg-elevated)] p-3 text-[11px] font-mono whitespace-pre-wrap break-words max-h-[60vh] overflow-y-auto">
+                    {JSON.stringify(qaBody, null, 2)}
+                  </pre>
+                </div>
+              )}
             </>
           ) : (
-            <StateNoticeCard kind="empty" title="该 Trial 不含 Direct / VLMEvalKit 问答结构" description="Agentic 批次请切换至 ATIF 工具轨迹或 OpenEnv 网关抓包标签页。" />
+            <TrialDataNotice tab="qa" reason="该试验暂无结构化问答或可预览图像。" />
           )}
         </div>
       ) : (
         <div className="text-xs">
-          {!user || !['researcher', 'admin'].includes(user.role) ? (
+          {!canReadTraining ? (
             <StateNoticeCard kind="forbidden" title="仅 Researcher / Admin 可查阅训练轨迹采集" />
           ) : trainQ.isLoading ? (
             <TableSkeleton rows={4} cols={2} />
           ) : trainQ.isError ? (
             <StateNoticeCard kind="error" title="训练轨迹读取失败" description={(trainQ.error as Error).message} />
           ) : trainQ.data && !trainQ.data.captured ? (
-            <StateNoticeCard kind="empty" title="未开启训练轨迹采集 (not_captured)" description={trainQ.data.message} />
+            <TrialDataNotice tab="training" reason={trainQ.data.message || '该试验暂无训练采集记录。'} />
           ) : trainQ.data ? (
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 space-y-2">
               <div className="font-mono text-[11px] text-[var(--text-secondary)]">
