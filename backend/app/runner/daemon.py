@@ -5,7 +5,7 @@ Runs as a COMPLETELY SEPARATE OS process from the FastAPI Web server (NEVER in-p
 Exposes an authenticated HTTP-over-Unix-Socket (0600) or loopback HTTP IPC interface (`X-Runner-Token`)
 for:
   - `GET  /health`                      : live probe of runner PID/UID, 0700 dirs, managed framework SHA-256,
-                                          real Docker reachability, real VLMEvalKit runtime, and Direct readiness.
+                                          real Docker reachability, OpenEnv capture, VLMEvalKit, and Direct readiness.
   - `POST /v1/jobs`                     : dispatches REAL managed `direct.py` / `run.py` / `vlmevalkit.py` workers
                                           inside `0700` `--work` & `0700` `evidence_store` with scrubbed env,
                                           stdout/stderr strictly redirected to `0600 runner_stdio.log` (NEVER parsed!),
@@ -93,6 +93,35 @@ def _probe_docker_available() -> bool:
         return r.returncode == 0
     except (OSError, subprocess.SubprocessError):
         return False
+
+
+def _probe_harbor_gateway_runtime(python_exe: str, extra_env: dict[str, str], work_dir: Path | None) -> bool:
+    if not os.path.isabs(python_exe):
+        return False
+    # Use the worker interpreter and configured Python path. Probe imports only,
+    # without opening a capture service or passing gateway credentials.
+    probe = """
+from uvicorn import Server
+from openenv.core.harness.capture.server import create_app
+from openenv.core.harness.capture.export import export_session
+from openenv.harbor.rollout import run_rollout
+
+raise SystemExit(0 if all(map(callable, (Server, create_app, export_session, run_rollout))) else 1)
+"""
+    try:
+        result = subprocess.run(
+            [python_exe, "-P", "-c", probe],
+            cwd=work_dir,
+            env=build_sanitized_subprocess_env(extra_env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=6.0,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
 
 
 def _probe_vlmevalkit_ready() -> bool:
@@ -213,6 +242,20 @@ class IsolatedRunnerManager:
         self._job_stdio_reservation_bytes = seg_bytes * (1 + MAX_JOB_STDIO_BACKUP_COUNT)
         self._job_stdio_max_total_bytes = tot_bytes
 
+        self._gateway_python = os.environ.get("LRM_RUNNER_OPENENV_PYTHON", "").strip() or sys.executable
+        self._gateway_env = {"PYTHONNOUSERSITE": "1", "LITELLM_LOCAL_MODEL_COST_MAP": "True"}
+        if openenv_path := os.environ.get("LRM_RUNNER_OPENENV_PYTHONPATH"):
+            self._gateway_env["PYTHONPATH"] = openenv_path
+        # Imports can take longer than the Web's IPC health budget. The worker
+        # environment is selected and probed once when this Runner starts.
+        self._gateway_runtime_ready = _probe_harbor_gateway_runtime(
+            self._gateway_python, self._gateway_env, self.settings.runner_work_dir,
+        )
+        if not self._gateway_runtime_ready and (
+            "LRM_RUNNER_OPENENV_PYTHON" in os.environ or "LRM_RUNNER_OPENENV_PYTHONPATH" in os.environ
+        ):
+            self.logger.warning("Harbor Gateway capture imports failed in the configured OpenEnv interpreter")
+
     def health(self) -> dict[str, Any]:
         try:
             work_probe = probe_isolated_dir(self.settings.runner_work_dir, create=True)  # type: ignore[arg-type]
@@ -234,7 +277,9 @@ class IsolatedRunnerManager:
         if direct_ok:
             supported.append("direct")
         if docker_ok and mf_probe.get("ok"):
-            supported.extend(["harbor", "harbor_gateway"])
+            supported.append("harbor")
+            if self._gateway_runtime_ready:
+                supported.append("harbor_gateway")
         if vlm_ok and mf_probe.get("ok"):
             supported.append("vlmevalkit")
 
@@ -252,6 +297,7 @@ class IsolatedRunnerManager:
             "runner_uid": os.getuid(),
             "runner_user": runner_user,
             "docker_available": docker_ok,
+            "harbor_gateway_runtime_ready": self._gateway_runtime_ready,
             "vlmevalkit_ready": vlm_ok,
             "direct_ready": direct_ok,
             "supported_runners": supported,
@@ -311,6 +357,12 @@ class IsolatedRunnerManager:
                 "code": "RUNNER_CAPABILITY_UNAVAILABLE",
                 "message": "当前隔离 Runner 节点未连接 Docker 守护进程，拒绝执行 Harbor 容器作业（零模拟评分兜底）",
                 "detail": {"kind": kind, "docker_available": False},
+            }
+        if kind == "harbor_gateway" and not h["harbor_gateway_runtime_ready"]:
+            return 503, {
+                "code": "RUNNER_CAPABILITY_UNAVAILABLE",
+                "message": "当前隔离 Runner 的 OpenEnv 采集依赖未就绪，暂不可运行 Harbor Gateway 作业",
+                "detail": {"kind": kind, "harbor_gateway_runtime_ready": False},
             }
         if kind == "vlmevalkit" and not h["vlmevalkit_ready"]:
             return 503, {
@@ -621,8 +673,9 @@ class IsolatedRunnerManager:
         run_py = resolve_verified_managed_script(self.settings, "run.py")
         resolved_toml = materialize_managed_run_config(self.settings, spec, effective_work_dir)
         raw_output_root = effective_work_dir / "raw-output"
+        uses_gateway = spec["kind"] == "harbor_gateway"
         cmd = build_managed_run_py_command(
-            python_exe=sys.executable,
+            python_exe=self._gateway_python if uses_gateway else sys.executable,
             run_py_path=str(run_py),
             spec=spec,
             config_path=str(resolved_toml),
@@ -644,8 +697,8 @@ class IsolatedRunnerManager:
         if is_vlm and os.environ.get("REQUESTS_CA_BUNDLE"):
             # The native toolkit uses requests, which otherwise uses its bundled CA set.
             extra_env["REQUESTS_CA_BUNDLE"] = os.environ["REQUESTS_CA_BUNDLE"]
-        if os.environ.get("LRM_RUNNER_OPENENV_PYTHONPATH"):
-            extra_env["PYTHONPATH"] = os.environ["LRM_RUNNER_OPENENV_PYTHONPATH"]
+        if uses_gateway:
+            extra_env.update(self._gateway_env)
 
         child_env = build_sanitized_subprocess_env(extra_env)
         proc = subprocess.Popen(

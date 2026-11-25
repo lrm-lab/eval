@@ -365,6 +365,7 @@ class ExecutionService:
             "runner_pid": runner_pid if separate_process else None,
             "runner_user": ipc_health.get("runner_user"),
             "docker_available": bool(ipc_health.get("docker_available", False)),
+            "harbor_gateway_runtime_ready": bool(ipc_health.get("harbor_gateway_runtime_ready", False)),
             "vlmevalkit_ready": bool(ipc_health.get("vlmevalkit_ready", False)),
             "direct_ready": bool(ipc_health.get("direct_ready", False)),
             "supported_runners": list(ipc_health.get("supported_runners") or []),
