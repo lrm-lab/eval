@@ -448,6 +448,43 @@ benchmarks:
           - raw_dataset_name: "tianxi-synth-v1-holdout"
             inferred_run_scope: null
 
+  # Separate pilot publication with its own Harbor task names and train/holdout lists.
+  - benchmark_slug: "synth-atif"
+    display_name: "Synth ATIF Pilot"
+    track_slug: "synthetic"
+    capability: "原生 ATIF 合成任务 (Synthetic Agent Tasks)"
+    modality: "agent"
+    language: "en"
+    status: "integrated"
+    core_14: false
+    releases:
+      - dataset_release_id: "synth-atif__20261124t100740z__train"
+        dataset_version: "20261124t100740z"
+        split: "train"
+        runner: "harbor"
+        known_task_count: 4
+        metric_name: "reward"
+        default_protocol: "lrm-eval-report-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_restricted"
+        aliases:
+          - raw_dataset_name: "synth-atif-20261124t100740z-train"
+            source_namespace: "harbor_runs"
+            runner: "harbor"
+      - dataset_release_id: "synth-atif__20261124t100740z__holdout"
+        dataset_version: "20261124t100740z"
+        split: "holdout"
+        runner: "harbor"
+        known_task_count: 2
+        metric_name: "reward"
+        default_protocol: "lrm-eval-report-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_restricted"
+        aliases:
+          - raw_dataset_name: "synth-atif-20261124t100740z-holdout"
+            source_namespace: "harbor_runs"
+            runner: "harbor"
+
   # === Track 5: Extended Historical Baselines (2026-11-20) ===
   - benchmark_slug: "gpqa-diamond"
     display_name: "GPQA_diamond"
