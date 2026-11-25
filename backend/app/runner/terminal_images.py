@@ -9,6 +9,9 @@ from pathlib import Path
 from typing import Any, TypedDict
 
 from app.config import Settings
+from app.runner.terminal_dependencies import NGINX_TASK, is_terminal_nginx_job, nginx_dependency_snapshot_ready
+
+TERMINAL_SCOPE_MESSAGE = "Terminal-Bench 当前仅开放已就绪的标准 Harbor nginx-request-logging 单题"
 
 
 class TerminalImageReadiness(TypedDict):
@@ -47,21 +50,12 @@ def terminal_image_readiness(settings: Settings) -> TerminalImageReadiness | Non
         return None
 
     cached = {line.removeprefix("docker.io/") for line in result.stdout.splitlines()}
-    ready = [task for task, image in tasks.items() if image in cached]
-    verified = os.environ.get("LRM_TERMINAL_VERIFIED_TASKS")
-    if verified is not None:
-        verified_tasks = {task.strip() for task in verified.split(",")}
-        ready = [task for task in ready if task in verified_tasks]
+    verified_tasks = {task.strip() for task in os.environ.get("LRM_TERMINAL_VERIFIED_TASKS", "").split(",")}
+    ready = [NGINX_TASK] if (
+        tasks.get(NGINX_TASK) in cached and NGINX_TASK in verified_tasks and nginx_dependency_snapshot_ready()
+    ) else []
     return {"task_count": len(tasks), "ready_tasks": ready}
 
 
 def terminal_selection_ready(spec: dict[str, Any], readiness: TerminalImageReadiness | None) -> bool:
-    if not readiness:
-        return False
-    ready = set(readiness["ready_tasks"])
-    if spec.get("selection_mode") == "tasks":
-        requested = spec.get("tasks")
-        return isinstance(requested, list) and bool(requested) and all(
-            isinstance(task, str) and task in ready for task in requested
-        )
-    return bool(ready) and len(ready) == readiness["task_count"]
+    return is_terminal_nginx_job(spec) and readiness is not None and NGINX_TASK in readiness["ready_tasks"]

@@ -67,7 +67,12 @@ from app.managed_framework.vlmevalkit import (
     is_public_image_source,
     public_image_cache_root,
 )
-from app.runner.terminal_images import terminal_image_readiness, terminal_selection_ready
+from app.runner.terminal_dependencies import (
+    VERIFIER_HTTPS_PROXY,
+    is_terminal_nginx_job,
+    nginx_dependency_snapshot,
+)
+from app.runner.terminal_images import TERMINAL_SCOPE_MESSAGE, terminal_image_readiness, terminal_selection_ready
 from app.runner.vlmevalkit_results import read_vlmevalkit_results
 from app.security.gateways import GatewayProfileRegistry
 from app.security.managed_exec import (
@@ -371,18 +376,18 @@ class IsolatedRunnerManager:
                 "message": "当前隔离 Runner 节点未连接 Docker 守护进程，拒绝执行 Harbor 容器作业（零模拟评分兜底）",
                 "detail": {"kind": kind, "docker_available": False},
             }
+        if kind in ("harbor", "harbor_gateway") and spec.get("suite_id") == "terminal":
+            if not terminal_selection_ready(spec, h["terminal_image_readiness"]):
+                return 409, {
+                    "code": "TASK_IMAGE_NOT_READY",
+                    "message": TERMINAL_SCOPE_MESSAGE,
+                }
         if kind == "harbor_gateway" and not h["harbor_gateway_runtime_ready"]:
             return 503, {
                 "code": "RUNNER_CAPABILITY_UNAVAILABLE",
                 "message": "当前隔离 Runner 的 OpenEnv 采集依赖未就绪，暂不可运行 Harbor Gateway 作业",
                 "detail": {"kind": kind, "harbor_gateway_runtime_ready": False},
             }
-        if kind in ("harbor", "harbor_gateway") and spec.get("suite_id") == "terminal":
-            if not terminal_selection_ready(spec, h["terminal_image_readiness"]):
-                return 409, {
-                    "code": "TASK_IMAGE_NOT_READY",
-                    "message": "所选 Terminal-Bench 题目的运行镜像尚未就绪，请选择已就绪的题目",
-                }
         if kind == "vlmevalkit" and not h["vlmevalkit_ready"]:
             return 503, {
                 "code": "RUNNER_CAPABILITY_UNAVAILABLE",
@@ -702,15 +707,22 @@ class IsolatedRunnerManager:
         effective_work_dir = self._original_work(spec) if spec.get("resume_mode") == "native" else work_dir
 
         run_py = resolve_verified_managed_script(self.settings, "run.py")
+        terminal_nginx_dependencies = None
+        verifier_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+        if is_terminal_nginx_job(spec) and spec.get("resume_mode") != "native":
+            terminal_nginx_dependencies = nginx_dependency_snapshot()
         resolved_toml = materialize_managed_run_config(
             self.settings, spec, effective_work_dir,
             harbor_agent_ca_bundle=os.environ.get("SSL_CERT_FILE"),
+            terminal_nginx_dependencies=terminal_nginx_dependencies,
         )
         raw_output_root = effective_work_dir / "raw-output"
         uses_gateway = spec["kind"] == "harbor_gateway"
         harbor_agent_ca_bundle = None
         if spec["kind"] == "harbor":
-            harbor_agent_ca_bundle = tomllib.loads(resolved_toml.read_text(encoding="utf-8")).get("agent_ca_bundle")
+            frozen = tomllib.loads(resolved_toml.read_text(encoding="utf-8"))
+            harbor_agent_ca_bundle = frozen.get("agent_ca_bundle")
+            terminal_nginx_dependencies = frozen.get("terminal_nginx_dependencies")
         cmd = build_managed_run_py_command(
             python_exe=self._gateway_python if uses_gateway else sys.executable,
             run_py_path=str(run_py),
@@ -721,6 +733,7 @@ class IsolatedRunnerManager:
             output_dir=str(raw_output_root),
             plan_only=False,
             harbor_agent_ca_bundle=harbor_agent_ca_bundle,
+            terminal_nginx_dependencies=terminal_nginx_dependencies,
         )
 
         extra_env: dict[str, str] = {
@@ -741,6 +754,10 @@ class IsolatedRunnerManager:
                     extra_env[pass_key] = os.environ[pass_key]
         if uses_gateway:
             extra_env.update(self._gateway_env)
+        if terminal_nginx_dependencies and terminal_nginx_dependencies["verifier_proxy"]:
+            if not verifier_proxy:
+                raise ValueError("The locked Terminal nginx verifier proxy is unavailable")
+            extra_env[VERIFIER_HTTPS_PROXY] = verifier_proxy
 
         child_env = build_sanitized_subprocess_env(extra_env)
         proc = subprocess.Popen(

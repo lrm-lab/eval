@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import Settings
+from app.runner.terminal_dependencies import is_terminal_nginx_job, nginx_dependency_arguments
 
 
 def _toml_val(v: Any) -> str:
@@ -100,6 +101,7 @@ def materialize_managed_run_config(
     effective_work_dir: Path,
     *,
     harbor_agent_ca_bundle: str | None = None,
+    terminal_nginx_dependencies: dict[str, Any] | None = None,
 ) -> Path:
     """Write a deterministic `0600` job-scoped TOML under `effective_work_dir/.resolved_harbor.toml`
     derived strictly from the managed `harbor.toml` (for Harbor / Harbor Gateway) or
@@ -180,6 +182,8 @@ def materialize_managed_run_config(
         if kind == "harbor" and harbor_agent_ca_bundle:
             # Keep the operator's trust store in the frozen native inputs for resume.
             resolved_doc["agent_ca_bundle"] = str(Path(harbor_agent_ca_bundle).resolve(strict=True))
+        if terminal_nginx_dependencies and is_terminal_nginx_job(spec):
+            resolved_doc["terminal_nginx_dependencies"] = terminal_nginx_dependencies
         resolved_doc["datasets"] = {suite_id: suite_tbl}
 
     _write_private(out_toml, _dump_toml_doc(resolved_doc).encode())
@@ -199,6 +203,7 @@ def build_managed_run_py_command(
     output_dir: str,
     plan_only: bool = False,
     harbor_agent_ca_bundle: str | None = None,
+    terminal_nginx_dependencies: dict[str, Any] | None = None,
 ) -> list[str]:
     """Construct the exact `managed_framework/run.py` command line for Harbor, Harbor Gateway,
     VLMEvalKit, and Direct. Strictly conforms to `run.py` argparse:
@@ -246,6 +251,8 @@ def build_managed_run_py_command(
         )
         if spec.get("resume_mode") == "native" and kind == "harbor" and not plan_only:
             cmd.append("--resume")
+        if terminal_nginx_dependencies and is_terminal_nginx_job(spec):
+            cmd.extend(nginx_dependency_arguments(terminal_nginx_dependencies))
     elif kind == "direct":
         cmd.extend(["--attempts", str(int(spec.get("attempts") or 1))])
     # Note: kind == "vlmevalkit" intentionally omits --agent, --agent-version, --attempts, --mode!
