@@ -50,6 +50,71 @@ sources:
     approval_status: "approved_restricted"
     approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
 
+  # Verified 197 smoke runs with question, image and model response in ATIF (non-holdout splits).
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/ai2d-vlmkit-qwen38-27b-20261124"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/vlmkit-qwen-ca-ai2d-test-smoke-20261125T060844Z-22210"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/vlmkit-qwen-ca-cmmmu-val-smoke-20261125T060844Z-22210"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/vlmkit-qwen-ca-mm-ifeval-smoke-20261125T060844Z-22210"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/vlmkit-qwen-ca-mmmu-pro-10c-smoke-20261125T060844Z-22210"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  # Failed 197 verification runs: result metadata only, with no captured trajectory.
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/verify-ai2d-test-smoke-20261125T060504Z-35747"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/verify-cmmmu-val-smoke-20261125T060504Z-35747"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/verify-mm-ifeval-smoke-20261125T060504Z-35747"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/verify-mmmu-pro-10c-smoke-20261125T060504Z-35747"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
   - source_root: "/home/share-data/tianxi_benches/harbor-runs/mm-ifeval-smoke-vlmkit-atif-"
     match_mode: "prefix"
     project_id: "default"
