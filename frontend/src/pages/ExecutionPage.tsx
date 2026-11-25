@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
 import {
@@ -6,13 +7,13 @@ import {
   AlertTriangle,
   Bell,
   CheckCircle2,
+  ChevronDown,
   Copy,
   Cpu,
   ExternalLink,
   FileText,
   History,
   Info,
-  Layers,
   Lock,
   Play,
   Radio,
@@ -31,6 +32,7 @@ import { apiFetch } from '../lib/api';
 import { fmtDateShort, fmtDuration, fmtPct, runScopeLabel } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import { AnimatedNumber, PageTransition } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
 /* ============================================================================
@@ -720,6 +722,28 @@ type SseConnState = 'idle' | 'connecting' | 'streaming' | 'completed' | 'reconne
  * Main Page Component: ExecutionPage (/eval/execution)
  * ============================================================================ */
 
+function ExecutionStep({ number, title, children }: { number: number; title: string; children: ReactNode }) {
+  const headingId = `execution-step-${number}`;
+  return (
+    <section
+      aria-labelledby={headingId}
+      className="min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 sm:p-5"
+    >
+      <h2 id={headingId} className="mb-3 flex items-center gap-2.5 text-sm font-bold text-[var(--text-primary)]">
+        <span className="grid size-6 shrink-0 place-items-center rounded-md bg-[var(--brand-tint)] text-xs tabular-nums text-[var(--brand-primary)]">
+          {number}
+        </span>
+        {title}
+      </h2>
+      {children}
+    </section>
+  );
+}
+
+function ExecutionFieldLabel({ label, field }: { label: string; field?: string }) {
+  return <span title={field} className="block font-semibold text-[var(--text-primary)]">{label}</span>;
+}
+
 export function ExecutionPage() {
   const user = useAppStore((s) => s.user);
   const reducedMotion = useAppStore((s) => s.reducedMotion);
@@ -747,6 +771,7 @@ export function ExecutionPage() {
 
   const [planResult, setPlanResult] = useState<ExecutionPlanResp | null>(null);
   const [dismissedNotifBanner, setDismissedNotifBanner] = useState<boolean>(false);
+  const cliPreviewRef = useRef<HTMLDetailsElement>(null);
 
   // ---------- Section 2 & 3: Selected Job + Real SSE State ----------
   const [selectedJobId, setSelectedJobId] = useState<string | null>(null);
@@ -1327,11 +1352,18 @@ export function ExecutionPage() {
   // ---------- Computed View Data ----------
   const runnerKinds = capsQ.data?.runner_kinds ?? FALLBACK_RUNNER_KINDS;
   const activeRunnerMeta = runnerKinds.find((r) => r.kind === kind) ?? FALLBACK_RUNNER_KINDS[0];
+  const selectedSuite = capsQ.data?.suites.find((suite) => suite.suite_id === suiteId);
   const dockerGroupAttached =
     planResult?.docker_group_attached ?? capsQ.data?.runner_environment.docker_group_attached ?? false;
   const isolatedRunnerReady = Boolean(capsQ.data?.runner_environment.isolated_runner_ready);
+  const runnerPid = capsQ.data?.runner_environment.runner_pid;
   const supportedRunners = capsQ.data?.runner_environment.supported_runners ?? [];
   const activeRunnerAvailable = isolatedRunnerReady && supportedRunners.includes(kind);
+  const runnerStatus = capsQ.isPending
+    ? '正在检查运行器状态'
+    : !isolatedRunnerReady
+      ? '隔离 Runner 未连接'
+      : activeRunnerAvailable ? '隔离 Runner 就绪' : '当前运行器未启用';
   const runnerDisconnectReason =
     capsQ.data?.runner_environment.reason ??
     (isolatedRunnerReady && !activeRunnerAvailable
@@ -1408,46 +1440,14 @@ export function ExecutionPage() {
   return (
     <PageTransition className="max-w-7xl mx-auto px-5 py-6 space-y-5">
       {/* Page Header */}
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h1 className="m-0 text-xl font-bold text-[var(--text-primary)] flex items-center gap-2">
-            <Terminal className="w-5 h-5 text-[var(--brand-primary)]" />
-            <span>受控评测执行与实时监控 (Benchmark Execution)</span>
-          </h1>
-          <p className="m-0 mt-1 text-xs text-[var(--text-secondary)]">
-            四运行器白名单受控调度 · 0700 私有隔离区与专用可信事件通道 · Common Finalizer 原子发布共享快照对账
-          </p>
-        </div>
-
-        {/* Real POSIX Environment Security Badges */}
-        <div className="flex flex-wrap items-center gap-2 text-[11px]">
-          <span
-            aria-label={`docker_group_attached: ${String(dockerGroupAttached)}`}
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono font-medium ${
-              !dockerGroupAttached
-                ? 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)] border-[var(--sem-pass-border)]'
-                : 'bg-[var(--sem-err-bg)] text-[var(--sem-err-fg)] border-[var(--sem-err-border)]'
-            }`}
-          >
-            {!dockerGroupAttached ? <ShieldCheck className="w-3.5 h-3.5" /> : <ShieldAlert className="w-3.5 h-3.5" />}
-            <span>docker_group_attached: {String(dockerGroupAttached)}</span>
-          </span>
-          <span
-            aria-label={`isolated_runner_ready: ${String(isolatedRunnerReady)}`}
-            className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 font-mono ${
-              isolatedRunnerReady
-                ? 'border-[var(--sem-pass-border)] bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)]'
-                : 'border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] text-[var(--sem-zero-fg)]'
-            }`}
-          >
-            <Lock className="w-3.5 h-3.5" />
-            <span>
-              {isolatedRunnerReady
-                ? `隔离 Runner 就绪${capsQ.data?.runner_environment.runner_pid ? ` (PID ${capsQ.data.runner_environment.runner_pid})` : ''}`
-                : '隔离 Runner 未连接（仅 --plan / CLI 只读）'}
-            </span>
-          </span>
-        </div>
+      <div>
+        <h1 className="m-0 flex items-center gap-2 text-xl font-bold text-[var(--text-primary)]">
+          <Terminal aria-hidden="true" className="size-5 shrink-0 text-[var(--brand-primary)]" />
+          <span>受控评测执行与实时监控 (Benchmark Execution)</span>
+        </h1>
+        <p className="m-0 mt-1 text-xs text-[var(--text-secondary)]">
+          配置评测、启动隔离作业并查看实时进度。
+        </p>
       </div>
 
       {/* In-App Notifications Banner */}
@@ -1497,622 +1497,640 @@ export function ExecutionPage() {
         </section>
       )}
 
-      {/* =====================================================================
-          SECTION 1 — Test Configuration 配置卡
-         ===================================================================== */}
       <section
         aria-label="Test Configuration 评测配置卡"
-        className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden"
-        style={{ boxShadow: 'var(--shadow-card)' }}
+        className="grid items-start gap-4 text-xs lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.43fr)]"
       >
-        <div className="px-4 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
-            <Layers className="w-4 h-4 text-[var(--brand-primary)]" />
-            <h2 className="m-0 text-sm font-bold text-[var(--text-primary)]">1. Test Configuration 配置卡</h2>
-            <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)]">
-              白名单参数 · 零明文密钥
-            </span>
-          </div>
-          {!canWrite && (
-            <span className="inline-flex items-center gap-1 rounded-full border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] px-2.5 py-0.5 text-[11px] text-[var(--sem-zero-fg)]">
-              <Lock className="w-3 h-3" /> Viewer 只读模式（--plan 与启动执行需 Researcher+ 权限）
-            </span>
-          )}
-        </div>
-
-        <div className="p-4 space-y-4 text-xs">
-          {/* 1.1 Four Runner Mode Selector Buttons */}
-          <div className="space-y-2">
-            <div className="text-[11px] font-semibold text-[var(--text-secondary)]">选择评测运行器链路 (Runner Mode)</div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2.5" role="radiogroup" aria-label="评测运行器模式选择">
-              {runnerKinds.map((rk) => {
-                const selected = rk.kind === kind;
+        <div className="min-w-0 space-y-4">
+          <ExecutionStep number={1} title="选择运行器">
+            <div className="grid auto-rows-fr grid-cols-1 gap-2.5 min-[360px]:grid-cols-2" role="radiogroup" aria-label="评测运行器模式选择">
+              {runnerKinds.map((runner) => {
+                const selected = runner.kind === kind;
                 return (
                   <button
-                    key={rk.kind}
+                    key={runner.kind}
                     type="button"
                     role="radio"
                     aria-checked={selected}
-                    aria-label={`选择运行器 ${RUNNER_SHORT_LABELS[rk.kind]}`}
-                    onClick={() => handleSelectRunner(rk.kind)}
-                    className={`lrm-press text-left rounded-xl border p-3 space-y-2 cursor-pointer transition-colors ${
+                    aria-label={`选择运行器 ${RUNNER_SHORT_LABELS[runner.kind]}`}
+                    onClick={() => handleSelectRunner(runner.kind)}
+                    className={`lrm-press flex min-h-16 min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2.5 text-left transition-colors sm:gap-3 sm:px-3 ${
                       selected
-                        ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)]/70 ring-1 ring-[var(--brand-primary)]'
-                        : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)]/60 hover:border-[var(--border-strong)]'
+                        ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] ring-1 ring-[var(--brand-primary)] shadow-[0_0_16px_var(--hero-glow-1)]'
+                        : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-[var(--brand-primary)]'
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-1">
-                      <span className="font-bold text-[var(--text-primary)] text-xs">
-                        {RUNNER_SHORT_LABELS[rk.kind]}
+                    <span aria-hidden="true" className={`grid size-7 shrink-0 place-items-center rounded-md ${
+                      selected ? 'bg-[var(--brand-primary)] text-white' : 'bg-[var(--bg-surface)] text-[var(--text-secondary)]'
+                    }`}>
+                      {selected ? <CheckCircle2 className="size-4" /> : <Cpu className="size-4" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block font-bold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[runner.kind]}</span>
+                      <span className="block text-[11px] text-[var(--text-secondary)]">
+                        {runner.requires_docker ? '需隔离容器' : '无需容器'}
                       </span>
-                      <span className="font-mono text-[10px] text-[var(--text-muted)]">{rk.kind}</span>
-                    </div>
-                    <div className="flex flex-wrap gap-1">
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium border ${
-                          rk.requires_docker
-                            ? 'bg-[var(--sem-running-bg)] text-[var(--sem-running-fg)] border-[var(--sem-running-border)]'
-                            : 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)] border-[var(--sem-pass-border)]'
-                        }`}
-                      >
-                        {rk.requires_docker ? '需隔离 Docker' : '无需 Docker'}
-                      </span>
-                      <span
-                        className={`rounded px-1.5 py-0.5 text-[10px] font-medium border ${
-                          rk.native_resume_supported
-                            ? 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)] border-[var(--sem-pass-border)]'
-                            : 'bg-[var(--sem-unscored-bg)] text-[var(--sem-unscored-fg)] border-[var(--sem-unscored-border)]'
-                        }`}
-                      >
-                        {rk.native_resume_supported ? '支持原生 --resume' : '无原生 --resume · 仅派生续跑'}
-                      </span>
-                      {rk.partial_task_forces_infer && (
-                        <span className="rounded px-1.5 py-0.5 text-[10px] font-medium border bg-[var(--sem-zero-bg)] text-[var(--sem-zero-fg)] border-[var(--sem-zero-border)]">
-                          --task 强制 infer
-                        </span>
-                      )}
-                    </div>
+                    </span>
                   </button>
                 );
               })}
             </div>
-            <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/55 px-3 py-2 text-[11px] text-[var(--text-secondary)] flex items-start gap-2">
-              <Info className="w-3.5 h-3.5 text-[var(--brand-primary)] shrink-0 mt-0.5" />
-              <span>{activeRunnerMeta.notes}</span>
-            </div>
-          </div>
+            <details className="group mt-2 text-[11px] text-[var(--text-secondary)]">
+              <summary className="flex w-fit cursor-pointer list-none items-center gap-1.5 rounded-md p-1 font-medium">
+                <Info aria-hidden="true" className="size-3.5" />
+                运行器能力与限制
+                <ChevronDown aria-hidden="true" className="size-3.5 group-open:rotate-180" />
+              </summary>
+              <p className="mt-1 rounded-md bg-[var(--bg-elevated)] px-3 py-2 leading-relaxed">
+                {activeRunnerMeta.notes}
+              </p>
+            </details>
+          </ExecutionStep>
 
-          {/* 1.2 Suite Selector + Unintegrated Raw Suites Notice */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <div className="space-y-2">
-              <label className="block space-y-1">
-                <span className="text-[var(--text-secondary)] font-medium">
-                  已登记评测题库 (harbor.toml Registered Suite)
-                </span>
-                <select
-                  aria-label="选择已登记评测题库"
-                  value={suiteId}
-                  onChange={(e) => {
-                    setSuiteId(e.target.value);
-                    setPlanResult(null);
-                  }}
-                  className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
-                >
-                  <optgroup label="已正式登记（可执行）">
-                    {(capsQ.data?.suites || []).map((s) => (
-                      <option key={s.suite_id} value={s.suite_id}>
-                        [{s.runner}] {s.display_name} ({s.suite_id}
-                        {typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
-                        {s.split ? ` · ${s.split}` : ''})
-                      </option>
-                    ))}
-                  </optgroup>
-                  {(capsQ.data?.unintegrated_suites || []).length > 0 && (
-                    <optgroup label="原始数据可见、未接入评测（禁止提交）">
-                      {(capsQ.data?.unintegrated_suites || []).map((u) => (
-                        <option key={u.suite_id} value={u.suite_id} disabled>
-                          [未接入] {u.display_name} — 原始数据可见、未接入评测
+          <ExecutionStep number={2} title="选择题库与范围">
+            <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <div className="space-y-2">
+                <label className="block space-y-1">
+                  <ExecutionFieldLabel label="评测题库" field="harbor.toml" />
+                  <select
+                    aria-label="选择已登记评测题库"
+                    value={suiteId}
+                    onChange={(e) => {
+                      setSuiteId(e.target.value);
+                      setPlanResult(null);
+                    }}
+                    className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
+                  >
+                    {!capsQ.data?.suites.length && (
+                      <option value="">{capsQ.isPending ? '正在加载题库' : '暂无已登记题库'}</option>
+                    )}
+                    <optgroup label="已正式登记（可执行）">
+                      {(capsQ.data?.suites || []).map((s) => (
+                        <option key={s.suite_id} value={s.suite_id}>
+                          [{s.runner}] {s.display_name} ({s.suite_id}
+                          {typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
+                          {s.split ? ` · ${s.split}` : ''})
                         </option>
                       ))}
                     </optgroup>
-                  )}
-                </select>
-              </label>
+                    {(capsQ.data?.unintegrated_suites || []).length > 0 && (
+                      <optgroup label="原始数据可见、未接入评测（禁止提交）">
+                        {(capsQ.data?.unintegrated_suites || []).map((u) => (
+                          <option key={u.suite_id} value={u.suite_id} disabled>
+                            [未接入] {u.display_name} — 原始数据可见、未接入评测
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </label>
 
-              {/* Visible Disabled Unintegrated Suites Strip */}
-              {(capsQ.data?.unintegrated_suites || []).length > 0 && (
-                <div
-                  aria-label="未接入评测题库列表"
-                  className="rounded-lg border border-dashed border-[var(--border-strong)] bg-[var(--bg-elevated)]/40 p-2.5 space-y-1.5"
-                >
-                  <div className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-wide">
-                    原始数据可见、未接入评测（已禁用）
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {capsQ.data!.unintegrated_suites.map((u) => (
-                      <button
-                        key={u.suite_id}
-                        type="button"
-                        disabled
-                        aria-disabled="true"
-                        title={u.reason}
-                        className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-subtle)] bg-[var(--sem-unscored-bg)]/70 px-2 py-1 text-[11px] text-[var(--text-muted)] opacity-75 cursor-not-allowed"
-                      >
-                        <Lock className="w-3 h-3 shrink-0" />
-                        <span className="font-medium line-through">{u.display_name}</span>
-                        <span className="text-[10px]">原始数据可见、未接入评测</span>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* 1.3 Selection Mode (--all vs --task) & VLMEvalKit Guardrail */}
-            <div className="space-y-2.5">
-              <div className="space-y-1">
-                <span className="text-[var(--text-secondary)] font-medium block">题集范围 (selection_mode)</span>
-                <div className="flex flex-wrap items-center gap-2">
-                  <button
-                    type="button"
-                    aria-pressed={selectionMode === 'all'}
-                    onClick={() => {
-                      setSelectionMode('all');
-                      setPlanResult(null);
-                    }}
-                    className={`rounded-lg border px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
-                      selectionMode === 'all'
-                        ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
-                        : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-                    }`}
+                {capsQ.isPending ? (
+                  <div aria-hidden="true" className="min-h-16 rounded-lg bg-[var(--bg-elevated)]" />
+                ) : (capsQ.data?.unintegrated_suites || []).length > 0 && (
+                  <div
+                    aria-label="未接入评测题库列表"
+                    className="min-h-16 space-y-1.5 rounded-lg border border-dashed border-[var(--border-strong)] p-2.5"
                   >
-                    --all 全量评测 (full_split)
-                  </button>
-                  <button
-                    type="button"
-                    aria-pressed={selectionMode === 'tasks'}
-                    onClick={() => {
-                      setSelectionMode('tasks');
-                      if (kind === 'vlmevalkit') {
-                        setVlmevalkitMode('infer');
-                      }
-                      setPlanResult(null);
-                    }}
-                    className={`rounded-lg border px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
-                      selectionMode === 'tasks'
-                        ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
-                        : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-                    }`}
-                  >
-                    --task 局部抽测 (smoke/subset)
-                  </button>
-                  <span className="ml-auto inline-flex items-center gap-1 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1 font-mono text-[10px] text-[var(--text-secondary)]">
-                    scope={runScopeLabel(effectiveRunScope)} · {effectiveOfficialStatus}
-                  </span>
-                </div>
+                    <div className="text-[10px] font-semibold text-[var(--text-muted)] uppercase tracking-wide">
+                      尚未接入的题库
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {capsQ.data!.unintegrated_suites.map((u) => (
+                        <button
+                          key={u.suite_id}
+                          type="button"
+                          disabled
+                          aria-disabled="true"
+                          title={u.reason}
+                          className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border-subtle)] bg-[var(--sem-unscored-bg)]/70 px-2 py-1 text-[11px] text-[var(--text-muted)] opacity-75 cursor-not-allowed"
+                        >
+                          <Lock className="w-3 h-3 shrink-0" />
+                          <span className="font-medium line-through">{u.display_name}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
 
-              {selectionMode === 'tasks' && (
-                <label className="block space-y-1">
-                  <span className="text-[var(--text-secondary)]">
-                    指定任务 ID（逗号或空格分隔，已解析{' '}
-                    <strong className="font-mono text-[var(--text-primary)]">{parsedTasks.length}</strong> 题）
-                  </span>
-                  <input
-                    type="text"
-                    aria-label="指定任务 ID 列表"
-                    placeholder="例如：task-01, task-02, task-03 或 0 1 2"
-                    value={tasksInput}
-                    onChange={(e) => {
-                      setTasksInput(e.target.value);
-                      setPlanResult(null);
-                    }}
-                    className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
-                  />
-                </label>
-              )}
-
-              {/* VLMEvalKit mode selector + VLMEVALKIT.md:44 lock */}
-              {kind === 'vlmevalkit' && (
-                <div className="space-y-2 pt-1">
+              {/* 1.3 Selection Mode (--all vs --task) & VLMEvalKit Guardrail */}
+              <div className="space-y-2.5">
+                <div className="space-y-1">
+                  <ExecutionFieldLabel label="题集范围" field="selection_mode" />
                   <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-[var(--text-secondary)] font-medium">VLMEvalKit 运行模式 (TOML mode):</span>
                     <button
                       type="button"
-                      disabled={vlmTaskGuardrailActive}
-                      aria-disabled={vlmTaskGuardrailActive}
-                      aria-pressed={effectiveVlmMode === 'all'}
-                      title={
-                        vlmTaskGuardrailActive
-                          ? 'VLMEVALKIT.md:44 硬约束：--task 局部运行禁止 mode=all，已强制锁定 infer'
-                          : '全量推理并运行原生官方评分器'
-                      }
+                      aria-pressed={selectionMode === 'all'}
                       onClick={() => {
-                        if (!vlmTaskGuardrailActive) {
-                          setVlmevalkitMode('all');
-                          setPlanResult(null);
-                        }
-                      }}
-                      className={`rounded-lg border px-2.5 py-1 text-[11px] font-mono transition-colors ${
-                        vlmTaskGuardrailActive
-                          ? 'border-[var(--border-subtle)] bg-[var(--sem-unscored-bg)] text-[var(--text-muted)] line-through opacity-60 cursor-not-allowed'
-                          : effectiveVlmMode === 'all'
-                            ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)] font-semibold cursor-pointer'
-                            : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] cursor-pointer'
-                      }`}
-                    >
-                      mode=all（推理+官方评分）
-                    </button>
-                    <button
-                      type="button"
-                      aria-pressed={effectiveVlmMode === 'infer'}
-                      onClick={() => {
-                        setVlmevalkitMode('infer');
+                        setSelectionMode('all');
                         setPlanResult(null);
                       }}
-                      className={`rounded-lg border px-2.5 py-1 text-[11px] font-mono cursor-pointer transition-colors ${
-                        effectiveVlmMode === 'infer'
-                          ? 'border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] text-[var(--sem-zero-fg)] font-semibold'
+                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
+                        selectionMode === 'all'
+                          ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
                           : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
                       }`}
                     >
-                      mode=infer（仅推理 · unscored）{vlmTaskGuardrailActive ? ' [已强制锁定]' : ''}
+                      全量评测 <span className="font-mono opacity-75">--all</span>
+                    </button>
+                    <button
+                      type="button"
+                      aria-label="--task 局部抽测"
+                      aria-pressed={selectionMode === 'tasks'}
+                      onClick={() => {
+                        setSelectionMode('tasks');
+                        if (kind === 'vlmevalkit') {
+                          setVlmevalkitMode('infer');
+                        }
+                        setPlanResult(null);
+                      }}
+                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
+                        selectionMode === 'tasks'
+                          ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
+                          : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
+                      }`}
+                    >
+                      局部抽测 <span className="font-mono opacity-75">--task</span>
                     </button>
                   </div>
+                  <p title="run_scope · official_status" className="font-mono text-[11px] text-[var(--text-secondary)]">
+                    {runScopeLabel(effectiveRunScope)} · {effectiveOfficialStatus}
+                  </p>
+                </div>
 
-                  {vlmTaskGuardrailActive && (
-                    <div
-                      role="alert"
-                      className="rounded-lg border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] p-2.5 text-[11px] text-[var(--sem-zero-fg)] flex items-start gap-2"
-                    >
-                      <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
-                      <div>
-                        <div className="font-bold">
-                          VLMEVALKIT.md:44 硬约束已触发：自动锁定 vlmevalkit_mode=&quot;infer&quot;
-                        </div>
-                        <div className="mt-0.5 text-[var(--text-primary)]">
-                          指定 <code>--task</code> 局部运行时仅执行推理、不运行原生官方评分器且不生成{' '}
-                          <code>official-result.json</code>；系统自动标记为{' '}
-                          <code>run_scope={effectiveRunScope}</code>（smoke/subset）与{' '}
-                          <code>official_status=unscored</code>，已禁用 <code>mode=all</code>。
+                {selectionMode === 'tasks' && (
+                  <label className="block space-y-1">
+                    <span className="text-[var(--text-secondary)]">
+                      指定任务 ID（逗号或空格分隔，已解析{' '}
+                      <strong className="font-mono text-[var(--text-primary)]">{parsedTasks.length}</strong> 题）
+                    </span>
+                    <input
+                      type="text"
+                      aria-label="指定任务 ID 列表"
+                      placeholder="例如：task-01, task-02, task-03 或 0 1 2"
+                      value={tasksInput}
+                      onChange={(e) => {
+                        setTasksInput(e.target.value);
+                        setPlanResult(null);
+                      }}
+                      className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
+                    />
+                  </label>
+                )}
+
+                {/* VLMEvalKit mode selector + VLMEVALKIT.md:44 lock */}
+                {kind === 'vlmevalkit' && (
+                  <div className="space-y-2 pt-1">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <ExecutionFieldLabel label="VLMEvalKit 评分模式" field="TOML mode" />
+                      <button
+                        type="button"
+                        disabled={vlmTaskGuardrailActive}
+                        aria-disabled={vlmTaskGuardrailActive}
+                        aria-pressed={effectiveVlmMode === 'all'}
+                        title={
+                          vlmTaskGuardrailActive
+                            ? 'VLMEVALKIT.md:44 硬约束：--task 局部运行禁止 mode=all，已强制锁定 infer'
+                            : '全量推理并运行原生官方评分器'
+                        }
+                        onClick={() => {
+                          if (!vlmTaskGuardrailActive) {
+                            setVlmevalkitMode('all');
+                            setPlanResult(null);
+                          }
+                        }}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] font-mono transition-colors ${
+                          vlmTaskGuardrailActive
+                            ? 'border-[var(--border-subtle)] bg-[var(--sem-unscored-bg)] text-[var(--text-muted)] line-through opacity-60 cursor-not-allowed'
+                            : effectiveVlmMode === 'all'
+                              ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)] font-semibold cursor-pointer'
+                              : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] cursor-pointer'
+                        }`}
+                      >
+                        mode=all（推理+官方评分）
+                      </button>
+                      <button
+                        type="button"
+                        aria-pressed={effectiveVlmMode === 'infer'}
+                        onClick={() => {
+                          setVlmevalkitMode('infer');
+                          setPlanResult(null);
+                        }}
+                        className={`rounded-lg border px-2.5 py-1 text-[11px] font-mono cursor-pointer transition-colors ${
+                          effectiveVlmMode === 'infer'
+                            ? 'border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] text-[var(--sem-zero-fg)] font-semibold'
+                            : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
+                        }`}
+                      >
+                        mode=infer（仅推理 · unscored）{vlmTaskGuardrailActive ? ' [已强制锁定]' : ''}
+                      </button>
+                    </div>
+
+                    {vlmTaskGuardrailActive && (
+                      <div
+                        role="alert"
+                        className="rounded-lg border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] p-2.5 text-[11px] text-[var(--sem-zero-fg)] flex items-start gap-2"
+                      >
+                        <AlertTriangle className="w-4 h-4 shrink-0 mt-0.5" />
+                        <div>
+                          <div className="font-bold">
+                            VLMEVALKIT.md:44 硬约束已触发：自动锁定 vlmevalkit_mode=&quot;infer&quot;
+                          </div>
+                          <div className="mt-0.5 text-[var(--text-primary)]">
+                            指定 <code>--task</code> 局部运行时仅执行推理、不运行原生官方评分器且不生成{' '}
+                            <code>official-result.json</code>；系统自动标记为{' '}
+                            <code>run_scope={effectiveRunScope}</code>（smoke/subset）与{' '}
+                            <code>official_status=unscored</code>，已禁用 <code>mode=all</code>。
+                          </div>
                         </div>
                       </div>
-                    </div>
-                  )}
-                </div>
-              )}
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
+          </ExecutionStep>
 
-          {/* 1.4 Whitelisted Parameters Grid (NO raw API key input!) */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 pt-1">
-            <label className="space-y-1">
-              <span className="text-[var(--text-secondary)]">模型路由 (model_route)</span>
-              <input
-                type="text"
-                aria-label="模型路由 model_route"
-                value={modelRoute}
-                onChange={(e) => {
-                  setModelRoute(e.target.value);
-                  setPlanResult(null);
-                }}
-                className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
-              />
-            </label>
-
-            <label className="space-y-1">
-              <span className="text-[var(--text-secondary)] flex items-center gap-1">
-                <span>服务端 Gateway Profile (0600)</span>
-                <Lock className="w-3 h-3 text-[var(--sem-pass-fg)]" />
-              </span>
-              <select
-                aria-label="选择服务端 Gateway Profile"
-                value={gatewayProfileId}
-                onChange={(e) => {
-                  setGatewayProfileId(e.target.value);
-                  setPlanResult(null);
-                }}
-                className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
-              >
-                {(capsQ.data?.gateway_profiles || []).map((g) => (
-                  <option key={g.profile_id} value={g.profile_id}>
-                    {g.display_name} ({g.profile_id}) {g.key_configured ? '✓' : '[未配密钥]'}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="space-y-1">
-              <span className="text-[var(--text-secondary)]">可选裁判网关 (judge_profile_id)</span>
-              <select
-                aria-label="选择可选裁判 Gateway Profile"
-                value={judgeProfileId}
-                onChange={(e) => {
-                  setJudgeProfileId(e.target.value);
-                  setPlanResult(null);
-                }}
-                className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
-              >
-                <option value="">不指定裁判网关（默认）</option>
-                {(capsQ.data?.gateway_profiles || []).map((g) => (
-                  <option key={g.profile_id} value={g.profile_id}>
-                    {g.display_name} ({g.profile_id})
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label className="space-y-1">
-              <span className="text-[var(--text-secondary)]">批次名 (batch_name，留空自动生成)</span>
-              <input
-                type="text"
-                aria-label="批次名 batch_name"
-                placeholder="例如：swebench-qwen-20261125"
-                value={batchName}
-                onChange={(e) => {
-                  setBatchName(e.target.value);
-                  setPlanResult(null);
-                }}
-                className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
-              />
-            </label>
-
-            {isHarborFamily && (
-              <>
-                <label className="space-y-1">
-                  <span className="text-[var(--text-secondary)]">Harness / Agent</span>
-                  <input
-                    type="text"
-                    aria-label="Harbor Agent 名称"
-                    value={agent}
-                    onChange={(e) => {
-                      setAgent(e.target.value);
-                      setPlanResult(null);
-                    }}
-                    className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
-                  />
-                </label>
-
-                <label className="space-y-1">
-                  <span className="text-[var(--text-secondary)]">
-                    Harness 版本 (harness_version{kind === 'harbor' ? ' · 续跑锁定' : ''})
-                  </span>
-                  <input
-                    type="text"
-                    aria-label="Harness 版本 harness_version"
-                    value={harnessVersion}
-                    onChange={(e) => {
-                      setHarnessVersion(e.target.value);
-                      setPlanResult(null);
-                    }}
-                    className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
-                  />
-                </label>
-
-                <label className="space-y-1">
-                  <span className="text-[var(--text-secondary)]">重试次数 (attempts: 1–16)</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={16}
-                    aria-label="每题尝试次数 attempts"
-                    value={attempts}
-                    onChange={(e) => {
-                      setAttempts(Number(e.target.value));
-                      setPlanResult(null);
-                    }}
-                    className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[var(--text-primary)]"
-                  />
-                </label>
-
-                <label className="space-y-1">
-                  <span className="text-[var(--text-secondary)]">熔断阈值 (pause_after · exit 75)</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={50}
-                    aria-label="DispatchGuard 熔断阈值 pause_after"
-                    value={pauseAfter}
-                    onChange={(e) => {
-                      setPauseAfter(Number(e.target.value));
-                      setPlanResult(null);
-                    }}
-                    className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[var(--text-primary)]"
-                  />
-                </label>
-              </>
-            )}
-
-            <label className="space-y-1">
-              <span className="text-[var(--text-secondary)]">并发槽位 (concurrent: 1–32)</span>
-              <input
-                type="number"
-                min={1}
-                max={32}
-                aria-label="并发数 concurrent"
-                value={concurrent}
-                onChange={(e) => {
-                  setConcurrent(Number(e.target.value));
-                  setPlanResult(null);
-                }}
-                className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[var(--text-primary)]"
-              />
-            </label>
-
-            {/* Notification Controls */}
-            <div className="sm:col-span-2 lg:col-span-3 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/55 p-2.5 flex flex-wrap items-center gap-3">
-              <label className="inline-flex items-center gap-1.5 cursor-pointer font-medium text-[var(--text-primary)]">
+          <ExecutionStep number={3} title="模型与参数">
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <label className="space-y-1">
+                <ExecutionFieldLabel label="模型路由" field="model_route" />
                 <input
-                  type="checkbox"
-                  aria-label="开启站内终态通知"
-                  checked={notifyInApp}
-                  onChange={(e) => setNotifyInApp(e.target.checked)}
+                  type="text"
+                  aria-label="模型路由 model_route"
+                  value={modelRoute}
+                  onChange={(e) => {
+                    setModelRoute(e.target.value);
+                    setPlanResult(null);
+                  }}
+                  className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
                 />
-                <span>站内通知 (in_app)</span>
               </label>
 
-              <label className="inline-flex items-center gap-1.5">
-                <span className="text-[var(--text-secondary)]">Webhook 通道:</span>
+              <label className="space-y-1">
+                <ExecutionFieldLabel label="模型网关" field="Gateway Profile · 0600" />
                 <select
-                  aria-label="选择 Webhook 通知通道"
-                  value={webhookProfileId}
-                  onChange={(e) => setWebhookProfileId(e.target.value)}
-                  className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
+                  aria-label="选择服务端 Gateway Profile"
+                  value={gatewayProfileId}
+                  onChange={(e) => {
+                    setGatewayProfileId(e.target.value);
+                    setPlanResult(null);
+                  }}
+                  className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
                 >
-                  <option value="">不推送 Webhook</option>
-                  {(capsQ.data?.webhook_profiles || []).map((w) => (
-                    <option key={w.profile_id} value={w.profile_id}>
-                      {w.display_name}
+                  {!capsQ.data?.gateway_profiles.length && (
+                    <option value={gatewayProfileId}>{capsQ.isPending ? '正在加载网关' : '暂无可用网关'}</option>
+                  )}
+                  {(capsQ.data?.gateway_profiles || []).map((g) => (
+                    <option key={g.profile_id} value={g.profile_id}>
+                      {g.display_name} ({g.profile_id}) {g.key_configured ? '✓' : '[未配密钥]'}
                     </option>
                   ))}
                 </select>
               </label>
 
-              <div className="flex flex-wrap items-center gap-1.5 ml-auto">
-                <span className="text-[10px] text-[var(--text-muted)]">触发事件:</span>
-                {NOTIFY_EVENT_OPTIONS.map((opt) => {
-                  const active = notifyEvents.includes(opt.id);
-                  return (
-                    <button
-                      key={opt.id}
-                      type="button"
-                      aria-pressed={active}
-                      onClick={() => toggleNotifyEvent(opt.id)}
-                      className={`rounded px-1.5 py-0.5 text-[10px] border cursor-pointer ${
-                        active
-                          ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)] font-medium'
-                          : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]'
-                      }`}
-                    >
-                      {opt.label}
-                    </button>
-                  );
-                })}
-              </div>
+              <label className="space-y-1">
+                <ExecutionFieldLabel label="裁判网关（可选）" field="judge_profile_id" />
+                <select
+                  aria-label="选择可选裁判 Gateway Profile"
+                  value={judgeProfileId}
+                  onChange={(e) => {
+                    setJudgeProfileId(e.target.value);
+                    setPlanResult(null);
+                  }}
+                  className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
+                >
+                  <option value="">不指定裁判网关（默认）</option>
+                  {(capsQ.data?.gateway_profiles || []).map((g) => (
+                    <option key={g.profile_id} value={g.profile_id}>
+                      {g.display_name} ({g.profile_id})
+                    </option>
+                  ))}
+                </select>
+              </label>
+
+              <label className="space-y-1">
+                <ExecutionFieldLabel label="批次名称" field="batch_name · 留空自动生成" />
+                <input
+                  type="text"
+                  aria-label="批次名 batch_name"
+                  placeholder="留空自动生成"
+                  value={batchName}
+                  onChange={(e) => {
+                    setBatchName(e.target.value);
+                    setPlanResult(null);
+                  }}
+                  className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
+                />
+              </label>
+
+              {isHarborFamily && (
+                <>
+                  <label className="space-y-1">
+                    <ExecutionFieldLabel label="评测代理" field="Harness / Agent" />
+                    <input
+                      type="text"
+                      aria-label="Harbor Agent 名称"
+                      value={agent}
+                      onChange={(e) => {
+                        setAgent(e.target.value);
+                        setPlanResult(null);
+                      }}
+                      className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
+                    />
+                  </label>
+
+                  <label className="space-y-1">
+                    <ExecutionFieldLabel
+                      label="评测框架版本"
+                      field={kind === 'harbor' ? 'harness_version · 续跑时锁定' : 'harness_version'}
+                    />
+                    <input
+                      type="text"
+                      aria-label="Harness 版本 harness_version"
+                      value={harnessVersion}
+                      onChange={(e) => {
+                        setHarnessVersion(e.target.value);
+                        setPlanResult(null);
+                      }}
+                      className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
+                    />
+                  </label>
+                </>
+              )}
             </div>
+            <details className="group mt-4 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+              <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-lg px-3 py-2.5 font-semibold text-[var(--text-primary)]">
+                高级设置
+                <ChevronDown aria-hidden="true" className="size-4 text-[var(--text-secondary)] group-open:rotate-180" />
+              </summary>
+              <div className="border-t border-[var(--border-subtle)] p-3">
+                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
+                  {isHarborFamily && (
+                    <>
+                      <label className="space-y-1">
+                        <ExecutionFieldLabel label="每题尝试次数" field="attempts · 1–16 次" />
+                        <input
+                          type="number"
+                          min={1}
+                          max={16}
+                          aria-label="每题尝试次数 attempts"
+                          value={attempts}
+                          onChange={(e) => {
+                            setAttempts(Number(e.target.value));
+                            setPlanResult(null);
+                          }}
+                          className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[var(--text-primary)]"
+                        />
+                      </label>
+
+                      <label className="space-y-1">
+                        <ExecutionFieldLabel label="熔断阈值" field="pause_after · exit 75" />
+                        <input
+                          type="number"
+                          min={1}
+                          max={50}
+                          aria-label="DispatchGuard 熔断阈值 pause_after"
+                          value={pauseAfter}
+                          onChange={(e) => {
+                            setPauseAfter(Number(e.target.value));
+                            setPlanResult(null);
+                          }}
+                          className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[var(--text-primary)]"
+                        />
+                      </label>
+                    </>
+                  )}
+
+                  <label className="space-y-1">
+                    <ExecutionFieldLabel label="并发数" field="concurrent · 1–32" />
+                    <input
+                      type="number"
+                      min={1}
+                      max={32}
+                      aria-label="并发数 concurrent"
+                      value={concurrent}
+                      onChange={(e) => {
+                        setConcurrent(Number(e.target.value));
+                        setPlanResult(null);
+                      }}
+                      className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs tabular-nums text-[var(--text-primary)]"
+                    />
+                  </label>
+                </div>
+                <div className="mt-3 flex flex-wrap items-center gap-3 border-t border-[var(--border-subtle)] pt-3">
+                  <label className="inline-flex items-center gap-1.5 cursor-pointer font-medium text-[var(--text-primary)]">
+                    <input
+                      type="checkbox"
+                      aria-label="开启站内终态通知"
+                      checked={notifyInApp}
+                      onChange={(e) => setNotifyInApp(e.target.checked)}
+                    />
+                    <span>站内通知</span>
+                  </label>
+
+                  <label className="inline-flex items-center gap-1.5">
+                    <span className="text-[var(--text-secondary)]">Webhook 通知</span>
+                    <select
+                      aria-label="选择 Webhook 通知通道"
+                      value={webhookProfileId}
+                      onChange={(e) => setWebhookProfileId(e.target.value)}
+                      className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
+                    >
+                      <option value="">不推送 Webhook</option>
+                      {(capsQ.data?.webhook_profiles || []).map((w) => (
+                        <option key={w.profile_id} value={w.profile_id}>
+                          {w.display_name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+
+                  <div className="flex w-full flex-wrap items-center gap-1.5">
+                    <span className="text-[10px] text-[var(--text-muted)]">触发事件</span>
+                    {NOTIFY_EVENT_OPTIONS.map((opt) => {
+                      const active = notifyEvents.includes(opt.id);
+                      return (
+                        <button
+                          key={opt.id}
+                          type="button"
+                          aria-pressed={active}
+                          onClick={() => toggleNotifyEvent(opt.id)}
+                          className={`rounded px-1.5 py-0.5 text-[10px] border cursor-pointer ${
+                            active
+                              ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)] font-medium'
+                              : 'border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-muted)]'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </details>
+          </ExecutionStep>
+
+          <ExecutionStep number={4} title="预览并启动">
+            <details ref={cliPreviewRef} className="group rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+              <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 rounded-lg px-3 py-2.5 font-semibold text-[var(--text-primary)]">
+                <Terminal aria-hidden="true" className="size-4 shrink-0 text-[var(--brand-primary)]" />
+                <span>CLI 命令预览</span>
+                {planResult && (
+                  <span className="inline-flex items-center gap-1 rounded-full border border-[var(--sem-pass-border)] bg-[var(--sem-pass-bg)] px-2 py-0.5 text-[10px] text-[var(--sem-pass-fg)]">
+                    <CheckCircle2 aria-hidden="true" className="size-3" /> 服务端 --plan 已校验
+                  </span>
+                )}
+                <ChevronDown aria-hidden="true" className="ml-auto size-4 text-[var(--text-secondary)] group-open:rotate-180" />
+              </summary>
+              <div className="space-y-2.5 border-t border-[var(--border-subtle)] p-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <span className="text-[11px] text-[var(--text-secondary)]">命令已脱敏，网关凭据由服务端注入。</span>
+                  <button
+                    type="button"
+                    onClick={() => void handleCopyCli()}
+                    aria-label="复制脱敏 CLI 命令"
+                    className="lrm-press inline-flex cursor-pointer items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 font-medium text-[var(--text-primary)] hover:border-[var(--brand-primary)]"
+                  >
+                    <Copy aria-hidden="true" className="size-3.5 text-[var(--text-secondary)]" />
+                    复制命令
+                  </button>
+                </div>
+                <pre className="m-0 max-h-44 overflow-auto whitespace-pre-wrap break-all rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 font-mono text-[11px] text-[var(--text-primary)]">
+                  {activeCommandPreview}
+                </pre>
+                <div className="flex flex-wrap gap-1.5 text-[11px]">
+                  <span className={`rounded-md border px-2 py-0.5 ${
+                    workProbeOk
+                      ? 'border-[var(--sem-pass-border)] bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)]'
+                      : 'border-[var(--sem-err-border)] bg-[var(--sem-err-bg)] text-[var(--sem-err-fg)]'
+                  }`}>
+                    0700 私有 --work
+                  </span>
+                  <span className={`rounded-md border px-2 py-0.5 ${
+                    evProbeOk
+                      ? 'border-[var(--sem-pass-border)] bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)]'
+                      : 'border-[var(--sem-err-border)] bg-[var(--sem-err-bg)] text-[var(--sem-err-fg)]'
+                  }`}>
+                    0700 独立证据存储
+                  </span>
+                  <span className="rounded-md border border-[var(--sem-running-border)] bg-[var(--sem-running-bg)] px-2 py-0.5 text-[var(--sem-running-fg)]">
+                    共享层仅输出 Public DTO
+                  </span>
+                </div>
+                {planResult && planResult.plan.warnings.length > 0 && (
+                  <div className="space-y-1">
+                    {planResult.plan.warnings.map((w, idx) => (
+                      <div
+                        key={idx}
+                        className="rounded-md border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] px-2.5 py-1.5 text-[11px] text-[var(--sem-zero-fg)] flex items-start gap-1.5"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                        <span>{w}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </details>
+          </ExecutionStep>
+        </div>
+
+        <aside
+          aria-labelledby="execution-summary-heading"
+          className="min-w-0 space-y-4 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 shadow-[var(--shadow-card)] sm:p-5 lg:sticky lg:top-[4.5rem]"
+        >
+          <h2 id="execution-summary-heading" className="text-sm font-bold text-[var(--text-primary)]">作业摘要</h2>
+          <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2.5 text-[var(--text-secondary)]">
+            <dt>运行器</dt>
+            <dd className="truncate text-right font-semibold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[kind]}</dd>
+            <dt>题库</dt>
+            <dd title={selectedSuite?.display_name} className="truncate text-right font-semibold text-[var(--text-primary)]">
+              {selectedSuite?.display_name || '待选择'}
+            </dd>
+            <dt>范围</dt>
+            <dd className="truncate text-right font-semibold text-[var(--text-primary)]">
+              {selectionMode === 'all' ? '全量评测' : `抽测 · ${parsedTasks.length} 题`}
+            </dd>
+            <dt>模型</dt>
+            <dd title={modelRoute} className="truncate text-right font-mono text-[var(--text-primary)]">{modelRoute || '待填写'}</dd>
+          </dl>
+          <div
+            className={`min-h-24 space-y-1.5 rounded-lg border px-3 py-2.5 ${
+              activeRunnerAvailable && !dockerGroupAttached
+                ? 'border-[var(--sem-pass-border)] bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)]'
+                : 'border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] text-[var(--sem-zero-fg)]'
+            }`}
+          >
+            <div aria-label={`isolated_runner_ready: ${String(isolatedRunnerReady)}`} className="flex items-start gap-1.5 font-semibold">
+              {activeRunnerAvailable && !dockerGroupAttached
+                ? <CheckCircle2 aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
+                : <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />}
+              <span>
+                {runnerStatus}{isolatedRunnerReady && runnerPid ? ` (PID ${runnerPid})` : ''}
+              </span>
+            </div>
+            <p className="text-[11px] leading-4">
+              {capsQ.isPending
+                ? '稍候即可查看可用的运行能力。'
+                : dockerGroupAttached
+                  ? '检测到 Web 进程加入 Docker 组。请联系管理员移除该权限。'
+                  : activeRunnerAvailable
+                    ? '当前运行器可启动，作业将在独立进程执行。'
+                    : (
+                      <>
+                        {runnerDisconnectReason && <span className="block break-words">{runnerDisconnectReason}</span>}
+                        {isolatedRunnerReady ? '请选择已启用的运行器，或联系管理员开通。' : '请联系管理员启动隔离 Runner。仍可生成 --plan。'}
+                      </>
+                    )}
+            </p>
+            <span
+              aria-label={`docker_group_attached: ${String(dockerGroupAttached)}`}
+              title="docker_group_attached"
+              className="flex flex-wrap items-center gap-x-1.5 text-[11px]"
+            >
+              {dockerGroupAttached ? <ShieldAlert aria-hidden="true" className="size-3 shrink-0" /> : <ShieldCheck aria-hidden="true" className="size-3 shrink-0" />}
+              <span>Web 进程{dockerGroupAttached ? '已加入 Docker 组' : '未加入 Docker 组'}</span>
+              <code className="text-[10px] text-[var(--text-secondary)]">docker_group_attached: {String(dockerGroupAttached)}</code>
+            </span>
           </div>
-
-          {/* 1.5 Action Buttons */}
-          <div className="flex flex-wrap items-center gap-2.5 pt-1">
-            <button
-              type="button"
-              disabled={!canWrite || planMut.isPending || !suiteId}
-              onClick={() => planMut.mutate()}
-              aria-label="生成 --plan 预检与 CLI 命令"
-              className="lrm-press inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-elevated)] hover:border-[var(--brand-primary)] disabled:opacity-45 disabled:cursor-not-allowed px-3 py-1.5 font-semibold text-[var(--text-primary)] cursor-pointer"
-            >
-              <ShieldCheck className="w-3.5 h-3.5 text-[var(--brand-primary)]" />
-              <span>{planMut.isPending ? '预检中...' : '生成 --plan 预检 & CLI'}</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => void handleCopyCli()}
-              aria-label="复制脱敏 CLI 命令"
-              className="lrm-press inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:bg-[var(--bg-elevated)] px-3 py-1.5 font-medium text-[var(--text-primary)] cursor-pointer"
-            >
-              <Copy className="w-3.5 h-3.5 text-[var(--text-secondary)]" />
-              <span>复制 CLI 命令</span>
-            </button>
-
+          {!canWrite && (
+            <p className="flex items-start gap-1.5 text-[11px] text-[var(--text-secondary)]">
+              <Lock aria-hidden="true" className="mt-0.5 size-3 shrink-0" /> 预检与启动需要研究员或管理员权限。
+            </p>
+          )}
+          <div className="grid gap-2">
             <button
               type="button"
               disabled={!canWrite || submitMut.isPending || !suiteId || dockerGroupAttached || !activeRunnerAvailable}
               onClick={() => submitMut.mutate()}
               aria-label="启动隔离执行作业"
-              title={
-                !canWrite
-                  ? '仅 Researcher / Admin 可启动隔离执行作业'
-                  : !isolatedRunnerReady
-                    ? runnerDisconnectReason || '尚未接入独立隔离 Runner，当前仅开放 --plan 预检与 CLI 导出'
-                    : !activeRunnerAvailable
-                      ? runnerDisconnectReason || `当前隔离 Runner 未支持 ${kind}`
-                      : '提交受控作业到独立隔离 Runner'
-              }
-              className="lrm-press inline-flex items-center gap-1.5 rounded-lg bg-[var(--brand-primary)] hover:bg-[var(--brand-hover)] disabled:opacity-45 disabled:cursor-not-allowed px-3.5 py-1.5 font-semibold text-white cursor-pointer"
+              className="lrm-press inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white hover:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-45"
             >
-              <Play className="w-3.5 h-3.5" />
-              <span>{submitMut.isPending ? '正在启动隔离作业...' : '启动隔离执行作业'}</span>
+              <Play aria-hidden="true" className="size-4" />
+              {submitMut.isPending ? '正在启动…' : '启动执行'}
             </button>
-
-            <span className="ml-auto text-[11px] text-[var(--text-muted)]">
-              {!isolatedRunnerReady && runnerDisconnectReason
-                ? runnerDisconnectReason
-                : '凭据仅通过服务端受保护 0600 gateways.env 注入，前端绝不接触明文 API Key'}
-            </span>
+            <button
+              type="button"
+              disabled={!canWrite || planMut.isPending || !suiteId}
+              onClick={() => {
+                const preview = cliPreviewRef.current;
+                if (preview) {
+                  preview.open = true;
+                  preview.scrollIntoView({ block: 'nearest' });
+                }
+                planMut.mutate();
+              }}
+              aria-label="生成 --plan 预检与 CLI 命令"
+              className="lrm-press inline-flex min-h-9 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-elevated)] px-3 py-2 font-semibold text-[var(--text-primary)] hover:border-[var(--brand-primary)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <Terminal aria-hidden="true" className="size-3.5 text-[var(--brand-primary)]" />
+              {planMut.isPending ? '正在预检…' : '生成 --plan 预览'}
+            </button>
           </div>
-
-          {/* 1.6 Redacted Command Preview + Storage Boundary Badges */}
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-3 space-y-2.5">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2 text-[11px] font-semibold text-[var(--text-primary)]">
-                <Terminal className="w-3.5 h-3.5 text-[var(--brand-primary)]" />
-                <span>脱敏 CLI 命令预览 (command_preview)</span>
-                {planResult ? (
-                  <span className="inline-flex items-center gap-1 rounded-full bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)] border border-[var(--sem-pass-border)] px-2 py-0.5 text-[10px]">
-                    <CheckCircle2 className="w-3 h-3" /> 服务端 --plan 已校验
-                  </span>
-                ) : (
-                  <span className="rounded-full bg-[var(--sem-unscored-bg)] text-[var(--sem-unscored-fg)] border border-[var(--sem-unscored-border)] px-2 py-0.5 text-[10px]">
-                    实时预览
-                  </span>
-                )}
-              </div>
-
-              {/* Storage Boundary Badges */}
-              <div className="flex flex-wrap items-center gap-1.5 text-[10px] font-mono">
-                <span
-                  className={`rounded-md border px-2 py-0.5 ${
-                    workProbeOk
-                      ? 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)] border-[var(--sem-pass-border)]'
-                      : 'bg-[var(--sem-err-bg)] text-[var(--sem-err-fg)] border-[var(--sem-err-border)]'
-                  }`}
-                >
-                  0700 私有 --work
-                </span>
-                <span
-                  className={`rounded-md border px-2 py-0.5 ${
-                    evProbeOk
-                      ? 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)] border-[var(--sem-pass-border)]'
-                      : 'bg-[var(--sem-err-bg)] text-[var(--sem-err-fg)] border-[var(--sem-err-border)]'
-                  }`}
-                >
-                  0700 独立证据存储
-                </span>
-                <span className="rounded-md border border-[var(--sem-running-border)] bg-[var(--sem-running-bg)] text-[var(--sem-running-fg)] px-2 py-0.5">
-                  共享层仅输出 Public DTO
-                </span>
-                <span
-                  className={`rounded-md border px-2 py-0.5 ${
-                    !dockerGroupAttached
-                      ? 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)] border-[var(--sem-pass-border)]'
-                      : 'bg-[var(--sem-err-bg)] text-[var(--sem-err-fg)] border-[var(--sem-err-border)]'
-                  }`}
-                >
-                  docker_group_attached={String(dockerGroupAttached)}
-                </span>
-              </div>
-            </div>
-
-            <pre className="m-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-2 font-mono text-[11px] text-[var(--text-primary)] overflow-x-auto whitespace-pre-wrap break-all">
-              {activeCommandPreview}
-            </pre>
-
-            {planResult && planResult.plan.warnings.length > 0 && (
-              <div className="space-y-1">
-                {planResult.plan.warnings.map((w, idx) => (
-                  <div
-                    key={idx}
-                    className="rounded-md border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] px-2.5 py-1.5 text-[11px] text-[var(--sem-zero-fg)] flex items-start gap-1.5"
-                  >
-                    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                    <span>{w}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
+        </aside>
       </section>
 
       {/* =====================================================================
@@ -2643,7 +2661,7 @@ export function ExecutionPage() {
                         connectFromSeqRef.current = 0;
                         setSelectedJobId(job.job_id);
                       }}
-                      className={`cursor-pointer transition-colors ${
+                      className={`group/row-action cursor-pointer transition-colors ${
                         isSelected ? 'bg-[var(--brand-tint)]/55' : 'hover:bg-[var(--bg-elevated)]/60'
                       }`}
                     >
@@ -2697,13 +2715,14 @@ export function ExecutionPage() {
                       </td>
                       <td className="py-2.5 px-3" onClick={(e) => e.stopPropagation()}>
                         {job.batch_id ? (
-                          <Link
-                            to={`/eval/batches/${encodeURIComponent(job.batch_id)}`}
-                            className="inline-flex items-center gap-1 font-mono text-[11px] text-[var(--brand-primary)] hover:underline"
-                          >
-                            <span>{job.batch_id}</span>
-                            <ExternalLink className="w-3 h-3" />
-                          </Link>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono text-[11px] text-[var(--text-secondary)]">{job.batch_id}</span>
+                            <RowActionIcon
+                              variant="details"
+                              label={`查看批次详情 ${job.batch_id}`}
+                              to={`/eval/batches/${encodeURIComponent(job.batch_id)}`}
+                            />
+                          </div>
                         ) : (
                           <span className="text-[11px] text-[var(--text-muted)]">—</span>
                         )}
