@@ -198,6 +198,37 @@ class CompareService:
         return False
 
     @staticmethod
+    def _unmeasured_verdict(benchmark: dict[str, Any], issue: str | None = None) -> dict[str, Any]:
+        if issue is None:
+            issue = {
+                "raw_visible_unintegrated": "not_integrated",
+                "pending_version_pin": "pending_dataset_version",
+            }.get(benchmark["status"], "missing_comparable_scores")
+        reasons = {
+            "not_integrated": "原始数据已登记，评测尚未接入。",
+            "pending_dataset_version": "上游题库的版本、语言或数据划分尚待确认。",
+            "different_scoring_protocol": "所选结果的评分协议不同，不能据此计算相对变化。",
+            "different_dataset_release": "所选批次来自同一基准的不同数据集发行版。",
+            "no_common_valid_tasks": "所选批次没有双方都取得有效评分的题目。",
+            "missing_comparable_scores": "当前对比对象缺少该基准的可比成绩。",
+        }
+        return {
+            "benchmark_slug": benchmark["benchmark_slug"],
+            "dataset_release_id": None,
+            "track_slug": benchmark["track_slug"],
+            "scoring_protocol": None,
+            "denominator_kind": None,
+            "baseline_score": None,
+            "candidate_score": None,
+            "delta_pp": None,
+            "rel_pct": None,
+            "coverage": "0/0",
+            "status": "undeterminable",
+            "reason_code": issue,
+            "reason": reasons[issue],
+        }
+
+    @staticmethod
     def _build_drift_agg_groups(
         drift_detail_groups: list[dict[str, Any]],
         *,
@@ -628,6 +659,7 @@ class CompareService:
         verdict_agentic: list[dict[str, Any]] = []
         verdict_guardrails: list[dict[str, Any]] = []
         auto_insights: list[dict[str, Any]] = []
+        issues_by_benchmark: dict[str, str] = {}
 
         comparison_id = f"cmp_{secrets.token_hex(8)}"
 
@@ -640,9 +672,8 @@ class CompareService:
             rel_subjs = [s for s in subjects if subj_batches[str(s["id"])].get("dataset_release_id") == rel_id]
             eff_proto = scoring_protocol or rel["default_protocol"]
             protocols = {str(subj_batches[str(s["id"])]["scoring_protocol"]) for s in rel_subjs if subj_batches[str(s["id"])].get("scoring_protocol")}
-            comparable = len(rel_subjs) == len(subjects) and self._protocols_compatible(
-                protocols, scoring_protocol, rel.get("benchmark_slug")
-            )
+            protocols_compatible = self._protocols_compatible(protocols, scoring_protocol, rel["benchmark_slug"])
+            comparable = len(rel_subjs) == len(subjects) and protocols_compatible
 
             ep_maps = ep_maps_by_rel[rel_id]
             rel_sids = [str(s["id"]) for s in rel_subjs]
@@ -672,6 +703,22 @@ class CompareService:
             fault_excluded = len(common_covered) - len(common_valid)
             n_valid = len(common_valid)
             n_covered = len(common_covered)
+
+            issue = None
+            if len(rel_subjs) == len(subjects):
+                if not protocols_compatible:
+                    issue = "different_scoring_protocol"
+                elif not n_valid:
+                    issue = "no_common_valid_tasks"
+            elif all(
+                b.get("benchmark_slug") == rel["benchmark_slug"] and b.get("dataset_release_id")
+                for b in subj_batches.values()
+            ):
+                issue = "different_dataset_release"
+            else:
+                issue = "missing_comparable_scores"
+            if issue:
+                issues_by_benchmark[rel["benchmark_slug"]] = issue
 
             # Compute exact unrounded scores per subject
             raw_common_valid_pct: dict[str, float] = {}
@@ -778,6 +825,7 @@ class CompareService:
                 "raw_dataset_name": rel["bm_display_name"],
                 "scoring_protocol": eff_proto,
                 "comparable": comparable,
+                "comparison_issue": issue,
                 "intersection": {
                     "common_covered_tasks": n_covered,
                     "common_valid_scored_tasks": n_valid,
@@ -814,7 +862,7 @@ class CompareService:
 
             # Pairwise insight & verdict entry between baseline and first candidate
             cand_id = next((str(s["id"]) for s in rel_subjs if str(s["id"]) != baseline_id), None)
-            if cand_id and baseline_id in raw_common_valid_pct and cand_id in raw_common_valid_pct:
+            if comparable and cand_id and baseline_id in raw_common_valid_pct and cand_id in raw_common_valid_pct:
                 b_val = raw_common_valid_pct[baseline_id]
                 c_val = raw_common_valid_pct[cand_id]
                 d_pp, r_pct = compute_unrounded_delta(b_val, c_val)
@@ -877,24 +925,8 @@ class CompareService:
                 meta = json.loads(bm["metadata_json"] or "{}")
                 if not meta.get("core_14") or bm["benchmark_slug"] in measured_slugs:
                     continue
-                reason_map = {
-                    "raw_visible_unintegrated": "原始数据可见、未接入评测，无法判定是否退步",
-                    "pending_version_pin": "上游题库待固定版本/语言/split 接入，无法判定",
-                }
-                entry = {
-                    "benchmark_slug": bm["benchmark_slug"],
-                    "dataset_release_id": None,
-                    "track_slug": bm["track_slug"],
-                    "scoring_protocol": None,
-                    "denominator_kind": None,
-                    "baseline_score": None,
-                    "candidate_score": None,
-                    "delta_pp": None,
-                    "rel_pct": None,
-                    "coverage": "0/0",
-                    "status": "undeterminable",
-                    "reason": reason_map.get(bm["status"], "当前对比对象缺少该基准可比评分，无法判定"),
-                }
+                issue = issues_by_benchmark.get(bm["benchmark_slug"])
+                entry = self._unmeasured_verdict(bm, issue if issue != "missing_comparable_scores" else None)
                 if bm["goal_type"] == "optimize_gain":
                     verdict_agentic.append(entry)
                 elif bm["goal_type"] == "non_regression_guardrail":
@@ -1988,28 +2020,11 @@ class CompareService:
         if include_verdict:
             measured_slugs = {v["benchmark_slug"] for v in verdict_agentic + verdict_guardrails}
             core_bms = self.db.fetchall("SELECT * FROM benchmarks ORDER BY track_slug, benchmark_slug")
-            reason_map = {
-                "raw_visible_unintegrated": "原始数据可见、未接入评测，无法判定是否退步",
-                "pending_version_pin": "上游题库待固定版本/语言/split 接入，无法判定",
-            }
             for bm in core_bms:
                 meta_j = json.loads(bm["metadata_json"] or "{}")
                 if not meta_j.get("core_14") or bm["benchmark_slug"] in measured_slugs:
                     continue
-                entry = {
-                    "benchmark_slug": bm["benchmark_slug"],
-                    "dataset_release_id": None,
-                    "track_slug": bm["track_slug"],
-                    "scoring_protocol": None,
-                    "denominator_kind": None,
-                    "baseline_score": None,
-                    "candidate_score": None,
-                    "delta_pp": None,
-                    "rel_pct": None,
-                    "coverage": "0/0",
-                    "status": "undeterminable",
-                    "reason": reason_map.get(bm["status"], "当前对比对象缺少该基准可比评分，无法判定"),
-                }
+                entry = self._unmeasured_verdict(bm)
                 if bm["goal_type"] == "optimize_gain":
                     verdict_agentic.append(entry)
                 elif bm["goal_type"] == "non_regression_guardrail":
@@ -2040,7 +2055,7 @@ class CompareService:
                     "text": (
                         f"{subj_aliases[baseline_id]} vs {subj_aliases[cand_id]} 在 2026-11-20 历史总表中共有 {n_common}/23 项共同有分基准；"
                         f"防退化护栏（阈值 {regression_threshold_pp:+.1f} pp）：{len(pass_items)} 项维持/提升、"
-                        f"{len(reg_items)} 项触及退步阈值、{len(undet_items)} 项缺测无法判定。"
+                        f"{len(reg_items)} 项触及退步阈值、{len(undet_items)} 项未形成可比结果。"
                     ),
                     "filter_link": {"comparison_id": comparison_id},
                 }

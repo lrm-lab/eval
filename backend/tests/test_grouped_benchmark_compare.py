@@ -134,6 +134,44 @@ def _payload(*batch_ids: str) -> dict:
     }
 
 
+def test_compare_reports_why_batches_cannot_produce_a_verdict(case) -> None:
+    _, db, client, headers, _ = case
+    _insert_batch(db, "a", {"ordinary": (1, "same")})
+    _insert_batch(db, "b", {"ordinary": (0, "same")}, protocol="other-protocol")
+    _insert_batch(db, "c", {"ordinary": (1, "same")}, release=NEXT)
+    _insert_batch(db, "d", {"ordinary": (None, "same")})
+    with db.transaction() as conn:
+        conn.execute(
+            "UPDATE benchmarks SET goal_type = 'optimize_gain', metadata_json = ? WHERE benchmark_slug = ?",
+            (json.dumps({"core_14": True}), BENCHMARK),
+        )
+        # Both batches contain scores read under the requested protocol, but their native
+        # protocols are incompatible. A non-empty task intersection must not create a verdict.
+        conn.execute(
+            "UPDATE trial_protocol_scores SET scoring_protocol = ? WHERE batch_id = 'b'", (PROTOCOL,)
+        )
+    for other, code in (
+        ("b", "different_scoring_protocol"),
+        ("c", "different_dataset_release"),
+        ("d", "no_common_valid_tasks"),
+    ):
+        payload = _payload("a", other)
+        payload.pop("scope")
+        payload["include_verdict"] = True
+        response = client.post("/api/v1/compare/query", headers=headers, json=payload)
+        assert response.status_code == 200, response.text
+        result = response.json()
+        assert {row["comparison_issue"] for row in result["rows"]} == {code}
+        entry = next(
+            item for item in result["gain_vs_guardrail_verdict"]["agentic_gains"]
+            if item["benchmark_slug"] == BENCHMARK
+        )
+        assert (entry["reason_code"], entry["status"], entry["delta_pp"]) == (code, "undeterminable", None)
+        assert result["auto_insights"] == []
+        if other == "b":
+            assert result["rows"][0]["intersection"]["common_valid_scored_tasks"] == 1
+
+
 def test_grouped_profile_and_cross_dataset_matrix_use_exact_authorized_batches(case) -> None:
     _, db, client, _, uid = case
     _insert_batch(db, "a_current", {"ordinary": (1, "same"), "fault": (None, "same")})
