@@ -21,8 +21,8 @@
       "size": 7381
     },
     "harbor.toml": {
-      "sha256": "d471687ef9abe9aad07ada994dfaa167066c25f20542ebd05888873c9e2b8714",
-      "size": 1736
+      "sha256": "f661101fae9304b2bd914813d4ab669f2b7ca70e6045557113796b317def2831",
+      "size": 1789
     },
     "publish_v2.py": {
       "sha256": "e63903bccabec7efd3dc12ab93251246aa72e1952e1aa9e823f44ded19564bcf",
@@ -33,8 +33,8 @@
       "size": 17743
     },
     "run.py": {
-      "sha256": "1f7fc028150a0fcd042e0cf9afc9e70b4079a42528929e4e01b03c3dca0606d2",
-      "size": 54715
+      "sha256": "68021963f67bf49ebdbb0fc4df101cfd5f2559772a0cac06b016870fd634e712",
+      "size": 54824
     },
     "synthesis_audit.py": {
       "sha256": "215031a72fa3eb78f20a85c89b08d0eda3661d1a6208700389797a939cb5d8a7",
@@ -71,6 +71,10 @@
     "vlmevalkit.py": {
       "sha256": "d3c30f797e9ba4a065744c2999da97fd43111977fda5dee81bfcd9725ddcdc76",
       "size": 18668
+    },
+    "wildclaw-optional-vars.txt": {
+      "sha256": "2aeaa833b66e22c86a4185cf62cb911cbd665991b56e38f5b1ab1684613ff0e1",
+      "size": 121
     }
   },
   "version": "m3-rev2-pinned-v1"

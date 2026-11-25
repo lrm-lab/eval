@@ -1,0 +1,4 @@
+# Declare optional WildClaw inputs to Harbor without assigning any values.
+BRAVE_API_KEY
+OPENROUTER_BASE_URL
+JUDGE_MODEL

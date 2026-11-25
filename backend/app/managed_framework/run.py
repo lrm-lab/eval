@@ -474,10 +474,11 @@ def handoff_command(args, dataset, bundle, profile):
     from benchpi.__main__ import cli_args
     from types import SimpleNamespace
 
+    env_file = DEFAULT_CONFIG.with_name("wildclaw-optional-vars.txt") if profile == "wildclaw" else None
     template = SimpleNamespace(
         dataset=dataset, suite=profile, task=args.task, agent=args.agent if args.agent != "claude-code" else "pi",
         model=args.model, thinking=args.thinking, version=args.agent_version, env="docker", jobs=args.work / "jobs",
-        job_name=args.batch, concurrent=args.concurrent, attempts=args.attempts, env_file=None,
+        job_name=args.batch, concurrent=args.concurrent, attempts=args.attempts, env_file=env_file,
         base_url=args.base_url, setup_timeout_multiplier=10,
     )
     cmd = cli_args(template)

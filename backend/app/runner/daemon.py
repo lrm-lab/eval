@@ -33,6 +33,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.parse
 import uuid
 from contextlib import closing
@@ -701,9 +702,15 @@ class IsolatedRunnerManager:
         effective_work_dir = self._original_work(spec) if spec.get("resume_mode") == "native" else work_dir
 
         run_py = resolve_verified_managed_script(self.settings, "run.py")
-        resolved_toml = materialize_managed_run_config(self.settings, spec, effective_work_dir)
+        resolved_toml = materialize_managed_run_config(
+            self.settings, spec, effective_work_dir,
+            harbor_agent_ca_bundle=os.environ.get("SSL_CERT_FILE"),
+        )
         raw_output_root = effective_work_dir / "raw-output"
         uses_gateway = spec["kind"] == "harbor_gateway"
+        harbor_agent_ca_bundle = None
+        if spec["kind"] == "harbor":
+            harbor_agent_ca_bundle = tomllib.loads(resolved_toml.read_text(encoding="utf-8")).get("agent_ca_bundle")
         cmd = build_managed_run_py_command(
             python_exe=self._gateway_python if uses_gateway else sys.executable,
             run_py_path=str(run_py),
@@ -713,6 +720,7 @@ class IsolatedRunnerManager:
             work_dir=str(effective_work_dir),
             output_dir=str(raw_output_root),
             plan_only=False,
+            harbor_agent_ca_bundle=harbor_agent_ca_bundle,
         )
 
         extra_env: dict[str, str] = {

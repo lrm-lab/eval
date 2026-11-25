@@ -98,6 +98,8 @@ def materialize_managed_run_config(
     settings: Settings,
     spec: dict[str, Any],
     effective_work_dir: Path,
+    *,
+    harbor_agent_ca_bundle: str | None = None,
 ) -> Path:
     """Write a deterministic `0600` job-scoped TOML under `effective_work_dir/.resolved_harbor.toml`
     derived strictly from the managed `harbor.toml` (for Harbor / Harbor Gateway) or
@@ -175,6 +177,9 @@ def materialize_managed_run_config(
         for top_key in ("bundle", "claude_code_version", "opencode_version"):
             if top_key in cfg and cfg[top_key] is not None:
                 resolved_doc[top_key] = cfg[top_key]
+        if kind == "harbor" and harbor_agent_ca_bundle:
+            # Keep the operator's trust store in the frozen native inputs for resume.
+            resolved_doc["agent_ca_bundle"] = str(Path(harbor_agent_ca_bundle).resolve(strict=True))
         resolved_doc["datasets"] = {suite_id: suite_tbl}
 
     _write_private(out_toml, _dump_toml_doc(resolved_doc).encode())
@@ -193,6 +198,7 @@ def build_managed_run_py_command(
     work_dir: str,
     output_dir: str,
     plan_only: bool = False,
+    harbor_agent_ca_bundle: str | None = None,
 ) -> list[str]:
     """Construct the exact `managed_framework/run.py` command line for Harbor, Harbor Gateway,
     VLMEvalKit, and Direct. Strictly conforms to `run.py` argparse:
@@ -228,6 +234,8 @@ def build_managed_run_py_command(
             cmd.extend(["--agent-version", str(spec["harness_version"])])
         if kind == "harbor_gateway":
             cmd.append("--gateway-capture")
+        elif harbor_agent_ca_bundle:
+            cmd.extend(["--agent-ca-bundle", harbor_agent_ca_bundle])
         cmd.extend(
             [
                 "--attempts",
