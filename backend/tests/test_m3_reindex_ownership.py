@@ -14,9 +14,9 @@ from app.main import create_app
 from tests.conftest import create_user, login_client
 
 
-def submission(owner="researcher"):
+def submission(owner="researcher", *, batch_name="team-run"):
     return {
-        "batch_name": "team-run", "batch_id": make_batch_id("runner_published:team-run"),
+        "batch_name": batch_name, "batch_id": make_batch_id(f"runner_published:{batch_name}"),
         "source_namespace": "runner_published", "evidence_approval": "approved_restricted",
         "owner_id": owner, "project_id": "science",
     }
@@ -45,7 +45,7 @@ def test_runner_and_external_bindings(tmp_path, isolated_settings):
     pw = "ResearchTest!2026"
     owner = create_user(ctx.db, username="researcher", password=pw, projects=["science"])
     create_user(ctx.db, username="admin", password=pw, role="admin")
-    doc = submission(owner)
+    doc = submission(owner, batch_name="team..run")
     bid = doc["batch_id"]
     write_runner_submission(cfg.state_dir, doc)
     batch = cfg.published_batches_dir / doc["batch_name"]

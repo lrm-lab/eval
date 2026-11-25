@@ -27,6 +27,7 @@ from app.api.errors import AppError
 from app.config import Settings
 from app.db.database import Database
 from app.db.migrations import utcnow_iso
+from app.indexing.hot_indexer import write_runner_submission
 from app.indexing.identity import make_batch_id
 from app.logging_setup import (
     MAX_JOB_DETAIL_STDIO_READ_BYTES,
@@ -1381,20 +1382,10 @@ class ExecutionService:
         owner_id: str,
         generation_id: str | None = None,
     ) -> None:
-        """Persist authoritative `(project_id, owner_id, evidence_approval)` for `runner_published`
-        batches strictly inside `0700 <state_dir>/runner-submissions/<batch_name>.json` (0600) so
-        polling, forced reindex, and fresh-DB restart recovery NEVER drift back to default/system/pending."""
-        if self.settings.state_dir is None:
+        """Save the Runner batch binding for indexing and database recovery."""
+        state_dir = self.settings.state_dir
+        if state_dir is None:
             return
-        sub_dir = self.settings.state_dir / "runner-submissions"
-        sub_dir.mkdir(parents=True, exist_ok=True)
-        try:
-            os.chmod(sub_dir, 0o700)
-        except OSError:
-            pass
-        meta_path = sub_dir / f"{batch_name}.json"
-        if meta_path.is_symlink():
-            raise AppError(400, "INVALID_PATH_OR_ID", "拒绝符号链接提交元数据文件")
         doc = {
             "batch_name": batch_name,
             "batch_id": batch_id,
@@ -1406,16 +1397,7 @@ class ExecutionService:
             "generation_id": generation_id,
             "recorded_at": utcnow_iso(),
         }
-        raw = (json.dumps(doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
-        with tempfile.NamedTemporaryFile(dir=sub_dir, delete=False) as tf:
-            tmp_p = Path(tf.name)
-            try:
-                tf.write(raw)
-                os.fchmod(tf.fileno(), 0o600)
-                tf.close()
-                tmp_p.replace(meta_path)
-            finally:
-                tmp_p.unlink(missing_ok=True)
+        write_runner_submission(state_dir, doc)
 
     # ------------------------------------------------------------------
     # Submit / Cancel / Resume via External Isolated Runner IPC
