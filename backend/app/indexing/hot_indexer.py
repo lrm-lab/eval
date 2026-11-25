@@ -197,8 +197,10 @@ def _batch_top_snapshot(
                     metrics = _stat_tuple(batch_dir / "vlmevalkit" / "metrics.json")
                 else:
                     try:
+                        # Resolving a known metrics name needs search permission on
+                        # its directory, even when listing that directory is denied.
                         metrics_dir = os.open(
-                            entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd
+                            entry.name, os.O_PATH | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd
                         )
                         try:
                             metrics = _file_identity(os.stat("metrics.json", dir_fd=metrics_dir))
@@ -227,13 +229,17 @@ class _BatchProbe:
     error: OSError | None = None
 
 
-def _probe_batch(batch_dir: Path, *, speculative: bool = False) -> _BatchProbe:
+def _probe_batch(
+    batch_dir: Path, *, root_members: Future[dict[Path, int]] | None = None
+) -> _BatchProbe:
     inode = None
     try:
-        if speculative:
+        if root_members is not None:
             fd = os.open(batch_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
             try:
                 inode = os.fstat(fd).st_ino
+                if root_members.result().get(batch_dir) != inode:
+                    return _BatchProbe(inode, None, {})
                 digest, files = _batch_top_snapshot(batch_dir, directory_fd=fd)
             finally:
                 os.close(fd)
@@ -3070,7 +3076,7 @@ class HotIndexer:
 
     def _scan_shared_batches(
         self,
-        entries: dict[Path, int],
+        root_members: Future[dict[Path, int]],
         early_probes: dict[Path, Future[_BatchProbe]],
         pool: ThreadPoolExecutor,
         *,
@@ -3078,6 +3084,7 @@ class HotIndexer:
         deep_trial_enrich: bool,
     ) -> Counter[str]:
         counts: Counter[str] = Counter()
+        entries = root_members.result()
         # A fresh root listing is authoritative. Discard work for names that disappeared.
         for removed in early_probes.keys() - entries.keys():
             early_probes[removed].cancel()
@@ -3125,7 +3132,7 @@ class HotIndexer:
             probe = future.result()
             if d in early_probes and probe.inode != entries[d]:
                 # The directory may have been replaced since the early probe opened it.
-                probe = _probe_batch(d, speculative=True)
+                probe = _probe_batch(d, root_members=root_members)
                 if probe.error is None and probe.inode != entries[d]:
                     counts["error"] += 1
                     continue
@@ -3205,20 +3212,23 @@ class HotIndexer:
         t0 = time.perf_counter()
         csv_path = self.settings.legacy_root_dir / "leaderboard.csv"
         with ThreadPoolExecutor(max_workers=20) as pool:
-            shared_entries = pool.submit(_batch_entries, self.settings.harbor_runs_dir)
+            root_members = pool.submit(_batch_entries, self.settings.harbor_runs_dir)
             csv_metadata = pool.submit(_stat_if_type, csv_path, stat.S_ISREG)
             dataset_metadata = [
                 (path, release_id, split, pool.submit(_stat_if_type, path, stat.S_ISDIR))
                 for path, release_id, split in self._dataset_folders()
             ]
-            # The previous round supplies hints only. Each early probe still reads the
-            # directory, and indexing waits for this round's root membership and inode.
-            early_probes = {} if force else {
-                path: pool.submit(_probe_batch, path, speculative=True)
-                for path in self._readable_shared_batches
-            }
+            # Overlap opening a bounded set of directories with root discovery.
+            # Workers read no watched files until the current root listing confirms
+            # the directory's identity. Later batches use the ordinary probe.
+            early_probes = {}
+            if not force:
+                for path in self._readable_shared_batches[:16]:
+                    if root_members.done():
+                        break
+                    early_probes[path] = pool.submit(_probe_batch, path, root_members=root_members)
             counts = self._scan_shared_batches(
-                shared_entries.result(), early_probes, pool, force=force, deep_trial_enrich=deep_trial_enrich
+                root_members, early_probes, pool, force=force, deep_trial_enrich=deep_trial_enrich
             )
 
         # Check ownership again for every locally Runner-published batch (I-05 / S-02).

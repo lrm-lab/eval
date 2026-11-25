@@ -232,25 +232,25 @@ def test_early_probe_rereads_directory_replaced_before_root_confirmation(
         }) + "\n", encoding="utf-8")
     assert indexer.run_hot_scan()["batches"] == {"indexed": 1}
 
-    old_snapshot_ready = threading.Event()
+    old_handle_opened = threading.Event()
     root_entries = hot_indexer._batch_entries
-    probe_batch = hot_indexer._probe_batch
+    open_directory = os.open
 
-    def mark_probe(path: Path, *, speculative: bool = False):
-        snapshot = probe_batch(path, speculative=speculative)
-        if path == batch and speculative:
-            old_snapshot_ready.set()
-        return snapshot
+    def mark_open(path, flags, *args, **kwargs):
+        fd = open_directory(path, flags, *args, **kwargs)
+        if path == batch:
+            old_handle_opened.set()
+        return fd
 
     def replace_before_listing(root: Path) -> dict[Path, int]:
         if root == batch.parent:
-            assert old_snapshot_ready.wait(timeout=5)
+            assert old_handle_opened.wait(timeout=5)
             batch.rename(isolated_settings.tianxi_root / "retired")
             replacement.rename(batch)
         return root_entries(root)
 
     with monkeypatch.context() as patch:
-        patch.setattr(hot_indexer, "_probe_batch", mark_probe)
+        patch.setattr(os, "open", mark_open)
         patch.setattr(hot_indexer, "_batch_entries", replace_before_listing)
         assert indexer.run_hot_scan()["batches"] == {"indexed": 1}
 
@@ -258,6 +258,84 @@ def test_early_probe_rereads_directory_replaced_before_root_confirmation(
     assert row == {"valid_mean": 1.0}
     assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 1}
     db.close_thread_connection()
+
+
+def test_preopened_batch_reads_search_only_metrics_after_root_listing(
+    isolated_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated_settings.tianxi_root = isolated_settings.runtime_dir / "tianxi"
+    isolated_settings.config_dir = Path(__file__).resolve().parents[2] / "config"
+    probe_isolated_dir(isolated_settings.state_dir, create=True)
+    db = Database(isolated_settings.db_path)
+    init_db(db)
+    sync_taxonomy_to_db(db, isolated_settings.taxonomy_file)
+    indexer = HotIndexer(isolated_settings, db)
+
+    batch = isolated_settings.harbor_runs_dir / "preopened-metrics"
+    metrics = batch / "vlmevalkit" / "metrics.json"
+    metrics.parent.mkdir(parents=True)
+    (batch / "manifest.json").write_text('{"dataset": "ai2d", "runner": "vlmevalkit"}', encoding="utf-8")
+    (batch / "episodes.jsonl").write_text(
+        '{"trial_id": "trial-local", "task_id": "t1", "status": "scored", "reward": 1.0}\n',
+        encoding="utf-8",
+    )
+    metrics.write_text('[{"metric": "accuracy", "value": 0.4}]', encoding="utf-8")
+    assert indexer.run_hot_scan()["batches"] == {"indexed": 1}
+
+    handle_opened = threading.Event()
+    fingerprint_started = threading.Event()
+    root_listed = threading.Event()
+    open_directory = os.open
+    root_entries = hot_indexer._batch_entries
+    snapshot = hot_indexer._batch_top_snapshot
+    before = metrics.stat()
+    parent_mtime = metrics.parent.stat().st_mtime_ns
+    batch_mtime = batch.stat().st_mtime_ns
+
+    def mark_open(path, flags, *args, **kwargs):
+        fd = open_directory(path, flags, *args, **kwargs)
+        if path == batch:
+            handle_opened.set()
+        return fd
+
+    def write_before_listing(root: Path) -> dict[Path, int]:
+        if root != batch.parent:
+            return root_entries(root)
+        assert handle_opened.wait(timeout=5)
+        # The whole metadata probe must wait for the root, despite opening its FD early.
+        assert not fingerprint_started.wait(timeout=0.1)
+        metrics.write_text('[{"metric": "accuracy", "value": 0.8}]', encoding="utf-8")
+        mtime = before.st_mtime_ns + 1_000_000_000
+        os.utime(metrics, ns=(mtime, mtime))
+        assert metrics.stat().st_ino == before.st_ino
+        assert metrics.parent.stat().st_mtime_ns == parent_mtime
+        assert batch.stat().st_mtime_ns == batch_mtime
+        entries = root_entries(root)
+        root_listed.set()
+        return entries
+
+    def check_fresh_snapshot(path: Path, *, directory_fd: int | None = None):
+        if path == batch:
+            fingerprint_started.set()
+            assert root_listed.is_set()
+            assert directory_fd is not None
+        return snapshot(path, directory_fd=directory_fd)
+
+    metrics.parent.chmod(0o100)
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(os, "open", mark_open)
+            patch.setattr(hot_indexer, "_batch_entries", write_before_listing)
+            patch.setattr(hot_indexer, "_batch_top_snapshot", check_fresh_snapshot)
+            assert indexer.run_hot_scan()["batches"] == {"indexed": 1}
+        row = db.fetchone("SELECT vlmeval_metrics_json FROM batches WHERE batch_id = ?", (
+            make_batch_id("harbor_runs:preopened-metrics"),
+        ))
+        assert json.loads(row["vlmeval_metrics_json"]) == [{"metric": "accuracy", "value": 0.8}]
+        assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 1}
+    finally:
+        metrics.parent.chmod(0o700)
+        db.close_thread_connection()
 
 
 def _write_approval_yaml(config_dir: Path, entries: list[dict]) -> None:
