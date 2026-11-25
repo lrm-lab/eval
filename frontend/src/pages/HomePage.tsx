@@ -23,6 +23,7 @@ import {
   StaggerItem,
 } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
+import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
 import { StateNoticeCard } from '../components/ui/Skeletons';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
@@ -83,6 +84,7 @@ export function HomePage() {
 
   const presets = optsQ.data?.presets || [];
   const activePreset = presets[selectedPresetIdx] || presets[0];
+  const verdictCandidate = activePreset?.payload.subjects[1];
 
   const verdictUrl = useMemo(() => {
     if (!activePreset || activePreset.payload.subjects.length < 2) return null;
@@ -340,6 +342,18 @@ export function HomePage() {
                 <ArrowRight className="w-3.5 h-3.5" />
               </button>
             </div>
+          </div>
+
+          <div className="mt-4">
+            <PublicBaselinePanel
+              candidates={verdictCandidate ? [{
+                id: verdictCandidate.id,
+                label: verdictCandidate.alias || '当前组合的待判定对象',
+                batchId: verdictCandidate.batch_id,
+              }] : []}
+              thresholdPp={Number(thresholdStr)}
+              emptyMessage="当前组合没有待判定对象。"
+            />
           </div>
 
           <div className="mt-4 min-h-[470px]">

@@ -20,6 +20,7 @@ from app.api.routes_direct_lab import router as direct_lab_router
 from app.api.routes_execution import router as execution_router
 from app.api.routes_leaderboard import router as leaderboard_router
 from app.api.routes_profiles import router as profiles_router
+from app.api.routes_public_baselines import router as public_baselines_router
 from app.api.routes_synth import router as synth_router
 from app.api.routes_system import router as system_router
 from app.api.routes_toolkit import router as toolkit_router
@@ -44,6 +45,7 @@ from app.services.diagnostics_service import DiagnosticsService
 from app.services.direct_lab_service import DirectLabService
 from app.services.execution_service import ExecutionService
 from app.services.profile_service import ProfileService
+from app.services.public_baseline_service import PublicBaselineService
 from app.services.query_service import QueryService
 from app.services.synth_service import SynthService
 from app.services.toolkit_service import ToolkitService
@@ -59,6 +61,7 @@ class AppContext:
     query: QueryService
     compare: CompareService
     profiles: ProfileService
+    public_baselines: PublicBaselineService
     gateway_profiles: GatewayProfileRegistry
     diagnostics: DiagnosticsService
     synth: SynthService
@@ -188,6 +191,7 @@ def create_app(
         query=query_svc,
         compare=CompareService(cfg, db, approval_registry=query_svc.approval_registry),
         profiles=ProfileService(cfg, db, approval_registry=query_svc.approval_registry),
+        public_baselines=PublicBaselineService(db, interval_seconds=cfg.public_baseline_sync_seconds),
         gateway_profiles=gateway_reg,
         diagnostics=DiagnosticsService(cfg, db, approval_registry=query_svc.approval_registry),
         synth=SynthService(cfg, db, approval_registry=query_svc.approval_registry, gateway_profiles=gateway_reg),
@@ -209,9 +213,11 @@ def create_app(
         ctx.execution.start_recovery()
         if run_startup_scan:
             ctx.coordinator.start()
+            ctx.public_baselines.start()
         try:
             yield
         finally:
+            ctx.public_baselines.stop()
             ctx.execution.stop()
             ctx.coordinator.stop()
             ctx.db.close_thread_connection()
@@ -239,6 +245,7 @@ def create_app(
     app.include_router(datasets_router)
     app.include_router(batches_router)
     app.include_router(compare_router)
+    app.include_router(public_baselines_router)
     app.include_router(diagnostics_router)
     app.include_router(synth_router)
     app.include_router(direct_lab_router)

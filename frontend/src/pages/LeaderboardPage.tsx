@@ -37,6 +37,7 @@ import type {
   LeaderboardResponse,
 } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
+import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { CompositeScoreCell } from '../components/ui/CompositeScoreCell';
 import { TokenBreakdownBar } from '../components/ui/TokenBreakdownBar';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
@@ -441,6 +442,16 @@ export function LeaderboardPage() {
     getSortedRowModel: getSortedRowModel(),
   });
 
+  const visibleRows = table.getRowModel().rows;
+  const publicCandidates = useMemo(() => visibleRows.flatMap(({ original: item }) =>
+    Object.entries(item.benchmarks).map(([key, cell]) => ({
+      id: `${item.subject_id}:${key}`,
+      label: `${item.model_canonical} · ${item.harness} · ${cell.raw_dataset_name || cell.benchmark_slug}`,
+      batchId: cell.batch_id,
+      benchmark: cell.benchmark_slug,
+    }))
+  ), [visibleRows]);
+
   const trackTabs = useMemo(() => {
     const base = [{ id: 'all', label: '全部轨道' }];
     const dynamic = (treeQ.data?.tracks || []).map((t) => ({
@@ -693,6 +704,12 @@ export function LeaderboardPage() {
           </div>
         </div>
       </div>
+
+      <PublicBaselinePanel
+        candidates={publicCandidates}
+        filterBenchmark
+        emptyMessage={lbQ.isLoading ? '正在读取当前主榜批次…' : '当前主榜筛选没有该基准的站内成绩。'}
+      />
 
       {/* Main Content Area: 4 Contextual Views */}
       {viewMode === 'scatter' ? (

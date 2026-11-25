@@ -43,6 +43,8 @@ interface AppStoreState {
   // Floating Compare Dock basket (1..8 subjects, first or marked is baseline)
   compareBasket: CompareSubjectRef[];
   baselineId: string | null;
+  publicBaselineId: string;
+  setPublicBaselineId: (id: string) => void;
   addToCompare: (item: CompareSubjectRef) => void;
   removeFromCompare: (id: string) => void;
   reorderCompare: (fromIdx: number, toIdx: number) => void;
@@ -92,6 +94,8 @@ export const useAppStore = create<AppStoreState>()(
 
       compareBasket: [],
       baselineId: null,
+      publicBaselineId: 'auto',
+      setPublicBaselineId: (publicBaselineId) => set({ publicBaselineId }),
       addToCompare: (item) => {
         const cur = get().compareBasket;
         if (cur.some((x) => x.id === item.id)) {
@@ -161,6 +165,7 @@ export const useAppStore = create<AppStoreState>()(
         customColumns: s.customColumns,
         compareBasket: s.compareBasket,
         baselineId: s.baselineId,
+        publicBaselineId: s.publicBaselineId,
         recentViews: s.recentViews,
       }),
     }
