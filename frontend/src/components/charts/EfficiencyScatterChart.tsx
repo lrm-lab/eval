@@ -124,6 +124,11 @@ export function EfficiencyScatterChart({
   const data = query.data;
   const xMeta = X_AXIS_OPTIONS.find((x) => x.id === xAxis) || X_AXIS_OPTIONS[0];
   const cov = data?.x_axis_coverage?.[xAxis];
+  const availableAxes = X_AXIS_OPTIONS.filter((axis) =>
+    axis.id !== xAxis && (data?.x_axis_coverage?.[axis.id]?.batches_with_any_records ?? 0) > 0,
+  );
+  const hasCoordinates = data?.points.some((point) => point.x_value !== null || point.partial_x_value !== null);
+  const hasFullCoverage = data?.points.some((point) => point.eligible_for_pareto && point.x_value !== null);
 
   const option = useMemo<echarts.EChartsCoreOption>(() => {
     if (!data) return {};
@@ -438,20 +443,39 @@ export function EfficiencyScatterChart({
         <ChartSkeleton height={height} />
       ) : query.isError ? (
         <StateNoticeCard kind="error" title="效率前沿数据加载失败" description={(query.error as Error).message} onRetry={() => query.refetch()} />
-      ) : !data || data.points.length === 0 ? (
-        <StateNoticeCard kind="empty" title="该基准协议下暂无可绘制的效率散点" description="可切换下方基准胶囊或确保冷层原生作业已完成索引。" />
-      ) : cov && cov.plottable_full_coverage_points === 0 ? (
+      ) : !hasCoordinates ? (
         <div className="rounded-lg border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] px-4 py-6 text-center text-xs">
-          <Sparkles className="w-6 h-6 mx-auto mb-2 text-[var(--sem-zero-fg)]" />
-          <div className="font-semibold text-[var(--text-primary)] mb-1">
-            当前 X 轴（{xMeta.label}）无完整覆盖点（0/{cov.total_batches}），严禁绘制误导性前沿
+          <Sparkles className="mx-auto mb-2 h-6 w-6 text-[var(--sem-zero-fg)]" aria-hidden="true" />
+          <div className="mb-1 font-semibold text-[var(--text-primary)]">
+            {data?.common_valid_tasks
+              ? `共同有效题缺少「${xMeta.label}」的数据`
+              : '当前基准和评分协议没有可比较的共同有效题'}
           </div>
-          <div className="text-[var(--text-secondary)]">
-            {cov.partial_record_coverage || cov.note || '请切换至耗时 P50 或总 Tokens 轴查看完整前沿。'}
+          <p className="mb-0 mt-1 text-[var(--text-secondary)]">
+            {availableAxes.length > 0
+              ? '下列指标有可用记录，可直接切换。'
+              : '可以选择其他基准，或在自由对比中查看各批次实际覆盖。'}
+          </p>
+          <div className="mt-3 flex flex-wrap justify-center gap-2">
+            {availableAxes.map((axis) => (
+              <button
+                key={axis.id}
+                type="button"
+                onClick={() => setXAxis(axis.id)}
+                className="rounded-md border border-[var(--border-strong)] bg-[var(--bg-surface)] px-3 py-1.5 font-semibold text-[var(--brand-primary)] hover:bg-[var(--brand-tint)]"
+              >
+                切换到{axis.label}
+              </button>
+            ))}
           </div>
         </div>
       ) : (
         <div className="space-y-2.5">
+          {!hasFullCoverage && (
+            <p className="m-0 rounded-lg bg-[var(--sem-zero-bg)] px-3 py-2 text-xs text-[var(--text-primary)]">
+              空心点使用部分试题的观测值。前沿需有完整的共同题覆盖。
+            </p>
+          )}
           <EChartBox
             option={option}
             height={height}
