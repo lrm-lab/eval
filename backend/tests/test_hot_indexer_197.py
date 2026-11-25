@@ -6,6 +6,7 @@ import json
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,139 @@ def test_hot_scan_reprobes_if_legacy_file_changes_after_enumeration(
         "content_digest": new_digest,
         "valid_mean": 1.0,
     }
+    assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 1}
+    db.close_thread_connection()
+
+
+def test_warm_shared_probe_detects_mutations_and_permission_loss(
+    isolated_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated_settings.tianxi_root = isolated_settings.runtime_dir / "tianxi"
+    isolated_settings.config_dir = Path(__file__).resolve().parents[2] / "config"
+    probe_isolated_dir(isolated_settings.state_dir, create=True)
+    db = Database(isolated_settings.db_path)
+    init_db(db)
+    sync_taxonomy_to_db(db, isolated_settings.taxonomy_file)
+    indexer = HotIndexer(isolated_settings, db)
+
+    def publish(directory: Path, reward: float, runner: str = "harbor") -> Path:
+        directory.mkdir(exist_ok=True, parents=True)
+        (directory / "manifest.json").write_text(json.dumps({
+            "dataset": "ai2d" if runner == "vlmevalkit" else "GAIA",
+            "model": "fixture", "runner": runner,
+        }), encoding="utf-8")
+        episodes = directory / "episodes.jsonl"
+        episodes.write_text(json.dumps({
+            "trial_id": "trial-local", "task_id": "t1", "status": "scored", "reward": reward,
+        }) + "\n", encoding="utf-8")
+        return episodes
+
+    def rewrite(path: Path, old: str, new: str) -> None:
+        parent_mtime = path.parent.stat().st_mtime_ns
+        before = path.stat()
+        text = path.read_text(encoding="utf-8")
+        assert old in text and len(old) == len(new)
+        path.write_text(text.replace(old, new, 1), encoding="utf-8")
+        mtime = before.st_mtime_ns + 1_000_000_000
+        os.utime(path, ns=(mtime, mtime))
+        assert path.stat().st_ino == before.st_ino
+        assert path.stat().st_size == before.st_size
+        assert path.parent.stat().st_mtime_ns == parent_mtime
+
+    root = isolated_settings.harbor_runs_dir
+    legacy = root / "legacy-probe"
+    episodes = publish(legacy, 0.0)
+    vlm = root / "vlm-probe"
+    publish(vlm, 1.0, "vlmevalkit")
+    metrics = vlm / "vlmevalkit" / "metrics.json"
+    metrics.parent.mkdir()
+    metrics.write_text('[{"metric": "accuracy", "value": 0.4}]', encoding="utf-8")
+    running = root / "running-probe"
+    running.mkdir()
+    status = running / "batch-status.json"
+    status.write_text('{"status": "running", "planned": 1}', encoding="utf-8")
+    denied = root / "permission-probe"
+    publish(denied, 0.0)
+
+    assert indexer.run_hot_scan()["batches"] == {"indexed": 3, "placeholder": 1}
+    assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 4}
+    rewrite(episodes, "0.0", "1.0")
+    rewrite(metrics, "0.4", "0.8")
+    publish(running, 1.0)
+    status.write_text('{"status": "finished", "planned": 1}', encoding="utf-8")
+    publish(root / "new-wave-probe", 1.0)
+
+    original_scan = hot_indexer._batch_top_snapshot
+
+    def deny_batch(path: Path, *, directory_fd: int | None = None):
+        if path == denied:
+            raise PermissionError(13, "permission denied")
+        return original_scan(path, directory_fd=directory_fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hot_indexer, "_batch_top_snapshot", deny_batch)
+        assert indexer.run_hot_scan()["batches"] == {"indexed": 4, "error": 1}
+        assert db.fetchone("SELECT 1 FROM index_warnings WHERE code = 'DIR_PERMISSION_DENIED'")
+        assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 4, "error": 1}
+    assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 5}
+
+    def batch_id(directory: Path) -> str:
+        return make_batch_id(f"harbor_runs:{directory.name}")
+
+    assert db.fetchone("SELECT valid_mean FROM batches WHERE batch_id = ?", (batch_id(legacy),)) == {"valid_mean": 1.0}
+    assert db.fetchone("SELECT scored, is_running_placeholder FROM batches WHERE batch_id = ?", (batch_id(running),)) == {
+        "scored": 1, "is_running_placeholder": 0,
+    }
+    vlm_row = db.fetchone("SELECT vlmeval_metrics_json FROM batches WHERE batch_id = ?", (batch_id(vlm),))
+    assert json.loads(vlm_row["vlmeval_metrics_json"]) == [{"metric": "accuracy", "value": 0.8}]
+    db.close_thread_connection()
+
+
+def test_early_probe_rereads_directory_replaced_before_root_confirmation(
+    isolated_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated_settings.tianxi_root = isolated_settings.runtime_dir / "tianxi"
+    isolated_settings.config_dir = Path(__file__).resolve().parents[2] / "config"
+    probe_isolated_dir(isolated_settings.state_dir, create=True)
+    db = Database(isolated_settings.db_path)
+    init_db(db)
+    sync_taxonomy_to_db(db, isolated_settings.taxonomy_file)
+    indexer = HotIndexer(isolated_settings, db)
+
+    batch = isolated_settings.harbor_runs_dir / "replace-probe"
+    replacement = isolated_settings.tianxi_root / "incoming"
+    for directory, reward in ((batch, 0.0), (replacement, 1.0)):
+        directory.mkdir(parents=True)
+        (directory / "manifest.json").write_text('{"dataset": "GAIA", "runner": "harbor"}', encoding="utf-8")
+        (directory / "episodes.jsonl").write_text(json.dumps({
+            "trial_id": "trial-local", "task_id": "t1", "status": "scored", "reward": reward,
+        }) + "\n", encoding="utf-8")
+    assert indexer.run_hot_scan()["batches"] == {"indexed": 1}
+
+    old_snapshot_ready = threading.Event()
+    root_entries = hot_indexer._batch_entries
+    probe_batch = hot_indexer._probe_batch
+
+    def mark_probe(path: Path, *, speculative: bool = False):
+        snapshot = probe_batch(path, speculative=speculative)
+        if path == batch and speculative:
+            old_snapshot_ready.set()
+        return snapshot
+
+    def replace_before_listing(root: Path) -> dict[Path, int]:
+        if root == batch.parent:
+            assert old_snapshot_ready.wait(timeout=5)
+            batch.rename(isolated_settings.tianxi_root / "retired")
+            replacement.rename(batch)
+        return root_entries(root)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hot_indexer, "_probe_batch", mark_probe)
+        patch.setattr(hot_indexer, "_batch_entries", replace_before_listing)
+        assert indexer.run_hot_scan()["batches"] == {"indexed": 1}
+
+    row = db.fetchone("SELECT valid_mean FROM batches WHERE batch_id = ?", (make_batch_id("harbor_runs:replace-probe"),))
+    assert row == {"valid_mean": 1.0}
     assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 1}
     db.close_thread_connection()
 

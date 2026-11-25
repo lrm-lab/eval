@@ -13,8 +13,9 @@ import stat
 import time
 import tomllib
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Iterable, Iterator
 
@@ -170,21 +171,41 @@ def _batch_needs_backfill(
     return runner == "vlmevalkit" and checks.get("legacy_vlm_media_indexed") is not True
 
 
-def _batch_dirs(root: Path) -> list[Path]:
+def _batch_entries(root: Path) -> dict[Path, int]:
     try:
         with os.scandir(root) as entries:
-            return sorted(Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False))
+            return dict(sorted(
+                (Path(entry.path), entry.inode()) for entry in entries if entry.is_dir(follow_symlinks=False)
+            ))
     except OSError:
-        return []
+        return {}
 
 
-def _batch_top_snapshot(batch_dir: Path) -> tuple[str, dict[str, _FileIdentity]]:
+def _batch_dirs(root: Path) -> list[Path]:
+    return list(_batch_entries(root))
+
+
+def _batch_top_snapshot(
+    batch_dir: Path, *, directory_fd: int | None = None
+) -> tuple[str, dict[str, _FileIdentity]]:
     """Fingerprint the watched files in one directory enumeration, ignoring .publish.lock."""
     files: dict[str, _FileIdentity] = {}
-    with os.scandir(batch_dir) as entries:
+    with os.scandir(batch_dir if directory_fd is None else directory_fd) as entries:
         for entry in entries:
             if entry.name == "vlmevalkit" and entry.is_dir(follow_symlinks=False):
-                metrics = _stat_tuple(batch_dir / "vlmevalkit" / "metrics.json")
+                if directory_fd is None:
+                    metrics = _stat_tuple(batch_dir / "vlmevalkit" / "metrics.json")
+                else:
+                    try:
+                        metrics_dir = os.open(
+                            entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory_fd
+                        )
+                        try:
+                            metrics = _file_identity(os.stat("metrics.json", dir_fd=metrics_dir))
+                        finally:
+                            os.close(metrics_dir)
+                    except OSError:
+                        metrics = None
                 if metrics is not None:
                     files["vlmevalkit/metrics.json"] = metrics
             elif entry.name in _WATCHED_TOP_FILES:
@@ -196,6 +217,31 @@ def _batch_top_snapshot(batch_dir: Path) -> tuple[str, dict[str, _FileIdentity]]
         f"{name}:{ino}:{mtime}:{size}" for name, (ino, mtime, size) in sorted(files.items())
     )
     return hashlib.sha256(digest_input.encode("utf-8")).hexdigest(), files
+
+
+@dataclass(frozen=True)
+class _BatchProbe:
+    inode: int | None
+    digest: str | None
+    files: dict[str, _FileIdentity]
+    error: OSError | None = None
+
+
+def _probe_batch(batch_dir: Path, *, speculative: bool = False) -> _BatchProbe:
+    inode = None
+    try:
+        if speculative:
+            fd = os.open(batch_dir, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                inode = os.fstat(fd).st_ino
+                digest, files = _batch_top_snapshot(batch_dir, directory_fd=fd)
+            finally:
+                os.close(fd)
+        else:
+            digest, files = _batch_top_snapshot(batch_dir)
+        return _BatchProbe(inode, digest, files)
+    except OSError as exc:
+        return _BatchProbe(inode, None, {}, exc)
 
 
 def _dir_content_digest(batch_dir: Path) -> str:
@@ -743,6 +789,7 @@ class HotIndexer:
         self.db = db
         self.token_validator = TokenSemanticsValidator(settings.token_semantics_file)
         self.approval_registry = SourceApprovalRegistry(settings.source_approval_file)
+        self._readable_shared_batches: tuple[Path, ...] = ()
 
     def _record_warning(
         self,
@@ -3023,16 +3070,22 @@ class HotIndexer:
 
     def _scan_shared_batches(
         self,
-        entries: list[Path],
+        entries: dict[Path, int],
+        early_probes: dict[Path, Future[_BatchProbe]],
         pool: ThreadPoolExecutor,
         *,
         force: bool,
         deep_trial_enrich: bool,
     ) -> Counter[str]:
         counts: Counter[str] = Counter()
+        # A fresh root listing is authoritative. Discard work for names that disappeared.
+        for removed in early_probes.keys() - entries.keys():
+            early_probes[removed].cancel()
         if not entries:
+            self._readable_shared_batches = ()
             return counts
 
+        probes = {path: early_probes.get(path) or pool.submit(_probe_batch, path) for path in entries}
         unbackfilled_tr_batches: set[str] = set()
         if not force:
             for tr_r in self.db.fetchall(
@@ -3066,15 +3119,17 @@ class HotIndexer:
                 continue
             existing_digests[str(r["source_locator"])] = str(r["content_digest"])
 
-        def probe(batch_dir: Path) -> tuple[str | None, dict[str, _FileIdentity], OSError | None]:
-            try:
-                digest, files = _batch_top_snapshot(batch_dir)
-                return digest, files, None
-            except OSError as exc:
-                return None, {}, exc
-
+        readable: list[Path] = []
         to_scan: list[tuple[Path, str, dict[str, _FileIdentity]]] = []
-        for d, (digest, files, err) in zip(entries, pool.map(probe, entries), strict=True):
+        for d, future in probes.items():
+            probe = future.result()
+            if d in early_probes and probe.inode != entries[d]:
+                # The directory may have been replaced since the early probe opened it.
+                probe = _probe_batch(d, speculative=True)
+                if probe.error is None and probe.inode != entries[d]:
+                    counts["error"] += 1
+                    continue
+            digest, files, err = probe.digest, probe.files, probe.error
             if isinstance(err, PermissionError):
                 red_p = redact_path(str(d)) or d.name
                 if self.db.fetchone(
@@ -3095,12 +3150,14 @@ class HotIndexer:
             if err is not None or digest is None:
                 counts["error"] += 1
                 continue
+            readable.append(d)
             loc = f"harbor_runs:{d.name}"
             if not force and existing_digests.get(loc) == digest:
                 counts["skipped_unchanged"] += 1
                 continue
             to_scan.append((d, digest, files))
 
+        self._readable_shared_batches = tuple(readable)
         if not to_scan:
             return counts
 
@@ -3148,14 +3205,20 @@ class HotIndexer:
         t0 = time.perf_counter()
         csv_path = self.settings.legacy_root_dir / "leaderboard.csv"
         with ThreadPoolExecutor(max_workers=20) as pool:
-            shared_entries = pool.submit(_batch_dirs, self.settings.harbor_runs_dir)
+            shared_entries = pool.submit(_batch_entries, self.settings.harbor_runs_dir)
             csv_metadata = pool.submit(_stat_if_type, csv_path, stat.S_ISREG)
             dataset_metadata = [
                 (path, release_id, split, pool.submit(_stat_if_type, path, stat.S_ISDIR))
                 for path, release_id, split in self._dataset_folders()
             ]
+            # The previous round supplies hints only. Each early probe still reads the
+            # directory, and indexing waits for this round's root membership and inode.
+            early_probes = {} if force else {
+                path: pool.submit(_probe_batch, path, speculative=True)
+                for path in self._readable_shared_batches
+            }
             counts = self._scan_shared_batches(
-                shared_entries.result(), pool, force=force, deep_trial_enrich=deep_trial_enrich
+                shared_entries.result(), early_probes, pool, force=force, deep_trial_enrich=deep_trial_enrich
             )
 
         # Check ownership again for every locally Runner-published batch (I-05 / S-02).
