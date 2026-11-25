@@ -254,6 +254,9 @@ class IsolatedRunnerManager:
         self._gateway_env = {"PYTHONNOUSERSITE": "1", "LITELLM_LOCAL_MODEL_COST_MAP": "True"}
         if openenv_path := os.environ.get("LRM_RUNNER_OPENENV_PYTHONPATH"):
             self._gateway_env["PYTHONPATH"] = openenv_path
+        if ca_bundle := os.environ.get("SSL_CERT_FILE"):
+            # OpenEnv's HTTPX client uses this deployment trust store for upstream TLS.
+            self._gateway_env["SSL_CERT_FILE"] = ca_bundle
         # Imports can take longer than the Web's IPC health budget. The worker
         # environment is selected and probed once when this Runner starts.
         self._gateway_runtime_ready = _probe_harbor_gateway_runtime(

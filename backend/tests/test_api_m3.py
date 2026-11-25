@@ -1202,9 +1202,12 @@ raise SystemExit(2)
             (
                 "openenv/core/harness/capture/server.py",
                 """
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from fastapi import FastAPI
 def create_app(**kwargs):
+    assert os.environ.get("SSL_CERT_FILE") == str(Path(__file__).parents[4] / "trusted-ca.pem")
     app = FastAPI()
     app.state.registry = {}
     app.state.inference = SimpleNamespace(**kwargs)
@@ -1397,6 +1400,7 @@ def dump(data, path):
             "VLMEVALKIT_PYTHON": sys.executable,
             "LRM_RUNNER_OPENENV_PYTHON": sys.executable,
             "LRM_RUNNER_OPENENV_PYTHONPATH": str(openenv_root),
+            "SSL_CERT_FILE": str(openenv_root / "trusted-ca.pem"),
         }
         with _start_external_runner_daemon(isolated_settings, extra_env=runner_extra_env):
             app_h = create_app(isolated_settings, run_startup_scan=False)
