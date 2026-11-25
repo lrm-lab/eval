@@ -142,7 +142,7 @@ async function main() {
 
   inpSamples.push(
     await sampleEventTimingInp(page, 'lb-track-agentic', async () => {
-      await page.click('button[role="tab"]:has-text("Agentic")');
+      await page.getByRole('combobox', { name: '筛选轨道' }).selectOption('agentic');
     })
   );
   await page.waitForTimeout(300);
@@ -157,11 +157,11 @@ async function main() {
   await page.click('button[aria-label="切换明暗主题"]');
   assert((await page.getAttribute('html', 'data-theme')) === 'dark', 'Theme did not switch back to dark');
 
-  await page.click('button[role="tab"]:has-text("Trend")');
+  await page.getByRole('tab', { name: '趋势', exact: true }).click();
   await page.waitForSelector('canvas', { timeout: 5000 });
-  await page.click('button[role="tab"]:has-text("Grouped Bar")');
+  await page.getByRole('tab', { name: '柱图', exact: true }).click();
   await page.waitForSelector('canvas', { timeout: 5000 });
-  await page.click('button[role="tab"]:has-text("Efficiency Scatter")');
+  await page.getByRole('tab', { name: '散点', exact: true }).click();
   await page.waitForSelector('text=N = 71 common valid tasks', { timeout: 10000 });
   await page.waitForSelector('canvas', { timeout: 5000 });
 
@@ -203,7 +203,7 @@ async function main() {
   await page.waitForSelector('canvas', { timeout: 8000 });
 
   // Back to Table & mandatory L2 SlideOverDrawer check
-  await page.click('button[role="tab"]:has-text("Table")');
+  await page.getByRole('tab', { name: '成绩表', exact: true }).click();
   await page.waitForSelector('table tbody tr', { timeout: 10000 });
   const scoreBtn = page.locator('table tbody tr button[aria-label^="得分"]').first();
   assert((await scoreBtn.count()) > 0, 'Expected at least 1 interactive score cell on Leaderboard');

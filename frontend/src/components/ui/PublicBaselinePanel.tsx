@@ -1,4 +1,4 @@
-import { useId } from 'react';
+import { useId, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowUpRight } from 'lucide-react';
 import { apiFetch, ApiError } from '../../lib/api';
@@ -95,6 +95,7 @@ export function PublicBaselinePanel({
   emptyMessage,
   disabledReason,
   thresholdPp,
+  compact = false,
 }: {
   candidates: PublicBaselineCandidate[];
   filterBenchmark?: boolean;
@@ -103,8 +104,12 @@ export function PublicBaselinePanel({
   emptyMessage: string;
   disabledReason?: string;
   thresholdPp?: number;
+  compact?: boolean;
 }) {
   const headingId = useId();
+  const detailsId = useId();
+  const [expanded, setExpanded] = useState(false);
+  const showDetails = !compact || expanded;
   const userId = useAppStore((state) => state.user?.user_id);
   const selected = useAppStore((state) => state.publicBaselineId);
   const setSelected = useAppStore((state) => state.setPublicBaselineId);
@@ -141,7 +146,7 @@ export function PublicBaselinePanel({
   const batchIds = [...new Set(visibleCandidates.flatMap((item) => item.batchId ? [item.batchId] : []))];
   const comparison = useQuery({
     queryKey: ['public-baseline-comparison', userId, requireSameModel, baselineId, source?.synced_at, batchIds],
-    enabled: Boolean(row && batchIds.length && !disabledReason),
+    enabled: showDetails && Boolean(row && batchIds.length && !disabledReason),
     retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 1,
     queryFn: async ({ signal }) => {
       const pages = await Promise.all(chunks(batchIds).map((ids) => {
@@ -156,10 +161,12 @@ export function PublicBaselinePanel({
     },
   });
 
-  return (
-    <section aria-labelledby={headingId} className="min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5">
+  const details = showDetails && (
+    <>
       <div className="flex flex-wrap items-center justify-between gap-2.5">
-        <h2 id={headingId} className="m-0 text-sm font-semibold text-[var(--text-primary)]">公开榜单基准</h2>
+        {compact
+          ? <span className="text-xs font-semibold text-[var(--text-secondary)]">站内批次与公开成绩</span>
+          : <h2 id={headingId} className="m-0 text-sm font-semibold text-[var(--text-primary)]">公开榜单基准</h2>}
         <select
           aria-label="选择公开榜单基准"
           value={selected}
@@ -265,6 +272,47 @@ export function PublicBaselinePanel({
             </ul>}
         </div>
       )}
+    </>
+  );
+
+  return (
+    <section aria-labelledby={headingId} className={`min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] ${compact ? 'px-3 py-2' : 'p-3.5'}`}>
+      {compact && (
+        <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_minmax(0,1fr)_auto]">
+          <h2 id={headingId} className="col-start-1 row-start-1 m-0 font-semibold text-[var(--text-secondary)]">公开榜单</h2>
+          {row && source ? (
+            <div className="col-span-2 row-start-2 flex min-w-0 items-center gap-x-2 gap-y-0.5 max-sm:flex-wrap sm:col-span-1 sm:col-start-2 sm:row-start-1">
+              <span className="font-semibold tabular-nums text-[var(--text-primary)]">
+                {fmtPct(row.score_pct)} {source.metric}
+              </span>
+              <a href={source.url} target="_blank" rel="noreferrer" className="min-w-0 shrink truncate text-[var(--brand-primary)] hover:underline max-sm:flex-1" title={`${rowLabel(row)} · ${source.label}`}>
+                {rowLabel(row)} <ArrowUpRight aria-hidden="true" className="inline size-3" />
+              </a>
+              <span className="shrink-0 text-[var(--text-muted)] max-sm:basis-full">
+                {selected === 'auto' && automatic.data?.mode === 'reference' ? '公开参考 · ' : ''}
+                {row.task_count} 题 / {row.sample_count} 次计分
+              </span>
+              {source.status !== 'ready' && <span className="text-[var(--text-muted)]">{statusLabels[source.status]}</span>}
+            </div>
+          ) : (
+            <span className="col-span-2 row-start-2 min-w-0 text-[var(--text-muted)] sm:col-span-1 sm:col-start-2 sm:row-start-1" role="status">
+              {!selected ? '已停用' : catalog.isPending || automatic.isFetching ? '匹配中…' : catalog.isError ? '暂无法读取' : '可展开选择公开成绩'}
+            </span>
+          )}
+          <button
+            type="button"
+            aria-expanded={expanded}
+            aria-controls={detailsId}
+            onClick={() => setExpanded((open) => !open)}
+            className="col-start-2 row-start-1 shrink-0 cursor-pointer rounded-md px-2 py-1.5 font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] sm:col-start-3"
+          >
+            {expanded ? '收起公榜详情' : '展开公榜详情'}
+          </button>
+        </div>
+      )}
+      <div id={detailsId} hidden={!showDetails} className={compact ? "mt-2 border-t border-[var(--border-subtle)] pt-2" : undefined}>
+        {details}
+      </div>
     </section>
   );
 }
