@@ -11,8 +11,6 @@ import {
   Lock,
   Play,
   Plus,
-  Share2,
-  ShieldCheck,
   Sparkles,
   Trash2,
 } from 'lucide-react';
@@ -22,7 +20,8 @@ import { useAppStore } from '../lib/store';
 import type { CompareQueryResponse, CompareSubjectRef, TrialDetailDTO } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { CompositeScoreCell } from '../components/ui/CompositeScoreCell';
-import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
+import { CompareSharePanel, compareShareModeLabel } from '../components/ui/CompareSharePanel';
+import { CompareVerdict, compareIssueLabel } from '../components/ui/CompareVerdict';
 import { LegacyCompareEvidence, type LegacyCompareSample } from '../components/ui/LegacyCompareEvidence';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
@@ -158,6 +157,13 @@ interface SavedOpenResp {
 
 type DiffFilterKind = 'all' | 'divergent' | 'a_wins' | 'b_wins' | 'both_pass' | 'both_fail';
 
+function unavailableBatchDiff(result: CompareQueryResponse, releaseId: string) {
+  const row = result.rows.find((item) => item.dataset_release_id === releaseId) || result.rows[0];
+  const issue = row?.comparison_issue ?? (row?.intersection.common_valid_scored_tasks === 0 && row.comparable
+    ? 'no_common_valid_tasks' : 'missing_comparable_scores');
+  return { title: compareIssueLabel[issue], description: '当前结果没有可用的共同逐题评分。' };
+}
+
 interface SplitPairState {
   kind: 'batch' | 'legacy';
   taskId: string;
@@ -216,11 +222,10 @@ export function ComparePage() {
   const [diffBenchmark, setDiffBenchmark] = useState<string>(() => searchParams.get('diff_bm') || focusBenchmarkParam);
 
   const [result, setResult] = useState<CompareQueryResponse | null>(null);
+  const [resultFrozenOnly, setResultFrozenOnly] = useState(false);
+  const [resultBaselineId, setResultBaselineId] = useState('');
   const [taskDiff, setTaskDiff] = useState<TaskDiffResp | null>(null);
-  const [taskDiffRestrictedMsg, setTaskDiffRestrictedMsg] = useState<string | null>(null);
-  const [saveName, setSaveName] = useState('');
-  const [saveMode, setSaveMode] = useState<'snapshot' | 'live'>('snapshot');
-  const [saveProjectId, setSaveProjectId] = useState<string>('');
+  const [taskDiffNotice, setTaskDiffNotice] = useState<{ title: string; description: string } | null>(null);
 
   const taskDiffSectionRef = useRef<HTMLDivElement | null>(null);
   const splitActionRef = useRef<HTMLButtonElement | null>(null);
@@ -304,17 +309,18 @@ export function ComparePage() {
     }
     return base.length > 0 ? base : ['default'];
   }, [optsQ.data?.writable_projects, user]);
-  const effectiveSaveProject = saveProjectId && writableProjects.includes(saveProjectId) ? saveProjectId : writableProjects[0];
   const sampleSetOptions = (optsQ.data?.sample_sets || []).filter((item) =>
     !scopedReleaseIds?.length || scopedReleaseIds.includes(item.dataset_release_id ?? '')
   );
 
+  const needsSavedOpen = Boolean(openId && activeCmpIdRef.current !== openId);
   const savedOpenQ = useQuery({
     queryKey: ['compare-saved-open', openId],
-    enabled: Boolean(openId) && activeCmpIdRef.current !== openId,
+    enabled: needsSavedOpen,
     retry: (count, error) => !(error instanceof ApiError && error.status < 500) && count < 1,
     queryFn: () => apiFetch<SavedOpenResp>(`/api/v1/compare/s/${encodeURIComponent(openId!)}`),
   });
+  const savedOpenForbidden = savedOpenQ.error instanceof ApiError && savedOpenQ.error.status === 403;
 
   const splitAQ = useQuery<TrialDetailDTO | LegacyCompareSample>({
     queryKey: ['split-a', splitPair?.kind, splitPair?.aBatch, splitPair?.aModelFile, splitPair?.aTrial],
@@ -364,16 +370,20 @@ export function ComparePage() {
         body: JSON.stringify(payload),
       }),
     onSuccess: (data) => {
-      setTaskDiffRestrictedMsg(null);
+      setTaskDiffNotice(null);
       setTaskDiff(data);
     },
     onError: (err: Error) => {
       setTaskDiff(null);
       if (err instanceof ApiError && ([403, 404, 409].includes(err.status) || err.code === 'INCOMPARABLE_PROTOCOL')) {
-        setTaskDiffRestrictedMsg(err.message || '当前对比对象或账号不满足逐题明细展示条件，上方保留聚合指标。');
+        const title = err.status === 403 ? '无权查看逐题明细'
+          : err.status === 404 ? '缺少逐题明细'
+          : err.status === 409 ? '批次发布代已变化'
+          : '逐题明细的对比条件不一致';
+        setTaskDiffNotice({ title, description: err.message });
         return;
       }
-      setTaskDiffRestrictedMsg(null);
+      setTaskDiffNotice(null);
       pushToast('error', `逐题 Diff 加载失败：${err.message}`);
     },
   });
@@ -455,11 +465,13 @@ export function ComparePage() {
         method: 'POST',
         body: JSON.stringify(payload),
       }),
-    onSuccess: (data) => {
-      activeCmpIdRef.current = data.comparison_id;
+    onSuccess: (data, payload) => {
+      activeCmpIdRef.current = shortId || data.comparison_id;
       setResult(data);
+      setResultFrozenOnly(Boolean((payload.scope as ComparisonScope | undefined)?.dataset_release_ids?.length));
+      setResultBaselineId(String(payload.baseline_subject_id || ''));
       setTaskDiff(null);
-      setTaskDiffRestrictedMsg(null);
+      setTaskDiffNotice(null);
       if (!shortId) {
         syncCompareUrl({ cmp: data.comparison_id });
       }
@@ -477,8 +489,7 @@ export function ComparePage() {
             syncUrl: true,
           });
         } else {
-          setTaskDiffRestrictedMsg(compRow ? '所选批次没有共同有效题。请查看上方的共同覆盖和故障排除。'
-            : '当前对比的数据集版本或协议未对齐，逐题对照不可用。');
+          setTaskDiffNotice(unavailableBatchDiff(data, compRow?.dataset_release_id || focusDatasetParam));
         }
       } else if (focusBenchmarkParam || focusDatasetParam) {
         triggerTaskDiff(data, {
@@ -490,28 +501,10 @@ export function ComparePage() {
         });
       }
     },
-    onError: (err: Error) => pushToast('error', `对比查询失败：${err.message}`),
-  });
-
-  const saveMut = useMutation({
-    mutationFn: () =>
-      apiFetch<{ short_id: string }>('/api/v1/compare/saved', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: saveName.trim(),
-          mode: hasFixedRelease ? 'snapshot' : saveMode,
-          project_id: effectiveSaveProject,
-          comparison_id: result!.comparison_id,
-        }),
-      }),
-    onSuccess: (res) => {
-      const link = `${window.location.origin}/compare/s/${res.short_id}`;
-      navigator.clipboard?.writeText(link).catch(() => {});
-      pushToast('success', `已保存并复制对比短链：/compare/s/${res.short_id}`);
-      setSaveName('');
-      optsQ.refetch();
+    onError: (err: Error) => {
+      const title = err instanceof ApiError && err.status === 403 ? '无权查看对比数据' : '对比查询失败';
+      pushToast('error', `${title}：${err.message}`);
     },
-    onError: (err: Error) => pushToast('error', `保存短链失败：${err.message}`),
   });
 
   const deleteSavedMut = useMutation({
@@ -549,16 +542,19 @@ export function ComparePage() {
     pushToast('success', '已复制对比矩阵 Markdown 表格');
   };
 
-  // Hydrate full compare state + Task Diff from saved shortId OR restored `cmp` query param (E-01 & E-04!)
+  // Reopen the saved configuration before rendering its results or requesting row evidence.
   useEffect(() => {
-    if (!savedOpenQ.data?.result) return;
+    if (!needsSavedOpen || savedOpenQ.isFetching || savedOpenQ.isError || !savedOpenQ.data?.result) return;
     const data = savedOpenQ.data.result;
-    activeCmpIdRef.current = data.comparison_id;
+    activeCmpIdRef.current = savedOpenQ.data.short_id;
     setResult(data);
     const cfgPayload = savedOpenQ.data.config?.payload;
     setTaskDiff(null);
-    setTaskDiffRestrictedMsg(null);
+    setTaskDiffNotice(null);
     setComparisonScope(cfgPayload?.scope);
+    setResultFrozenOnly(Boolean(cfgPayload?.scope?.dataset_release_ids?.length));
+    setResultBaselineId(cfgPayload?.baseline_subject_id || data.gain_vs_guardrail_verdict?.baseline_subject_id
+      || data.bound_snapshot.batches[0]?.subject_id || data.bound_snapshot.legacy_subjects?.[0]?.subject_id || '');
     if (cfgPayload?.subjects && cfgPayload.subjects.length > 0) {
       setSubjects(cfgPayload.subjects);
       setModeKind(cfgPayload.subjects[0]?.kind === 'legacy_model' ? 'legacy_model' : 'batch');
@@ -602,8 +598,7 @@ export function ComparePage() {
           syncUrl: false,
         });
       } else {
-        setTaskDiffRestrictedMsg(compRow ? '所选批次没有共同有效题。请查看上方的共同覆盖和故障排除。'
-          : '当前对比的数据集版本或协议未对齐，逐题对照不可用。');
+        setTaskDiffNotice(unavailableBatchDiff(data, compRow?.dataset_release_id || restoredDs));
       }
     } else if (restoredBm || restoredDs) {
       triggerTaskDiff(data, {
@@ -615,7 +610,7 @@ export function ComparePage() {
         syncUrl: false,
       });
     }
-  }, [savedOpenQ.data]);
+  }, [needsSavedOpen, savedOpenQ.data, savedOpenQ.isFetching, savedOpenQ.isError]);
 
   useEffect(() => {
     if (openId) return;
@@ -748,6 +743,10 @@ export function ComparePage() {
       alias: subjects.find((s) => s.id === b.subject_id)?.alias || b.batch_id,
     }));
   }, [result, subjects]);
+  const openedShare = savedOpenQ.data;
+  const activeShare = shortId && openedShare?.short_id === shortId && openedShare.result.comparison_id === result?.comparison_id
+    ? openedShare : null;
+  const bestSummaryCount = Object.values(result?.comparative_summary.by_subject ?? {}).filter((item) => item.is_best).length;
   const splitLabelA = subjectMetaList.find((subject) => subject.id === diffSubjectA)?.alias
     || subjectMetaList[0]?.alias || splitPair?.aModelFile || splitPair?.aBatch || 'A';
   const splitLabelB = subjectMetaList.find((subject) => subject.id === diffSubjectB)?.alias
@@ -1013,72 +1012,42 @@ export function ComparePage() {
       </div>
 
       {/* Results Area */}
-      {runCompareMut.isPending || (openId && savedOpenQ.isFetching && !result) ? (
-        <TableSkeleton rows={8} cols={5} />
-      ) : openId && savedOpenQ.isError && !result ? (
+      {needsSavedOpen && savedOpenQ.isError ? (
         <StateNoticeCard
-          kind="error"
-          title="无法打开对比"
+          kind={savedOpenForbidden ? 'forbidden' : 'error'}
+          title={savedOpenForbidden ? '无权查看此对比' : '无法打开对比'}
           description={savedOpenQ.error.message}
-          onRetry={() => savedOpenQ.refetch()}
+          onRetry={savedOpenForbidden ? undefined : () => savedOpenQ.refetch()}
         />
+      ) : runCompareMut.isPending || needsSavedOpen ? (
+        <TableSkeleton rows={8} cols={5} />
       ) : result ? (
         <div className="space-y-5">
-          {/* Auto Insights & Save Short Link Bar */}
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 flex flex-wrap items-center justify-between gap-3 text-xs">
-            <div className="space-y-1 flex-1 min-w-[280px]">
-              {result.auto_insights.map((ins, i) => (
-                <div key={i} className="text-[var(--text-primary)] leading-relaxed">
-                  {ins.text}
+          {(user && ['researcher', 'admin'].includes(user.role) || result.auto_insights.length > 0 || activeShare) && (
+            <div className="space-y-3 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 text-xs">
+              {activeShare && (
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-1 [overflow-wrap:anywhere]">
+                  <span className="font-semibold text-[var(--text-primary)]">{activeShare.name}</span>
+                  <span className="text-[var(--text-secondary)]">{compareShareModeLabel(activeShare.mode)}</span>
                 </div>
+              )}
+              {result.auto_insights.map((ins, i) => (
+                <p key={i} className="m-0 leading-relaxed [overflow-wrap:anywhere] text-[var(--text-primary)]">
+                  {ins.text.replaceAll('缺测无法判定', '未形成可比结果')}
+                </p>
               ))}
-              <div className="text-[11px] font-mono text-[var(--text-muted)]">
-                comparison_id: {result.comparison_id} · common benchmarks: {result.comparative_summary.common_comparable_benchmarks.length}
-              </div>
-            </div>
-
-            {user && ['researcher', 'admin'].includes(user.role) && (
-              <div className="flex flex-wrap items-center gap-1.5">
-                <input
-                  type="text"
-                  value={saveName}
-                  onChange={(e) => setSaveName(e.target.value)}
-                  placeholder="命名以保存短链..."
-                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs w-40"
+              {user && ['researcher', 'admin'].includes(user.role) && (
+                <CompareSharePanel
+                  key={result.comparison_id}
+                  comparisonId={result.comparison_id}
+                  defaultName={subjectMetaList.map(({ alias }) => alias).join(' / ') || '对比结果'}
+                  projects={writableProjects}
+                  frozenOnly={resultFrozenOnly}
+                  onCreated={() => { void optsQ.refetch(); }}
                 />
-                <select
-                  aria-label="保存目标项目"
-                  value={effectiveSaveProject}
-                  onChange={(e) => setSaveProjectId(e.target.value)}
-                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-xs"
-                >
-                  {writableProjects.map((pid) => (
-                    <option key={pid} value={pid}>
-                      项目: {pid}
-                    </option>
-                  ))}
-                </select>
-                <select
-                  aria-label="保存模式"
-                  value={hasFixedRelease ? 'snapshot' : saveMode}
-                  disabled={hasFixedRelease}
-                  onChange={(e) => setSaveMode(e.target.value as 'snapshot' | 'live')}
-                  className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-xs"
-                >
-                  <option value="snapshot">冻结快照</option>
-                  <option value="live">动态 Live</option>
-                </select>
-                <button
-                  type="button"
-                  disabled={!saveName.trim() || saveMut.isPending}
-                  onClick={() => saveMut.mutate()}
-                  className="inline-flex items-center gap-1 rounded-lg bg-[var(--brand-tint)] px-3 py-1.5 font-semibold text-[var(--brand-primary)] hover:bg-[var(--brand-primary)] hover:text-white disabled:opacity-45 cursor-pointer"
-                >
-                  <Share2 className="w-3.5 h-3.5" /> 保存短链
-                </button>
-              </div>
-            )}
-          </div>
+              )}
+            </div>
+          )}
 
           {/* Comparative Macro Summary vs Self-Coverage Avg */}
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-xs">
@@ -1087,14 +1056,12 @@ export function ComparePage() {
               return (
                 <div
                   key={sm.id}
-                  className={`rounded-xl border p-4 ${
-                    info?.is_best
-                      ? 'border-[var(--best-cell)] bg-[var(--best-cell-bg)]/50'
-                      : 'border-[var(--border-subtle)] bg-[var(--bg-surface)]'
-                  }`}
+                  className="min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4"
                 >
-                  <div className="font-bold text-[var(--text-primary)] truncate" title={sm.alias}>
-                    {sm.alias}
+                  <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1">
+                    <span className="min-w-0 [overflow-wrap:anywhere] font-bold text-[var(--text-primary)]">{sm.alias}</span>
+                    {sm.id === resultBaselineId && <span className="text-[11px] text-[var(--text-secondary)]">基线</span>}
+                    {info?.is_best && <span className="text-[11px] text-[var(--text-secondary)]">{bestSummaryCount > 1 ? '均分并列最高' : '可比均分最高'}</span>}
                   </div>
                   <div className="mt-2 flex items-baseline justify-between">
                     <span className="text-[var(--text-muted)]">可比宏观均分</span>
@@ -1168,7 +1135,9 @@ export function ComparePage() {
                       <div className="text-[10px] font-mono text-[var(--text-muted)]">{row.scoring_protocol}</div>
                     </td>
                     <td className="py-2.5 px-3 tabular-nums text-[11px] text-[var(--text-secondary)]">
-                      {row.intersection.common_valid_scored_tasks === 0 ? (
+                      {row.comparison_issue && row.comparison_issue !== 'no_common_valid_tasks' ? (
+                        <strong>{compareIssueLabel[row.comparison_issue]}</strong>
+                      ) : row.intersection.common_valid_scored_tasks === 0 ? (
                         <div>
                           <strong>没有共同有效题</strong>
                           <div>覆盖 {row.intersection.common_covered_tasks} · 故障排除 {row.intersection.fault_excluded_tasks}</div>
@@ -1229,7 +1198,7 @@ export function ComparePage() {
                           <CompositeScoreCell
                             score={c.common_valid.score}
                             deltaPp={c.common_valid.delta_pp}
-                            isBest={c.common_valid.is_best}
+                            subtitle={c.common_valid.is_best && c.common_valid.score !== 0 ? '本项最高分' : undefined}
                             coverage={
                               c.common_valid.denominator
                                 ? `${c.common_valid.passed}/${c.common_valid.denominator}`
@@ -1259,50 +1228,16 @@ export function ComparePage() {
             </table>
           </div>
 
-          {/* 3-Track Gain vs Guardrail Verdict */}
-          {result.gain_vs_guardrail_verdict && (
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 space-y-3">
-              <div className="font-bold text-xs text-[var(--text-primary)] flex items-center gap-1.5">
-                <ShieldCheck className="w-4 h-4 text-[var(--brand-primary)]" /> 三线提分与防退化护栏裁决（阈值{' '}
-                {result.gain_vs_guardrail_verdict.regression_threshold_pp} pp）
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
-                {result.gain_vs_guardrail_verdict.agentic_gains.map((g) => (
-                  <div
-                    key={`ag-${g.benchmark_slug}`}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2"
-                  >
-                    <div>
-                      <span className="font-semibold">{g.benchmark_slug}</span>{' '}
-                      <span className="text-[11px] text-[var(--text-muted)]">({g.coverage})</span>
-                    </div>
-                    <GainGuardrailPill mode="gain" status={g.status} deltaPp={g.delta_pp} relPct={g.rel_pct} reason={g.reason} />
-                  </div>
-                ))}
-                {result.gain_vs_guardrail_verdict.guardrails.map((g) => (
-                  <div
-                    key={`gr-${g.track_slug}-${g.benchmark_slug}`}
-                    className="flex items-center justify-between gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2"
-                  >
-                    <div>
-                      <span className="font-semibold">{g.benchmark_slug}</span>{' '}
-                      <span className="text-[10px] text-[var(--text-muted)]">[{g.track_slug}]</span>
-                    </div>
-                    <GainGuardrailPill mode="guardrail" status={g.status} deltaPp={g.delta_pp} relPct={g.rel_pct} reason={g.reason} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          {result.gain_vs_guardrail_verdict && <CompareVerdict verdict={result.gain_vs_guardrail_verdict} />}
 
           {/* Side-by-Side Task Diff & 4-Cell Win/Tie/Loss Matrix (Batch & Legacy Paired Samples!) */}
           <div ref={taskDiffSectionRef} id="compare-task-diff">
-          {taskDiffRestrictedMsg && !taskDiff && (
+          {taskDiffNotice && !taskDiff && (
             <div className="rounded-xl border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] p-4 text-xs flex items-start gap-2.5">
               <Lock className="w-4 h-4 text-[var(--sem-zero-fg)] shrink-0 mt-0.5" />
               <div>
-                <div className="font-semibold text-[var(--text-primary)]">逐题明细暂不可用</div>
-                <div className="mt-1 text-[var(--text-secondary)]">{taskDiffRestrictedMsg}</div>
+                <div className="font-semibold text-[var(--text-primary)]">{taskDiffNotice.title}</div>
+                <div className="mt-1 text-[var(--text-secondary)]">{taskDiffNotice.description}</div>
               </div>
             </div>
           )}
@@ -1525,7 +1460,7 @@ export function ComparePage() {
                       onClick={() => navigate(`/compare/s/${sc.short_id}`)}
                       className="text-left text-[var(--text-primary)] cursor-pointer"
                     >
-                      {sc.name} <span className="font-mono text-[10px] text-[var(--text-muted)]">({sc.mode})</span>
+                      {sc.name} <span className="text-[10px] text-[var(--text-secondary)]">· {compareShareModeLabel(sc.mode)}</span>
                     </button>
                     {user && ['researcher', 'admin'].includes(user.role) && (
                       <button
@@ -1549,7 +1484,7 @@ export function ComparePage() {
 
       {/* Wide L2 Split Diff Drawer */}
       <SlideOverDrawer
-        open={Boolean(splitPair)}
+        open={Boolean(splitPair) && !needsSavedOpen}
         onClose={() => {
           setSplitPair(null);
           setShowSplitTrace(false);

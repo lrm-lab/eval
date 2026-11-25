@@ -9,6 +9,7 @@ export interface GainGuardrailPillProps {
   relPct?: number | null;
   isLoading?: boolean;
   reason?: string;
+  statusLabel?: string;
 }
 
 /**
@@ -23,6 +24,7 @@ export function GainGuardrailPill({
   relPct,
   isLoading = false,
   reason,
+  statusLabel = '无法判定',
 }: GainGuardrailPillProps) {
   if (isLoading) {
     return <div className="lrm-skeleton h-6 w-24 rounded-full" aria-busy="true" />;
@@ -34,8 +36,8 @@ export function GainGuardrailPill({
         title={reason || '缺测或不可比，无法判定'}
         className="inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium border border-[var(--sem-unscored-border)] bg-[var(--sem-unscored-bg)] text-[var(--sem-unscored-fg)]"
       >
-        <HelpCircle className="w-3.5 h-3.5 shrink-0" />
-        <span>无法判定</span>
+        <HelpCircle aria-hidden="true" className="w-3.5 h-3.5 shrink-0" />
+        <span>{statusLabel}</span>
       </span>
     );
   }

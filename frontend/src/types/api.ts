@@ -112,6 +112,14 @@ export interface SystemOverviewResponse {
   recent_batches: BatchDTO[];
 }
 
+export type CompareIssue =
+  | 'not_integrated'
+  | 'pending_dataset_version'
+  | 'different_scoring_protocol'
+  | 'different_dataset_release'
+  | 'no_common_valid_tasks'
+  | 'missing_comparable_scores';
+
 export interface VerdictItem {
   benchmark_slug: string;
   dataset_release_id: string | null;
@@ -125,6 +133,7 @@ export interface VerdictItem {
   coverage: string;
   status: 'pass' | 'regressed' | 'undeterminable';
   reason: string;
+  reason_code?: CompareIssue;
 }
 
 export interface GainGuardrailVerdict {
@@ -447,6 +456,7 @@ export interface CompareQueryResponse {
     scoring_protocol: string;
     legacy_metric?: string | null;
     comparable: boolean;
+    comparison_issue?: CompareIssue | null;
     version_drift?: { drifted_task_count: number };
     intersection: {
       common_covered_tasks: number | null;

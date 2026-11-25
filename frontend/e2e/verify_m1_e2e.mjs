@@ -396,12 +396,12 @@ async function main() {
 
   // 5c. E-01 Save Frozen Snapshot Short Link -> Reopen /compare/s/:shortId -> Matrix + HTML Export + Task Diff + Split Diff!
   const snapTitle = `E2E Frozen DeepSWE ${Date.now()}`;
-  await page.fill('input[placeholder*="保存短链"]', snapTitle);
-  await page.selectOption('select[aria-label="保存目标项目"]', 'default');
-  await page.selectOption('select[aria-label="保存模式"]', 'snapshot');
-  await page.click('button:has-text("保存短链")');
-  await page.waitForSelector(`button:has-text("${snapTitle}")`, { timeout: 10000 });
-  await page.locator(`button:has-text("${snapTitle}")`).first().click();
+  await page.locator('summary').filter({ hasText: '分享对比' }).click();
+  await page.getByLabel('链接名称').fill(snapTitle);
+  await page.getByLabel('存放项目').selectOption('default');
+  await page.getByRole('radio', { name: /冻结链接/ }).check();
+  await page.getByRole('button', { name: '生成链接' }).click();
+  await page.getByRole('link', { name: '打开链接' }).click();
   await page.waitForURL(/\/compare\/s\/s_/, { timeout: 10000 });
   await page.waitForSelector('text=45.00%', { timeout: 10000 });
   await page.waitForSelector('#compare-task-diff tbody tr', { timeout: 10000 });
