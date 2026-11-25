@@ -44,7 +44,7 @@ import { SlideOverDrawer } from '../components/ui/SlideOverDrawer';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
 import { EfficiencyScatterChart } from '../components/charts/EfficiencyScatterChart';
-import { LeaderboardScoreCell, leaderboardScopeLabel } from '../components/leaderboard/LeaderboardScoreCell';
+import { LeaderboardScoreCell, leaderboardScopeLabel, leaderboardScoreBasis } from '../components/leaderboard/LeaderboardScoreCell';
 
 type ViewMode = 'table' | 'trend' | 'bar' | 'scatter';
 
@@ -186,6 +186,8 @@ export function LeaderboardPage() {
     enabled: Boolean(drawerBatchId),
     queryFn: () => apiFetch<BatchDTO>(`/api/v1/batches/${drawerBatchId}`),
   });
+  const drawerBasis = drawerCell?.cell ? leaderboardScoreBasis(drawerCell.cell) : null;
+  const drawerBatch = drawerBatchQ.data;
 
   const selectedTrack = activeTrack === 'all' ? undefined : activeTrack;
   const datasetChoices = useMemo(() => {
@@ -667,7 +669,7 @@ export function LeaderboardPage() {
               {benchmark ? '按同一列比较' : commonCount ? `${commonCount} 个共同基准` : '无共同口径，无法统一排名'}
               <MethodologyPopover
                 title="成绩与比较口径"
-                summary="同一列对应同一题库版本、评分协议和范围。计分数为有效评分数；非官方成绩的分母为去重后已记录样本数。可比宏观均分使用共同基准，自覆盖均分仅作参考。"
+                summary="同一列对应同一题库版本、评分协议和计划范围。非官方分数以有效评分数为均值分母，已记录数是去重后的记录总数。正式全量（计划）表示计划使用全量题集，实际完成度见批次。可比宏观均分使用共同基准，自覆盖均分仅作参考。"
                 anchor="#macro-avg"
               />
             </span>
@@ -768,31 +770,41 @@ export function LeaderboardPage() {
           <TableSkeleton rows={5} cols={2} />
         ) : drawerBatchId && drawerBatchQ.isError ? (
           <StateNoticeCard kind="error" title="无法读取此批次" description={(drawerBatchQ.error as Error).message} onRetry={() => drawerBatchQ.refetch()} />
-        ) : drawerBatchId && drawerBatchQ.data ? (
+        ) : drawerBatchId && drawerBatch ? (
           <div className="space-y-4 text-xs">
-            <div className="grid grid-cols-2 gap-3">
-              <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3">
-                <div className="text-[var(--text-muted)]">有效均值 (valid_mean)</div>
-                <div className="mt-1 text-lg font-bold tabular-nums text-[var(--text-primary)]">
-                  {drawerBatchQ.data.valid_mean !== null && drawerBatchQ.data.valid_mean !== undefined
-                    ? fmtPct(drawerBatchQ.data.valid_mean <= 1 ? drawerBatchQ.data.valid_mean * 100 : drawerBatchQ.data.valid_mean)
-                    : '—'}
+            {drawerCell?.cell && drawerBasis && (
+              <section aria-label="主榜成绩" className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3">
+                <h3 className="m-0 font-semibold">主榜成绩</h3>
+                <div className="mt-1 flex flex-wrap items-baseline gap-x-3 gap-y-1 tabular-nums">
+                  <strong className="text-lg text-[var(--text-primary)]">{fmtPct(drawerCell.cell.score)}</strong>
+                  <span className="text-[var(--text-secondary)]">{drawerBasis.denominator}</span>
+                  {drawerBasis.recorded && <span className="text-[var(--text-secondary)]">{drawerBasis.recorded}</span>}
                 </div>
+              </section>
+            )}
+            <section aria-label={drawerCell?.cell ? '代表批次' : '批次统计'} className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3">
+              <h3 className="m-0 font-semibold">{drawerCell?.cell ? '代表批次' : '批次统计'}</h3>
+              <div className="mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 text-[var(--text-secondary)]">
+                <span>逐题有效均值 <strong className="tabular-nums text-[var(--text-primary)]">
+                  {drawerBatch.valid_mean == null ? '—' : fmtPct(drawerBatch.valid_mean <= 1 ? drawerBatch.valid_mean * 100 : drawerBatch.valid_mean)}
+                </strong></span>
+                {drawerBatch.planned != null && drawerBatch.planned > 0 && (
+                  <span>记录完成度 <strong className="tabular-nums text-[var(--text-primary)]">{fmtPct(drawerBatch.recorded / drawerBatch.planned * 100, 1)}</strong></span>
+                )}
               </div>
-              <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3">
-                <div className="text-[var(--text-muted)]">{drawerBatchQ.data.planned ? '已评分 / 计划样本' : '已评分 / 已记录样本'}</div>
-                <div className="mt-1 text-lg font-bold tabular-nums text-[var(--text-primary)]">
-                  {drawerBatchQ.data.scored} / {drawerBatchQ.data.planned || drawerBatchQ.data.recorded}
-                </div>
-              </div>
-            </div>
+              <dl className="m-0 mt-3 grid grid-cols-3 gap-2 text-[var(--text-secondary)]">
+                <div><dt>有效评分</dt><dd className="m-0 mt-0.5 font-semibold tabular-nums text-[var(--text-primary)]">{drawerBatch.scored}</dd></div>
+                <div><dt>已记录</dt><dd className="m-0 mt-0.5 font-semibold tabular-nums text-[var(--text-primary)]">{drawerBatch.recorded}</dd></div>
+                <div><dt>计划样本</dt><dd className="m-0 mt-0.5 font-semibold tabular-nums text-[var(--text-primary)]">{drawerBatch.planned ?? '未提供'}</dd></div>
+              </dl>
+            </section>
 
-            {drawerBatchQ.data.official_result && (
+            {drawerBatch.official_result && (
               <div className="rounded-lg border border-[var(--sem-pass-border)] bg-[var(--sem-pass-bg)]/50 p-3">
                 <div className="font-semibold text-[var(--sem-pass-fg)]">官方汇总结果（独立于逐题有效均值）</div>
                 <div className="mt-1 tabular-nums text-[var(--text-primary)]">
-                  {drawerBatchQ.data.official_result.metric}: <strong>{drawerBatchQ.data.official_result.score}</strong>{' '}
-                  （分母 {drawerBatchQ.data.official_result.denominator} · 来源 {drawerBatchQ.data.official_result.source}）
+                  {drawerBatch.official_result.metric}: <strong>{drawerBatch.official_result.score}</strong>{' '}
+                  （分母 {drawerBatch.official_result.denominator} · 来源 {drawerBatch.official_result.source}）
                 </div>
               </div>
             )}
@@ -800,11 +812,11 @@ export function LeaderboardPage() {
             <div className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 space-y-1.5">
               <div className="flex justify-between">
                 <span className="text-[var(--text-muted)]">Batch ID</span>
-                <span className="font-mono">{drawerBatchQ.data.batch_id}</span>
+                <span className="font-mono">{drawerBatch.batch_id}</span>
               </div>
               <div className="flex justify-between">
                 <span className="text-[var(--text-muted)]">Scoring Protocol</span>
-                <span className="font-mono">{drawerBatchQ.data.scoring_protocol}</span>
+                <span className="font-mono">{drawerBatch.scoring_protocol}</span>
               </div>
               {drawerCell?.cell && (
                 <div className="flex flex-wrap justify-between gap-x-2">
@@ -815,12 +827,12 @@ export function LeaderboardPage() {
               <div className="flex justify-between">
                 <span className="text-[var(--text-muted)]">Runner / Harness</span>
                 <span>
-                  {drawerBatchQ.data.runner} / {drawerBatchQ.data.harness || '—'}
+                  {drawerBatch.runner} / {drawerBatch.harness || '—'}
                 </span>
               </div>
               <div className="flex justify-between">
                 <span className="text-[var(--text-muted)]">Token Semantics</span>
-                <span className="font-mono">{drawerBatchQ.data.token_semantics}</span>
+                <span className="font-mono">{drawerBatch.token_semantics}</span>
               </div>
             </div>
 
@@ -836,10 +848,10 @@ export function LeaderboardPage() {
                 type="button"
                 onClick={() =>
                   addToCompare({
-                    id: drawerBatchQ.data!.batch_id,
+                    id: drawerBatch.batch_id,
                     kind: 'batch',
-                    batch_id: drawerBatchQ.data!.batch_id,
-                    alias: drawerBatchQ.data!.batch_name,
+                    batch_id: drawerBatch.batch_id,
+                    alias: drawerBatch.batch_name,
                   })
                 }
                 className="rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] px-3.5 py-2 font-medium text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] cursor-pointer"
