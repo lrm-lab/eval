@@ -7,13 +7,18 @@
  *    - 4 runner modes + >= 3 disabled unintegrated suites (MMLU-Pro, BFCL-v4, Global-MMLU-Lite)
  *    - VLMEvalKit + --task hard lock to mode="infer" (VLMEVALKIT.md:44) + --plan CLI preview
  *    - Direct harmless single-task execution (`direct-smoke-v1` / `smoke-arith-001`) via DEFAULT Web submit,
- *      real SSE live stream -> reconciled snapshot (`gen_...`) -> clicks reconciled batch drilldown link
+ *      real SSE stream -> disconnect and replay -> reconciled snapshot (`gen_...`) -> clicks batch drilldown
  *      `/eval/batches/{batch_id}` and verifies HTTP 200 OK (ZERO 404!) + exact score & generation_id!
  * 3. /training/opd (real 197 empty production state, 0 fake runs, train.py --backend opd --plan CLI preview)
  * 4. /admin/health (live external isolated_runner_ready=true, runner_pid>0, docker_group_attached=false, managed_framework ok)
- * With W3C CLS (< 0.05) & Event Timing INP (< 100ms) hard budgets.
+ * Layout shift budget (< 0.05), using the sum of non-input shifts, and Event Timing INP budget (< 100ms).
  */
+import { execFile } from 'node:child_process';
+import { setTimeout as delay } from 'node:timers/promises';
+import { promisify } from 'node:util';
 import { chromium } from 'playwright';
+
+const execFileAsync = promisify(execFile);
 
 const BASE_URL = process.env.BASE_URL || 'http://127.0.0.1:18685';
 const TEST_USER = process.env.TEST_USER || 'e2e_admin';
@@ -39,7 +44,35 @@ async function sampleInp(page, action, fn) {
 
 async function main() {
   const browser = await chromium.launch({ headless: true, args: ['--no-sandbox'] });
+  try {
+    await verify(browser);
+  } finally {
+    await browser.close();
+  }
+}
+
+async function verify(browser) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 900 } });
+  if (process.env.E2E_FETCH_FONTS_WITH_CURL === '1') {
+    // Keep the real web fonts in environments where only curl can reach the CDN.
+    const fontAssets = new Map();
+    await context.route(/^https:\/\/(fonts\.googleapis\.com|fonts\.gstatic\.com)\//, async (route) => {
+      const request = route.request();
+      const url = request.url();
+      if (!fontAssets.has(url)) {
+        fontAssets.set(url, execFileAsync('curl', [
+          '--fail', '--silent', '--show-error', '--max-time', '20',
+          '--user-agent', request.headers()['user-agent'], '--', url,
+        ], { encoding: 'buffer' }));
+      }
+      const { stdout } = await fontAssets.get(url);
+      await route.fulfill({
+        body: stdout,
+        contentType: request.resourceType() === 'stylesheet' ? 'text/css' : 'font/woff2',
+        headers: { 'access-control-allow-origin': '*' },
+      });
+    });
+  }
   const page = await context.newPage();
 
   const consoleErrors = [];
@@ -47,7 +80,9 @@ async function main() {
   const failed5xx = [];
   const batchDetail404 = [];
   page.on('console', (msg) => {
-    if (msg.type() === 'error') consoleErrors.push(msg.text());
+    if (msg.type() === 'error') {
+      consoleErrors.push([msg.text(), msg.location().url].filter(Boolean).join(' '));
+    }
   });
   page.on('pageerror', (err) => pageErrors.push(String(err)));
   page.on('response', (res) => {
@@ -58,29 +93,50 @@ async function main() {
   });
 
   await page.addInitScript(() => {
+    const NativeEventSource = window.EventSource;
+    window.__lrmExecutionStreams = [];
+    // Observe real EventSource traffic and retain the connection for a controlled mid-job disconnect.
+    window.EventSource = class extends NativeEventSource {
+      constructor(url, options) {
+        super(url, options);
+        if (!new URL(this.url).pathname.match(/^\/api\/v1\/execution\/jobs\/[^/]+\/stream$/)) return;
+        const stream = { url: this.url, source: this, events: [] };
+        window.__lrmExecutionStreams.push(stream);
+        for (const type of ['job_queued', 'job_started', 'trial_finished', 'reconciled', 'notification']) {
+          this.addEventListener(type, (event) => {
+            stream.events.push({ type, id: Number(event.lastEventId), data: JSON.parse(event.data) });
+          });
+        }
+      }
+    };
+
     window.__lrmCls = 0;
     window.__lrmStepInp = 0;
     window.__lrmMaxEventInp = 0;
-    try {
-      new PerformanceObserver((list) => {
-        for (const e of list.getEntries()) {
-          if (!e.hadRecentInput) window.__lrmCls += e.value;
-        }
-      }).observe({ type: 'layout-shift', buffered: true });
-      new PerformanceObserver((list) => {
-        for (const e of list.getEntries()) {
-          if (e.duration > window.__lrmStepInp) window.__lrmStepInp = e.duration;
-          if (e.duration > window.__lrmMaxEventInp) window.__lrmMaxEventInp = e.duration;
-        }
-      }).observe({ type: 'event', durationThreshold: 16, buffered: true });
-    } catch {}
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (!e.hadRecentInput) window.__lrmCls += e.value;
+      }
+    }).observe({ type: 'layout-shift', buffered: true });
+    new PerformanceObserver((list) => {
+      for (const e of list.getEntries()) {
+        if (e.duration > window.__lrmStepInp) window.__lrmStepInp = e.duration;
+        if (e.duration > window.__lrmMaxEventInp) window.__lrmMaxEventInp = e.duration;
+      }
+    }).observe({ type: 'event', durationThreshold: 16, buffered: true });
   });
 
   const clsSamples = [];
   const inpSamples = [];
   const recordCls = async (route) => {
     await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => setTimeout(r, 120))));
-    const cls = await page.evaluate(() => window.__lrmCls || 0);
+    const cls = await page.evaluate(() => {
+      if (!PerformanceObserver.supportedEntryTypes.includes('layout-shift')) {
+        throw new Error('Chromium does not support layout-shift observations');
+      }
+      return window.__lrmCls;
+    });
+    assert(Number.isFinite(cls), `No CLS measurement for ${route}`);
     clsSamples.push({ route, cls });
   };
 
@@ -161,23 +217,96 @@ async function main() {
   assert(configText.includes('<RUNNER_WORK_0700>'), 'CLI preview must use redacted 0700 runner work token');
 
   // 2f) Submit real Direct single-task job via DEFAULT Web path -> SSE -> Reconciled -> Click Batch Drilldown (200 OK!)
+  const jobSubmitted = page.waitForResponse((response) =>
+    new URL(response.url()).pathname === '/api/v1/execution/jobs' && response.request().method() === 'POST'
+  );
   inpSamples.push(
     await sampleInp(page, 'exec-submit-isolated-job', async () => {
       await page.locator('button[aria-label="启动隔离执行作业"]').click();
     })
   );
 
+  const submitResponse = await jobSubmitted;
+  assert(submitResponse.ok(), `Job submission returned HTTP ${submitResponse.status()}`);
+  const { job_id: jobId } = await submitResponse.json();
+  assert(typeof jobId === 'string' && jobId.length > 0, 'Expected the submitted job ID');
+  const detailPath = `/api/v1/execution/jobs/${encodeURIComponent(jobId)}`;
+  const detailUrl = new URL(detailPath, BASE_URL).href;
+  const streamPath = `${detailPath}/stream`;
+
   const progressSec = page.locator('section[aria-label="Test Progress 实时进度监控卡"]');
   const resultSec = page.locator('section[aria-label="Test Result 实时回收表"]');
 
   await progressSec.locator('text=⚡ Runner 实时事件流').waitFor({ timeout: 15000 });
+  await page.waitForFunction((path) => {
+    const stream = window.__lrmExecutionStreams.findLast((item) => new URL(item.url).pathname === path);
+    return stream?.source.readyState === EventSource.OPEN && stream.events.some((event) => event.type === 'job_started');
+  }, streamPath);
+  const cursor = await page.evaluate((path) => {
+    const stream = window.__lrmExecutionStreams.findLast((item) => new URL(item.url).pathname === path);
+    if (stream.source.readyState !== EventSource.OPEN || stream.events.some((event) => event.type === 'trial_finished')) {
+      throw new Error('Expected an open SSE stream before the first trial. Use a delayed test gateway.');
+    }
+    const cursor = stream.events.at(-1).id;
+    stream.source.close();
+    stream.source.dispatchEvent(new Event('error'));
+    return cursor;
+  }, streamPath);
+  assert(cursor > 0, 'Expected a positive SSE cursor from the first connection');
+  const disconnected = progressSec.getByText(/SSE: disconnected/);
+  await disconnected.waitFor({ timeout: 15000 });
+
+  // Read from the backend outside the page so the browser cursor stays at the point of disconnect.
+  let missedTrial;
+  const replayDeadline = Date.now() + 25000;
+  while (!missedTrial && Date.now() < replayDeadline) {
+    const detail = await context.request.get(detailUrl, { timeout: 5000 });
+    assert(detail.ok(), `Job detail returned HTTP ${detail.status()} while disconnected`);
+    missedTrial = (await detail.json()).events.find((event) => event.event_type === 'trial_finished' && event.seq_id > cursor);
+    if (!missedTrial) await delay(200);
+  }
+  assert(missedTrial, 'Expected a trial result to be recorded while disconnected');
+  assert(await disconnected.isVisible(), 'The page must still be disconnected when the missed event is recorded');
+
+  const reconnect = progressSec.getByRole('button', { name: `断线重连补读事件流 last_event_id=${cursor}` });
+  const resumedStream = page.waitForResponse((response) => {
+    const url = new URL(response.url());
+    return url.pathname === streamPath && url.searchParams.get('last_event_id') === String(cursor);
+  });
+  await reconnect.click();
+  const resumedResponse = await resumedStream;
+  assert(resumedResponse.status() === 200, `SSE resume returned HTTP ${resumedResponse.status()}`);
+  assert(resumedResponse.headers()['content-type']?.includes('text/event-stream'), 'SSE resume must return an event stream');
+  await page.waitForFunction(({ streamPath, cursor }) => window.__lrmExecutionStreams.some((stream) => {
+    const url = new URL(stream.url);
+    return url.pathname === streamPath && url.searchParams.get('last_event_id') === String(cursor)
+      && stream.events.some((event) => event.type === 'reconciled');
+  }), { streamPath, cursor }, { timeout: 25000 });
+
+  const replay = await page.evaluate((resumedUrl) => window.__lrmExecutionStreams.findLast((stream) =>
+    stream.url === resumedUrl && stream.events.some((event) => event.type === 'reconciled')
+  ).events, resumedResponse.url());
+  for (const [offset, event] of replay.entries()) {
+    assert(event.id === cursor + offset + 1, `SSE resume has a gap or duplicate at event ${event.id}`);
+  }
+  const trials = replay.filter((event) => event.type === 'trial_finished');
+  assert(
+    trials.length === 1 && trials[0].id === missedTrial.seq_id
+      && trials[0].data.task_id === 'smoke-arith-001' && trials[0].data.reward === 1,
+    'SSE resume must replay the missed scored arithmetic trial exactly once'
+  );
+  const { batch_id: batchId, generation_id: generationId } = replay.find((event) => event.type === 'reconciled').data;
+  assert(typeof batchId === 'string' && batchId.length > 0 && /^gen_/.test(generationId),
+    'SSE reconciliation must return a batch ID and generation ID');
+  console.log(`[OK] SSE disconnected at ID ${cursor} and delivered IDs ${cursor + 1}–${replay.at(-1).id} after reconnect`);
+
   await progressSec.locator('text=已完成 finished').waitFor({ timeout: 25000 });
   await resultSec.locator('text=权威快照已对账').waitFor({ timeout: 25000 });
   await progressSec.locator('text=已发布共享快照 (gen_').waitFor({ timeout: 15000 });
   await resultSec.locator('text=已回收 1 条 Trial').waitFor({ timeout: 15000 });
 
   const progressText = (await progressSec.innerText()).replace(/\s+/g, ' ');
-  assert(progressText.includes('已发布共享快照 (gen_'), 'Reconciled snapshot pill must display generation_id');
+  assert(progressText.includes(`已发布共享快照 (${generationId}`), 'Snapshot pill must show the reconciled generation ID');
   assert(
     progressText.includes('普通 stdout/stderr（仅脱敏展示，绝不驱动进度或状态机）'),
     'Zero stdout spoofing notice must be displayed'
@@ -187,19 +316,38 @@ async function main() {
   assert(!resultText.includes('SPOOFED_TASK'), 'No spoofed task may appear');
 
   const stdioLogBox = page.locator('[aria-label="脱敏 stdout 与 stderr 日志输出"]');
-  await stdioLogBox.locator('text=[direct-worker]').waitFor({ timeout: 15000 }).catch(() => {});
+  await stdioLogBox.getByText('[direct-worker]', { exact: false }).waitFor({ timeout: 15000 });
   const stdioLogText = await stdioLogBox.innerText();
-  assert(stdioLogText.includes('[direct-worker]'), `Expected real direct-worker stdout log, got: ${stdioLogText.slice(0, 200)}`);
   assert(!/\/home\/[A-Za-z0-9._-]+\//.test(stdioLogText), 'No unredacted /home/<user>/ path allowed in stdio log');
+  assert(await stdioLogBox.evaluate((node) => {
+    const style = getComputedStyle(node);
+    return style.overflowY === 'auto' && node.clientHeight > 0 && node.clientHeight < 250;
+  }), 'Expected a bounded, scrollable stdio viewer beside the redaction notice');
+  const detail = await context.request.get(detailUrl);
+  assert(detail.status() === 200, `Job detail returned HTTP ${detail.status()}`);
+  const stdio = await detail.json();
+  assert(stdio.stdio_log_cap_bytes === 2 * 1024 * 1024 && typeof stdio.stdio_log_truncated === 'boolean',
+    'Job detail must report the 2 MiB stdio cap and truncation status');
+  assert(stdio.redacted_stdio_logs.length > 0 && stdio.redacted_stdio_logs.length <= 200,
+    'Job detail must return at most 200 lines of redacted stdio');
 
-  // Click reconciled batch link -> MUST open /eval/batches/{batch_id} with HTTP 200 (ZERO 404!)
-  const batchLink = resultSec.locator('a[href^="/eval/batches/"]').first();
+  const batchPath = `/eval/batches/${batchId}`;
+  const batchLink = resultSec.locator(`a[href="${batchPath}"]`);
   await batchLink.waitFor({ timeout: 10000 });
+  const batchDetail = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/v1/batches/${batchId}`);
   await batchLink.click();
-  await page.waitForURL(/\/eval\/batches\//, { timeout: 15000 });
-  await page.waitForSelector(`text=${uniqueBatchName}`, { timeout: 15000 });
-  assert(batchDetail404.length === 0, `Reconciled batch drilldown returned 404: ${batchDetail404.join(', ')}`);
+  const batchResponse = await batchDetail;
+  assert(batchResponse.status() === 200, `Reconciled batch drilldown returned HTTP ${batchResponse.status()}`);
+  const batch = await batchResponse.json();
+  assert(batch.batch_id === batchId && batch.generation_id === generationId,
+    'Batch drilldown must return the exact reconciled batch and generation IDs');
+  assert(batch.totals.recorded === 1 && batch.totals.scored === 1 && batch.totals.valid_mean === 1,
+    'Batch drilldown must return one scored trial with an exact mean of 1');
+  await page.waitForURL((url) => url.pathname === batchPath, { timeout: 15000 });
+  await page.getByRole('heading', { name: uniqueBatchName, exact: true }).waitFor({ timeout: 15000 });
   console.log('[OK] 2. /eval/execution verified (external Runner PID, 4 runners, disabled unintegrated suites, VLMEvalKit infer lock, real Direct harmless single-task SSE + default reconciled batch drilldown HTTP 200)');
+
+  await recordCls('/eval/execution → batch');
 
   // =========================================================================
   // 3. /training/opd (real 197 empty production state + 0 fake runs + CLI plan)
@@ -263,7 +411,6 @@ async function main() {
   assert(failed5xx.length === 0, `HTTP 5xx: ${failed5xx.join('; ')}`);
   assert(batchDetail404.length === 0, `Batch 404s: ${batchDetail404.join('; ')}`);
   console.log('ALL M3 PLAYWRIGHT E2E ASSERTIONS PASSED!');
-  await browser.close();
 }
 
 main().catch((err) => {
