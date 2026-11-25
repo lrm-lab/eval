@@ -2,16 +2,68 @@
 import argparse
 from base64 import b64decode
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 from datetime import datetime, timezone
 import hashlib
 import json
 import math
 import os
 from pathlib import Path
+import re
 import shutil
+import signal
 import subprocess
 import sys
+from tempfile import TemporaryDirectory
+from threading import current_thread, main_thread
 from uuid import uuid4
+
+
+PUBLIC_IMAGE_CACHE_ROOT = "LRM_VLMEVALKIT_PUBLIC_IMAGE_CACHE_ROOT"
+PUBLIC_IMAGE_CACHE_SOURCE = "LRM_VLMEVALKIT_PUBLIC_IMAGE_CACHE_SOURCE"
+_PUBLIC_TSV_ROOT = Path("/home/share-data/zhanghq17/multi_dataset")
+# Native TSV mirrors of the three benchmarks approved for public multimodal media.
+_PUBLIC_IMAGE_TSVS = {
+    _PUBLIC_TSV_ROOT / f"{dataset}{suffix}" / f"{dataset}{suffix}.tsv": (dataset, dataset_class)
+    for dataset, dataset_class in (
+        ("CMMMU_VAL", "CMMMU"), ("MMMU_Pro_10c", "MMMUProDataset"), ("MM-IFEval", "MMIFEval"),
+    )
+    for suffix in ("", "_smoke")
+}
+
+
+def is_public_image_source(path):
+    return path is not None and Path(path) in _PUBLIC_IMAGE_TSVS
+
+
+def _decode_mount_field(value):
+    return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), value)
+
+
+def public_image_cache_root(mountinfo=Path("/proc/self/mountinfo")):
+    location = os.environ.get(PUBLIC_IMAGE_CACHE_ROOT)
+    source = os.environ.get(PUBLIC_IMAGE_CACHE_SOURCE)
+    if not location or not source:
+        raise ValueError("公开视觉图片缓存需要同时配置共享目录和挂载源")
+    root = Path(location)
+    if not root.is_absolute() or ".." in root.parts:
+        raise ValueError("公开视觉图片缓存目录必须使用规范的绝对路径")
+    mounts = []
+    for line in mountinfo.read_text().splitlines():
+        left, right = line.split(" - ", 1)
+        fields, fs = left.split(), right.split()
+        mount = Path(_decode_mount_field(fields[4]))
+        if root.is_relative_to(mount):
+            mounts.append((len(mount.parts), int(fields[0]), fs[0], _decode_mount_field(fs[1])))
+    if not mounts or max(mounts)[2:] not in (("cifs", source), ("smb3", source)):
+        raise ValueError("公开视觉图片缓存的预期 CIFS 卷未挂载")
+    if root.resolve(strict=True) != root or not root.is_dir():
+        raise ValueError("公开视觉图片缓存目录缺失或路径包含符号链接")
+    return root
+
+
+def _interrupt_worker(signum, frame):
+    raise KeyboardInterrupt
 
 
 def atif_trajectory(result, model):
@@ -89,10 +141,6 @@ def launch(args, suite, path, job, mode):
     if interpreter is None:
         raise ValueError("VLMEvalKit Python interpreter is unavailable")
     job.mkdir(parents=True, exist_ok=False)
-    request = job / "vlmeval-request.json"
-    write_json(request, {"options": {**options, "mode": mode}, "data": str(path), "model": args.model,
-                         "base_url": args.base_url, "tasks": args.task,
-                         "name": suite["name"], "concurrent": args.concurrent})
     # VLMEvalKit reads the checkout's .env on import and during judge setup.
     # Stage only the package so credentials and dataset caches stay run-scoped.
     package = job / "python" / "vlmeval"
@@ -107,9 +155,23 @@ def launch(args, suite, path, job, mode):
     env["HF_HOME"] = str(cache / "huggingface")
     (job / "lmu-data").mkdir()
     log = job / "vlmevalkit.log"
-    with log.open("wb") as stream:
-        code = subprocess.run([interpreter, "-P", "-B", str(Path(__file__).resolve()), str(request)],
-                              cwd=job, env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
+    shared = nullcontext(None)
+    if is_public_image_source(path) and (os.getenv(PUBLIC_IMAGE_CACHE_ROOT) or os.getenv(PUBLIC_IMAGE_CACHE_SOURCE)):
+        shared = TemporaryDirectory(prefix="vlm-images-", dir=public_image_cache_root())
+    with shared as media_dir, log.open("wb") as stream:
+        request = job / "vlmeval-request.json"
+        write_json(request, {"options": {**options, "mode": mode}, "data": str(path), "model": args.model,
+                             "base_url": args.base_url, "tasks": args.task, "name": suite["name"],
+                             "concurrent": args.concurrent, "public_image_dir": media_dir})
+        previous_handler = None
+        if media_dir is not None and current_thread() is main_thread():
+            previous_handler = signal.signal(signal.SIGTERM, _interrupt_worker)
+        try:
+            code = subprocess.run([interpreter, "-P", "-B", str(Path(__file__).resolve()), str(request)],
+                                  cwd=job, env=env, stdout=stream, stderr=subprocess.STDOUT).returncode
+        finally:
+            if previous_handler is not None:
+                signal.signal(signal.SIGTERM, previous_handler)
     if code:
         print(f"VLMEvalKit exited with code {code}. Local log: {log}", file=sys.stderr)
     return code
@@ -120,13 +182,18 @@ def api_url(url):
     return url if url.endswith("/chat/completions") else url + "/chat/completions"
 
 
-def load_dataset(source, options):
+def load_dataset(source, options, public_image_dir=None):
     import vlmeval.dataset as datasets
     from vlmeval.dataset.image_base import ImageBaseDataset
     from vlmeval.smp import load
 
     name = options["dataset"]
     kwargs = options.get("dataset_options", {})
+    if public_image_dir is not None and (
+        _PUBLIC_IMAGE_TSVS.get(source) != (name, options.get("dataset_class"))
+        or not source.is_file() or source.resolve() != source
+    ):
+        raise ValueError("共享图片缓存仅支持已批准的原生 TSV 数据集")
     if source.is_dir():
         shutil.copytree(source, os.environ["LMUData"], dirs_exist_ok=True)
         dataset = datasets.build_dataset(name, **kwargs)
@@ -142,9 +209,21 @@ def load_dataset(source, options):
             return load(str(source))
 
     dataset = LocalImageDataset(dataset=name, **kwargs)
+    permitted_root = Path(os.environ["LMUData"]).resolve()
+    if public_image_dir is not None:
+        if dataset.meta_only:
+            raise ValueError("共享图片缓存需要原生 TSV 中的内嵌图片")
+        target = Path(public_image_dir)
+        if (target.parent != public_image_cache_root() or not target.name.startswith("vlm-images-")
+                or target.resolve(strict=True) != target or not target.is_dir()):
+            raise ValueError("共享图片缓存的作业子目录无效")
+        if any(not re.fullmatch(r"[A-Za-z0-9_.-]+", str(index)) for index in dataset.data["index"]):
+            raise ValueError("共享图片缓存的样本编号包含路径字符")
+        dataset.img_root = str(target)
+        permitted_root = target
     if not dataset.meta_only and "image_path" in dataset.data:
         root = Path(dataset.img_root).resolve()
-        if not root.is_relative_to(Path(os.environ["LMUData"]).resolve()):
+        if not root.is_relative_to(permitted_root):
             raise ValueError("Native image output must stay inside the job cache")
         for entry in dataset.data["image_path"]:
             paths = entry if isinstance(entry, list) else [entry]
@@ -200,7 +279,7 @@ def worker(path):
     job = path.parent
     request = json.loads(path.read_text())
     options = request["options"]
-    dataset = load_dataset(Path(request["data"]), options)
+    dataset = load_dataset(Path(request["data"]), options, request.get("public_image_dir"))
     native = job / "vlmevalkit"
     native.mkdir()
     data = dataset.data
