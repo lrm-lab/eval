@@ -56,6 +56,13 @@ def normalize_score_to_100(raw_score: float, scale_type: str) -> float:
     return float(raw_score)
 
 
+def normalize_trial_score_to_100(raw_score: float, release_scale_type: str, scoring_protocol: str) -> float:
+    # Historical GAIA's release scale describes CSV totals. Both native trial
+    # protocols explicitly store binary rewards.
+    scale_type = "ratio_0_1" if scoring_protocol in ("gaia-official-scorer", "gaia-raw-correct") else release_scale_type
+    return normalize_score_to_100(raw_score, scale_type)
+
+
 def compute_unrounded_delta(baseline_pct: float, candidate_pct: float) -> tuple[float, float | None]:
     """Compute (delta_pp, rel_pct) strictly from unrounded float64 values, rounding only at display (v2.2.1 03-2 §3.2)."""
     delta_pp = round(candidate_pct - baseline_pct, 2)
