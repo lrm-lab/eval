@@ -751,7 +751,7 @@ export function ExecutionPage() {
   const canWrite = Boolean(user && ['researcher', 'admin'].includes(user.role));
 
   // ---------- Section 1: Test Configuration State ----------
-  const [kind, setKind] = useState<RunnerKind>('harbor');
+  const [runnerChoice, setKind] = useState<RunnerKind | null>(null);
   const [suiteId, setSuiteId] = useState<string>('');
   const [selectionMode, setSelectionMode] = useState<SelectionMode>('all');
   const [tasksInput, setTasksInput] = useState<string>('');
@@ -792,6 +792,11 @@ export function ExecutionPage() {
     queryKey: ['execution-capabilities'],
     queryFn: () => apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities'),
   });
+  const configuredRunners = capsQ.data?.runner_environment.supported_runners ?? [];
+  const suggestedKind = capsQ.data?.runner_environment.isolated_runner_ready
+    ? capsQ.data.runner_kinds.find((runner) => configuredRunners.includes(runner.kind))?.kind
+    : undefined;
+  const kind = runnerChoice ?? suggestedKind ?? 'harbor';
 
   const jobsQ = useQuery({
     queryKey: ['execution-jobs'],
@@ -838,6 +843,7 @@ export function ExecutionPage() {
   useEffect(() => {
     const caps = capsQ.data;
     if (!caps) return;
+    if (runnerChoice === null && suggestedKind) setKind(suggestedKind);
     if (!suiteId && caps.suites.length > 0) {
       const targetRunner = kind === 'harbor_gateway' ? 'harbor' : kind;
       const match = caps.suites.find((s) => s.runner === targetRunner) || caps.suites[0];
@@ -849,7 +855,7 @@ export function ExecutionPage() {
         setGatewayProfileId(caps.gateway_profiles[0].profile_id);
       }
     }
-  }, [capsQ.data, gatewayProfileId, kind, suiteId]);
+  }, [capsQ.data, gatewayProfileId, kind, runnerChoice, suggestedKind, suiteId]);
 
   // Auto-select latest job from history if none selected yet
   useEffect(() => {
@@ -1357,8 +1363,7 @@ export function ExecutionPage() {
     planResult?.docker_group_attached ?? capsQ.data?.runner_environment.docker_group_attached ?? false;
   const isolatedRunnerReady = Boolean(capsQ.data?.runner_environment.isolated_runner_ready);
   const runnerPid = capsQ.data?.runner_environment.runner_pid;
-  const supportedRunners = capsQ.data?.runner_environment.supported_runners ?? [];
-  const activeRunnerAvailable = isolatedRunnerReady && supportedRunners.includes(kind);
+  const activeRunnerAvailable = isolatedRunnerReady && configuredRunners.includes(kind);
   const runnerStatus = capsQ.isPending
     ? '正在检查运行器状态'
     : !isolatedRunnerReady
@@ -1367,7 +1372,9 @@ export function ExecutionPage() {
   const runnerDisconnectReason =
     capsQ.data?.runner_environment.reason ??
     (isolatedRunnerReady && !activeRunnerAvailable
-      ? `当前隔离 Runner 未启用 ${kind} 运行能力（已就绪: ${supportedRunners.join(', ') || '无'}）`
+      ? activeRunnerMeta.requires_docker
+        ? '此模式需要配置可运行容器的独立 Runner。你仍可生成预检命令。'
+        : '此模式需要在独立 Runner 上配置对应的运行环境。你仍可生成预检命令。'
       : null);
   const workProbeOk = capsQ.data?.runner_environment.runner_work_isolation?.ok ?? true;
   const evProbeOk = capsQ.data?.runner_environment.evidence_store_isolation?.ok ?? true;
@@ -1528,7 +1535,12 @@ export function ExecutionPage() {
                     <span className="min-w-0">
                       <span className="block font-bold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[runner.kind]}</span>
                       <span className="block text-[11px] text-[var(--text-secondary)]">
-                        {runner.requires_docker ? '需隔离容器' : '无需容器'}
+                        {capsQ.isPending
+                          ? '正在检查状态'
+                          : isolatedRunnerReady && configuredRunners.includes(runner.kind)
+                            ? '已就绪 · 可启动'
+                            : '仅可预检'}
+                        {runner.requires_docker ? ' · 需容器' : ''}
                       </span>
                     </span>
                   </button>
