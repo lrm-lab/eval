@@ -8,6 +8,7 @@ import { fmtDateShort, fmtPct, runScopeLabel, stableColorForKey, trackDisplayNam
 import { useAppStore } from '../lib/store';
 import type { BatchDTO } from '../types/api';
 import { PageTransition, SlidingTabs, SpotlightCard } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
 
@@ -341,31 +342,42 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
                         <th className="py-2 px-3">Harness / Checkpoint</th>
                         <th className="py-2 px-3">协议 / 范围</th>
                         <th className="py-2 px-3.5 text-right">得分 (0-100)</th>
+                        <th className="w-12 py-2 px-2 text-center">操作</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[var(--border-subtle)]">
-                      {list.map((s, idx) => (
-                        <tr
-                          key={`${s.dataset_release_id}-${s.scoring_protocol}-${s.checkpoint}-${idx}`}
-                          onClick={() =>
-                            s.batch_id
-                              ? navigate(`/eval/batches/${s.batch_id}`)
-                              : s.benchmark_slug && navigate(`/benchmarks/${s.benchmark_slug}`)
-                          }
-                          className="hover:bg-[var(--bg-elevated)]/70 cursor-pointer"
-                        >
-                          <td className="py-2 px-3.5 font-medium text-[var(--text-primary)]">{s.display_name}</td>
-                          <td className="py-2 px-3 text-[var(--text-secondary)]">
-                            {s.harness || s.runner} {s.checkpoint ? `· ${s.checkpoint}` : ''}
-                          </td>
-                          <td className="py-2 px-3 text-[11px] font-mono text-[var(--text-muted)]">
-                            {s.scoring_protocol} · {runScopeLabel(s.run_scope)}
-                          </td>
-                          <td className="py-2 px-3.5 text-right font-bold tabular-nums text-[var(--text-primary)]">
-                            {fmtPct(s.score)}
-                          </td>
-                        </tr>
-                      ))}
+                      {list.map((s, idx) => {
+                        const target = s.batch_id
+                          ? `/eval/batches/${s.batch_id}`
+                          : s.benchmark_slug && `/benchmarks/${s.benchmark_slug}`;
+                        return (
+                          <tr
+                            key={`${s.dataset_release_id}-${s.scoring_protocol}-${s.checkpoint}-${idx}`}
+                            onClick={() => target && navigate(target)}
+                            className={`group/row-action hover:bg-[var(--bg-elevated)]/70 ${target ? 'cursor-pointer' : ''}`}
+                          >
+                            <td className="py-2 px-3.5 font-medium text-[var(--text-primary)]">{s.display_name}</td>
+                            <td className="py-2 px-3 text-[var(--text-secondary)]">
+                              {s.harness || s.runner} {s.checkpoint ? `· ${s.checkpoint}` : ''}
+                            </td>
+                            <td className="py-2 px-3 text-[11px] font-mono text-[var(--text-muted)]">
+                              {s.scoring_protocol} · {runScopeLabel(s.run_scope)}
+                            </td>
+                            <td className="py-2 px-3.5 text-right font-bold tabular-nums text-[var(--text-primary)]">
+                              {fmtPct(s.score)}
+                            </td>
+                            <td className="px-2 text-center" onClick={(event) => event.stopPropagation()}>
+                              {target && (
+                                <RowActionIcon
+                                  variant="details"
+                                  label={`${s.batch_id ? '查看批次' : '查看基准'}详情：${s.display_name}`}
+                                  to={target}
+                                />
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
@@ -387,6 +399,7 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
                   <th className="py-2.5 px-3">协议</th>
                   <th className="py-2.5 px-3 text-right">覆盖</th>
                   <th className="py-2.5 px-3.5 text-right">得分</th>
+                  <th className="w-12 py-2.5 px-2 text-center">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)]">
@@ -394,18 +407,23 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
                   <tr
                     key={`${row.dataset_release_id}-${row.harness}-${idx}`}
                     onClick={() => row.batch_id && navigate(`/eval/batches/${row.batch_id}`)}
-                    className="hover:bg-[var(--bg-elevated)]/70 cursor-pointer"
+                    className={`group/row-action hover:bg-[var(--bg-elevated)]/70 ${row.batch_id ? 'cursor-pointer' : ''}`}
                   >
                     <td className="py-2 px-3.5 font-semibold text-[var(--text-primary)]">{row.display_name}</td>
                     <td className="py-2 px-3">
-                      <Link
-                        to={`/harnesses/${encodeURIComponent(row.harness || row.runner)}`}
-                        onClick={(e) => e.stopPropagation()}
-                        className="text-[var(--brand-primary)] no-underline hover:underline"
-                      >
-                        {row.harness || row.runner}
-                        {row.harness_version ? `@${row.harness_version}` : ''}
-                      </Link>
+                      <div className="flex items-center gap-2">
+                        <span>
+                          {row.harness || row.runner}
+                          {row.harness_version ? `@${row.harness_version}` : ''}
+                        </span>
+                        <span onClick={(event) => event.stopPropagation()}>
+                          <RowActionIcon
+                            variant="open"
+                            label={`打开 Harness 档案：${row.harness || row.runner}`}
+                            to={`/harnesses/${encodeURIComponent(row.harness || row.runner)}`}
+                          />
+                        </span>
+                      </div>
                     </td>
                     <td className="py-2 px-3 text-[var(--text-secondary)]">
                       {row.runner} · {runScopeLabel(row.run_scope)}
@@ -415,6 +433,15 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
                       {row.scored ?? '—'}/{row.recorded ?? '—'}
                     </td>
                     <td className="py-2 px-3.5 text-right font-bold tabular-nums text-[var(--text-primary)]">{fmtPct(row.score)}</td>
+                    <td className="px-2 text-center" onClick={(event) => event.stopPropagation()}>
+                      {row.batch_id && (
+                        <RowActionIcon
+                          variant="details"
+                          label={`查看批次详情：${row.display_name}`}
+                          to={`/eval/batches/${row.batch_id}`}
+                        />
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -451,11 +478,9 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
             </thead>
             <tbody className="divide-y divide-[var(--border-subtle)]">
               {data.batches.map((b) => (
-                <tr key={b.batch_id} className="hover:bg-[var(--bg-elevated)]/65">
+                <tr key={b.batch_id} className="group/row-action hover:bg-[var(--bg-elevated)]/65">
                   <td className="py-2.5 px-3.5">
-                    <Link to={`/eval/batches/${b.batch_id}`} className="font-semibold text-[var(--brand-primary)] no-underline hover:underline">
-                      {b.batch_name}
-                    </Link>
+                    <div className="font-semibold text-[var(--text-primary)]">{b.batch_name}</div>
                     <div className="text-[11px] text-[var(--text-muted)]">{fmtDateShort(b.finished_at || b.indexed_at)}</div>
                   </td>
                   <td className="py-2.5 px-3">
@@ -473,13 +498,18 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
                       ? fmtPct(b.valid_mean <= 1 ? b.valid_mean * 100 : b.valid_mean)
                       : '—'}
                   </td>
-                  <td className="py-2.5 px-3.5 text-right">
+                  <td className="py-2.5 px-3.5 text-right whitespace-nowrap">
+                    <RowActionIcon
+                      variant="details"
+                      label={`查看批次详情：${b.batch_name}`}
+                      to={`/eval/batches/${b.batch_id}`}
+                    />
                     <button
                       type="button"
                       onClick={() =>
                         addToCompare({ id: b.batch_id, kind: 'batch', batch_id: b.batch_id, alias: b.batch_name })
                       }
-                      className="inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--brand-primary)] cursor-pointer"
+                      className="ml-2 inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] px-2 py-1 text-[11px] text-[var(--text-secondary)] hover:text-[var(--brand-primary)] cursor-pointer"
                     >
                       <Plus className="w-3 h-3" /> 对比
                     </button>

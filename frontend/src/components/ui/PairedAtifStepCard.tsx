@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { AlertTriangle, Brain, Check, ChevronDown, ChevronRight, Copy, Terminal } from 'lucide-react';
 import type { AtifStep } from '../../types/api';
 import { CollapsiblePanel } from '../motion/primitives';
+import { RowActionIcon } from './RowActionIcon';
 
 export interface PairedAtifStepCardProps {
   step: AtifStep;
@@ -56,20 +57,20 @@ export function PairedAtifStepCard({
   return (
     <div
       id={`step-${step.step_id}`}
-      className={`rounded-xl border bg-[var(--bg-surface)] p-3.5 transition-colors ${
+      className={`group/row-action rounded-xl border bg-[var(--bg-surface)] p-3.5 transition-colors ${
         hasError ? 'border-[var(--sem-err-border)]' : 'border-[var(--border-subtle)]'
       } ${highlighted ? 'lrm-step-flash' : ''}`}
     >
       <div className="flex items-center justify-between gap-2 pb-2 mb-2 border-b border-[var(--border-subtle)]">
         <div className="flex items-center gap-2 text-xs">
-          <button
-            type="button"
-            onClick={() => onCopyAnchor?.(step.step_id)}
-            className="font-mono font-semibold text-[var(--brand-primary)] hover:underline cursor-pointer"
-            title="复制步骤直链锚点"
-          >
-            #step-{step.step_id}
-          </button>
+          <span className="font-mono font-semibold text-[var(--text-primary)]">#step-{step.step_id}</span>
+          {onCopyAnchor && (
+            <RowActionIcon
+              variant="open"
+              label={`复制步骤 ${step.step_id} 的直链锚点`}
+              onClick={() => onCopyAnchor(step.step_id)}
+            />
+          )}
           <span className="rounded px-1.5 py-0.5 text-[11px] font-medium bg-[var(--bg-elevated)] text-[var(--text-secondary)]">
             {step.source || 'agent'}
           </span>

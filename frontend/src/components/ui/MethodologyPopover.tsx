@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
-import { ExternalLink, HelpCircle } from 'lucide-react';
+import { HelpCircle } from 'lucide-react';
+import { RowActionIcon } from './RowActionIcon';
 
 export function MethodologyPopover({
   title,
@@ -14,14 +14,19 @@ export function MethodologyPopover({
   const [open, setOpen] = useState(false);
 
   return (
-    <span className="relative inline-flex items-center">
+    <span
+      className="relative inline-flex items-center"
+      onBlur={(event) => {
+        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
+      }}
+    >
       <button
         type="button"
         onClick={(e) => {
           e.stopPropagation();
           setOpen((v) => !v);
         }}
-        onBlur={() => window.setTimeout(() => setOpen(false), 180)}
+        aria-expanded={open}
         title={title}
         aria-label={`口径说明：${title}`}
         className="inline-flex items-center justify-center rounded-full p-0.5 text-[var(--text-muted)] hover:text-[var(--brand-primary)] cursor-pointer"
@@ -35,13 +40,12 @@ export function MethodologyPopover({
         >
           <div className="font-semibold text-[var(--text-primary)] mb-1">{title}</div>
           <p className="m-0 text-[var(--text-secondary)] leading-relaxed">{summary}</p>
-          <Link
+          <RowActionIcon
+            variant="open"
+            label="查看完整方法学文档"
             to={`/toolkit/methodology${anchor}`}
-            className="mt-2 inline-flex items-center gap-1 text-[11px] font-medium text-[var(--brand-primary)] hover:underline"
-          >
-            <span>查看完整方法学文档</span>
-            <ExternalLink className="w-3 h-3" />
-          </Link>
+            className="mt-2"
+          />
         </div>
       )}
     </span>

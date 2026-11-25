@@ -23,6 +23,7 @@ import {
   StaggerContainer,
   StaggerItem,
 } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
 import { StateNoticeCard } from '../components/ui/Skeletons';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
@@ -610,6 +611,7 @@ export function HomePage() {
                   <th className="py-2.5 px-3 font-semibold">覆盖率</th>
                   <th className="py-2.5 px-3 font-semibold text-right">有效均值</th>
                   <th className="py-2.5 px-3.5 font-semibold text-right">更新时间</th>
+                  <th className="w-12 py-2.5 px-2 text-center">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)]">
@@ -622,13 +624,14 @@ export function HomePage() {
                         <td className="py-2.5 px-3"><div className="lrm-skeleton h-4 w-14" /></td>
                         <td className="py-2.5 px-3"><div className="lrm-skeleton h-4 w-14 ml-auto" /></td>
                         <td className="py-2.5 px-3.5"><div className="lrm-skeleton h-4 w-20 ml-auto" /></td>
+                        <td className="px-2"><div className="lrm-skeleton size-8 rounded-lg" /></td>
                       </tr>
                     ))
                   : recentBatches.map((b) => (
                   <tr
                     key={b.batch_id}
                     onClick={() => navigate(`/eval/batches/${b.batch_id}`)}
-                    className="hover:bg-[var(--bg-elevated)]/75 cursor-pointer transition-colors"
+                    className="group/row-action hover:bg-[var(--bg-elevated)]/75 cursor-pointer transition-colors"
                   >
                     <td className="py-2.5 px-3.5 font-medium text-[var(--text-primary)] max-w-[260px] truncate">
                       <div className="flex items-center gap-2">
@@ -664,6 +667,13 @@ export function HomePage() {
                         <Clock className="w-3 h-3" />
                         {fmtDateShort(b.finished_at || b.indexed_at)}
                       </span>
+                    </td>
+                    <td className="px-2 text-center" onClick={(event) => event.stopPropagation()}>
+                      <RowActionIcon
+                        variant="details"
+                        label={`查看批次详情：${b.batch_name}`}
+                        to={`/eval/batches/${b.batch_id}`}
+                      />
                     </td>
                   </tr>
                 ))}
