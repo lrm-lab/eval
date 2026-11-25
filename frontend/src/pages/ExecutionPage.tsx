@@ -84,11 +84,13 @@ const harborSmokeTasks: Partial<Record<string, string>> = {
   gaia: '076c8171-9b3b-49b9-a477-244d2a532826',
   deepswe: 'clack-async-autocomplete-options',
   wildclaw: '03_Social_Interaction_task_1_meeting_negotiation',
+  terminal: 'nginx-request-logging',
 };
 
 function defaultSuiteForRunner(suites: RegisteredSuite[], kind: RunnerKind) {
   const runner = kind === 'harbor_gateway' ? 'harbor' : kind;
-  const matching = suites.filter((suite) => suite.runner === runner && suite.selectable);
+  const matching = suites.filter((suite) =>
+    suite.runner === runner && suite.selectable && (kind !== 'harbor_gateway' || suite.suite_id !== 'terminal'));
   const smokeSuites = matching.filter((suite) => suite.split === 'smoke' && (suite.task_count ?? 0) > 0);
   smokeSuites.sort((first, second) => (first.task_count ?? 0) - (second.task_count ?? 0));
   return smokeSuites[0] ?? matching[0];
@@ -104,7 +106,8 @@ function readyRunners(caps?: ExecutionCapabilitiesResp): string[] {
 function runnerForSuite(suite: RegisteredSuite, available: string[], preference: RunnerKind | null, agent: string) {
   const choices: RunnerKind[] =
     suite.runner === 'harbor'
-      ? (['oracle', 'nop'].includes(agent.trim()) ? ['harbor'] : ['harbor', 'harbor_gateway'])
+      ? (suite.suite_id === 'terminal' || ['oracle', 'nop'].includes(agent.trim())
+        ? ['harbor'] : ['harbor', 'harbor_gateway'])
       : suite.runner === 'direct' || suite.runner === 'vlmevalkit' ? [suite.runner] : [];
   const preferred = preference && choices.includes(preference) ? preference : choices[0];
   if (preferred && available.includes(preferred)) return preferred;
@@ -875,17 +878,21 @@ export function ExecutionPage() {
   const parsedTasks = useMemo(() => parseTaskList(tasksInput), [tasksInput]);
   const readyTaskCount = selectedSuite?.ready_task_count;
   const readyTasks = selectedSuite?.ready_tasks;
+  const terminalSelected = selectedSuite?.suite_id === 'terminal';
   const taskImagesPending = readyTaskCount !== undefined && readyTaskCount < (selectedSuite?.task_count ?? 1);
   const hasUnreadyTask = readyTasks !== undefined && parsedTasks.some((task) => !readyTasks.includes(task));
-  const executionScopeReady = readyTaskCount === undefined ||
-    (readyTaskCount > 0 && (selectionMode === 'all' ? !taskImagesPending : parsedTasks.length > 0 && !hasUnreadyTask));
+  const executionScopeReady = terminalSelected
+    ? selectionMode === 'tasks' && parsedTasks.length === 1 && parsedTasks[0] === harborSmokeTasks.terminal
+      && readyTasks?.includes(parsedTasks[0]) === true
+    : readyTaskCount === undefined ||
+      (readyTaskCount > 0 && (selectionMode === 'all' ? !taskImagesPending : parsedTasks.length > 0 && !hasUnreadyTask));
 
   useEffect(() => {
-    if (taskImagesPending && selectionMode === 'all') {
+    if ((terminalSelected || taskImagesPending) && selectionMode === 'all') {
       setSelectionMode('tasks');
       setPlanResult(null);
     }
-  }, [taskImagesPending, selectionMode]);
+  }, [taskImagesPending, selectionMode, terminalSelected]);
 
   const effectiveRunScope =
     selectionMode === 'all'
@@ -898,6 +905,23 @@ export function ExecutionPage() {
         ? 'official_pending'
         : 'unofficial_valid_mean';
 
+  const selectSuite = useCallback((nextSuiteId: string) => {
+    setSuiteId(nextSuiteId);
+    setKind(nextSuiteId === 'terminal' ? 'harbor' : null);
+    const smokeTask = harborSmokeTasks[nextSuiteId];
+    if (smokeTask) {
+      setAgent('pi');
+      setHarnessVersion('0.87.1');
+      setSelectionMode('tasks');
+      setTasksInput(smokeTask);
+    } else {
+      if (harborSmokeTasks[suiteId]) setSelectionMode('all');
+      setTasksInput('');
+    }
+    setPlanResult(null);
+    setEnvironmentNotice(false);
+  }, [suiteId]);
+
   // Initialize default suite & gateway profile once capabilities load
   useEffect(() => {
     const caps = capsQ.data;
@@ -905,7 +929,8 @@ export function ExecutionPage() {
     if (!suiteId) {
       const runnable = caps.suites.filter((suite) => suiteCanRun(suite, readyRunners(caps), agent));
       const match = defaultSuiteForRunner(runnable, kind) ?? runnable[0];
-      if (match) setSuiteId(match.suite_id);
+      if (match?.suite_id === 'terminal') selectSuite(match.suite_id);
+      else if (match) setSuiteId(match.suite_id);
     }
     if (caps.gateway_profiles.length > 0) {
       const exists = caps.gateway_profiles.some((g) => g.profile_id === gatewayProfileId);
@@ -913,7 +938,7 @@ export function ExecutionPage() {
         setGatewayProfileId(caps.gateway_profiles[0].profile_id);
       }
     }
-  }, [agent, capsQ.data, gatewayProfileId, kind, suiteId]);
+  }, [agent, capsQ.data, gatewayProfileId, kind, selectSuite, suiteId]);
 
   // Auto-select latest job from history if none selected yet
   useEffect(() => {
@@ -924,7 +949,7 @@ export function ExecutionPage() {
 
   // Handle runner switch with smart suite & agent defaults
   const handleSelectRunner = (nextKind: RunnerKind) => {
-    if (!configuredRunners.includes(nextKind)) return;
+    if (!configuredRunners.includes(nextKind) || (terminalSelected && nextKind === 'harbor_gateway')) return;
     setKind(nextKind);
     setPlanResult(null);
     setEnvironmentNotice(false);
@@ -943,7 +968,9 @@ export function ExecutionPage() {
       const curSuite = suites.find((s) => s.suite_id === suiteId);
       if (!curSuite || curSuite.runner !== targetRunner) {
         const match = defaultSuiteForRunner(suites, nextKind);
-        if (match) {
+        if (match?.suite_id === 'terminal') {
+          selectSuite(match.suite_id);
+        } else if (match) {
           setSuiteId(match.suite_id);
           setTasksInput('');
         }
@@ -1599,23 +1626,7 @@ export function ExecutionPage() {
                   <select
                     aria-label="选择已登记评测题库"
                     value={suiteId}
-                    onChange={(e) => {
-                      const nextSuiteId = e.target.value;
-                      setSuiteId(nextSuiteId);
-                      setKind(null);
-                      const smokeTask = harborSmokeTasks[nextSuiteId];
-                      if (smokeTask) {
-                        setAgent('pi');
-                        setHarnessVersion('0.87.1');
-                        setSelectionMode('tasks');
-                        setTasksInput(smokeTask);
-                      } else {
-                        if (harborSmokeTasks[suiteId]) setSelectionMode('all');
-                        setTasksInput('');
-                      }
-                      setPlanResult(null);
-                      setEnvironmentNotice(false);
-                    }}
+                    onChange={(e) => selectSuite(e.target.value)}
                     className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
                   >
                     <option value="" disabled>{capsQ.isPending ? '正在加载题库' : '请选择可运行的题库'}</option>
@@ -1682,7 +1693,7 @@ export function ExecutionPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
-                      disabled={taskImagesPending}
+                      disabled={terminalSelected || taskImagesPending}
                       aria-pressed={selectionMode === 'all'}
                       onClick={() => {
                         setSelectionMode('all');
@@ -1721,7 +1732,7 @@ export function ExecutionPage() {
                   </p>
                   {taskImagesPending && (
                     <p className="text-[11px] text-[var(--text-secondary)]">
-                      {readyTaskCount}/{selectedSuite?.task_count ?? 0} 题可执行，全部就绪后开放全量评测。
+                      {readyTaskCount}/{selectedSuite?.task_count ?? 0} 题可执行。
                     </p>
                   )}
                 </div>
@@ -1747,7 +1758,7 @@ export function ExecutionPage() {
                 )}
 
                 {selectionMode === 'tasks' && hasUnreadyTask && (
-                  <p className="text-[11px] text-[var(--text-secondary)]">部分任务的镜像尚未就绪，请选择已就绪的题目。</p>
+                  <p className="text-[11px] text-[var(--text-secondary)]">请选择已就绪的题目。</p>
                 )}
 
                 {selectionMode === 'tasks' && readyTaskCount !== undefined && Boolean(selectedSuite?.sample_tasks?.length) && (
@@ -1856,7 +1867,8 @@ export function ExecutionPage() {
                     role="radio"
                     aria-checked={selected}
                     aria-label={`选择运行器 ${RUNNER_SHORT_LABELS[runner.kind]}`}
-                    disabled={!configuredRunners.includes(runner.kind) || !registeredSuites.some((suite) =>
+                    disabled={(terminalSelected && runner.kind === 'harbor_gateway')
+                      || !configuredRunners.includes(runner.kind) || !registeredSuites.some((suite) =>
                       suite.runner === (runner.kind === 'harbor_gateway' ? 'harbor' : runner.kind)
                       && suiteCanRun(suite, [runner.kind], agent)
                     )}

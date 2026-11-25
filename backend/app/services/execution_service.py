@@ -38,7 +38,8 @@ from app.logging_setup import (
 from app.runner.cli_contract import build_managed_run_py_command
 from app.runner.client import RunnerIPCClient
 from app.runner.gateway_evidence import gateway_receipt, read_gateway_capture, read_gateway_receipts
-from app.runner.terminal_images import terminal_selection_ready
+from app.runner.terminal_dependencies import NGINX_TASK, is_terminal_nginx_job
+from app.runner.terminal_images import TERMINAL_SCOPE_MESSAGE, terminal_selection_ready
 from app.runner.vlmevalkit_results import OFFICIAL_RESULT_FILE, VLM_SCORING_FILES, encode_vlmevalkit_results
 from app.security.auth import AuthUser
 from app.security.authz import (
@@ -583,7 +584,11 @@ class ExecutionService:
             if s["suite_id"] == "terminal":
                 readiness = runner_env.get("terminal_image_readiness") or {}
                 ready = set(readiness.get("ready_tasks", []))
-                tasks = [task for task in tasks if task in ready]
+                # The authenticated Runner inventories the private bundle on its host.
+                if isinstance(readiness.get("task_count"), int):
+                    count = readiness["task_count"]
+                    disc_status = "ok"
+                tasks = [NGINX_TASK] if NGINX_TASK in ready else []
                 availability = {
                     "ready_task_count": len(tasks),
                     "ready_tasks": tasks,
@@ -756,6 +761,10 @@ class ExecutionService:
             raise AppError(422, "SCHEMA_VALIDATION_FAILED", "selection_mode=tasks 时必须指定至少一个 --task", {"field": "tasks"})
         if selection_mode == "all":
             tasks = []
+        if suite_id == "terminal" and not is_terminal_nginx_job(
+            {"kind": kind, "suite_id": suite_id, "selection_mode": selection_mode, "tasks": tasks}
+        ):
+            raise AppError(409, "TASK_IMAGE_NOT_READY", TERMINAL_SCOPE_MESSAGE)
 
         # Discover REAL tasks from disk (ZERO artificial 4-task fabrication!)
         discovered_tasks, discovered_count, discovery_status = self._discover_suite_tasks(suite)
@@ -1650,9 +1659,7 @@ class ExecutionService:
         if not isinstance(runner_instance_id, str) or not runner_instance_id:
             raise AppError(503, "RUNNER_PROTOCOL_MISMATCH", "隔离 Runner 未提供实例标识，请同代更新 Web 与 Runner")
         if spec["suite_id"] == "terminal" and not terminal_selection_ready(spec, rhealth.get("terminal_image_readiness")):
-            raise AppError(
-                409, "TASK_IMAGE_NOT_READY", "所选 Terminal-Bench 题目的运行镜像尚未就绪，请选择已就绪的题目",
-            )
+            raise AppError(409, "TASK_IMAGE_NOT_READY", TERMINAL_SCOPE_MESSAGE)
 
         batch_name = spec["batch_name"]
         want_harbor_publish = bool(payload.get("publish_to_harbor_runs", False))

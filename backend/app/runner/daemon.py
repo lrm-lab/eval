@@ -68,12 +68,11 @@ from app.managed_framework.vlmevalkit import (
     public_image_cache_root,
 )
 from app.runner.terminal_dependencies import (
-    NGINX_DEPS_DIR,
-    NGINX_DEPS_SHA256,
     VERIFIER_HTTPS_PROXY,
     is_terminal_nginx_job,
+    nginx_dependency_snapshot,
 )
-from app.runner.terminal_images import terminal_image_readiness, terminal_selection_ready
+from app.runner.terminal_images import TERMINAL_SCOPE_MESSAGE, terminal_image_readiness, terminal_selection_ready
 from app.runner.vlmevalkit_results import read_vlmevalkit_results
 from app.security.gateways import GatewayProfileRegistry
 from app.security.managed_exec import (
@@ -377,18 +376,18 @@ class IsolatedRunnerManager:
                 "message": "当前隔离 Runner 节点未连接 Docker 守护进程，拒绝执行 Harbor 容器作业（零模拟评分兜底）",
                 "detail": {"kind": kind, "docker_available": False},
             }
+        if kind in ("harbor", "harbor_gateway") and spec.get("suite_id") == "terminal":
+            if not terminal_selection_ready(spec, h["terminal_image_readiness"]):
+                return 409, {
+                    "code": "TASK_IMAGE_NOT_READY",
+                    "message": TERMINAL_SCOPE_MESSAGE,
+                }
         if kind == "harbor_gateway" and not h["harbor_gateway_runtime_ready"]:
             return 503, {
                 "code": "RUNNER_CAPABILITY_UNAVAILABLE",
                 "message": "当前隔离 Runner 的 OpenEnv 采集依赖未就绪，暂不可运行 Harbor Gateway 作业",
                 "detail": {"kind": kind, "harbor_gateway_runtime_ready": False},
             }
-        if kind in ("harbor", "harbor_gateway") and spec.get("suite_id") == "terminal":
-            if not terminal_selection_ready(spec, h["terminal_image_readiness"]):
-                return 409, {
-                    "code": "TASK_IMAGE_NOT_READY",
-                    "message": "所选 Terminal-Bench 题目的运行镜像尚未就绪，请选择已就绪的题目",
-                }
         if kind == "vlmevalkit" and not h["vlmevalkit_ready"]:
             return 503, {
                 "code": "RUNNER_CAPABILITY_UNAVAILABLE",
@@ -710,13 +709,8 @@ class IsolatedRunnerManager:
         run_py = resolve_verified_managed_script(self.settings, "run.py")
         terminal_nginx_dependencies = None
         verifier_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
-        if (is_terminal_nginx_job(spec) and spec.get("resume_mode") != "native"
-                and (dependency_dir := os.environ.get(NGINX_DEPS_DIR))):
-            terminal_nginx_dependencies = {
-                "root": str(Path(dependency_dir).resolve(strict=True)),
-                "sha256": os.environ.get(NGINX_DEPS_SHA256, ""),
-                "verifier_proxy": bool(verifier_proxy),
-            }
+        if is_terminal_nginx_job(spec) and spec.get("resume_mode") != "native":
+            terminal_nginx_dependencies = nginx_dependency_snapshot()
         resolved_toml = materialize_managed_run_config(
             self.settings, spec, effective_work_dir,
             harbor_agent_ca_bundle=os.environ.get("SSL_CERT_FILE"),

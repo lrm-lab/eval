@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 from typing import Any
@@ -31,14 +32,41 @@ def is_terminal_nginx_job(spec: dict[str, Any]) -> bool:
     )
 
 
-def nginx_dependency_arguments(snapshot: dict[str, Any]) -> list[str]:
-    root = Path(snapshot["root"]).resolve(strict=True)
+def nginx_dependency_snapshot() -> dict[str, Any] | None:
+    dependency_dir = os.environ.get(NGINX_DEPS_DIR)
+    if not dependency_dir:
+        return None
+    return {
+        "root": str(Path(dependency_dir).resolve(strict=True)),
+        "sha256": os.environ.get(NGINX_DEPS_SHA256, ""),
+        "verifier_proxy": bool(os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")),
+    }
+
+
+def _verified_manifest(root: Path, expected_sha256: str) -> tuple[Path, bytes]:
     manifest = root / "SHA256SUMS"
     if manifest.is_symlink() or not manifest.is_file():
         raise ValueError("Terminal nginx dependencies require a regular SHA256SUMS")
     contents = manifest.read_bytes()
-    if hashlib.sha256(contents).hexdigest() != snapshot["sha256"]:
+    if hashlib.sha256(contents).hexdigest() != expected_sha256:
         raise ValueError("Terminal nginx dependency manifest has an unexpected SHA-256")
+    return manifest, contents
+
+
+def nginx_dependency_snapshot_ready() -> bool:
+    try:
+        snapshot = nginx_dependency_snapshot()
+        if snapshot is None:
+            return False
+        _verified_manifest(Path(snapshot["root"]), snapshot["sha256"])
+    except (OSError, ValueError):
+        return False
+    return True
+
+
+def nginx_dependency_arguments(snapshot: dict[str, Any]) -> list[str]:
+    root = Path(snapshot["root"]).resolve(strict=True)
+    manifest, contents = _verified_manifest(root, snapshot["sha256"])
 
     expected = {}
     for line in contents.decode("utf-8").splitlines():
