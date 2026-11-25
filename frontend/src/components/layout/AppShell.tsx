@@ -3,9 +3,9 @@ import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
   BarChart3,
-  BookOpen,
   BookText,
   Boxes,
+  CircleHelp,
   Compass,
   Cpu,
   Database,
@@ -22,7 +22,6 @@ import {
   Play,
   Search,
   Sliders,
-  Sparkles,
   Sun,
   TrendingUp,
   Trophy,
@@ -34,6 +33,7 @@ import { useAppStore } from '../../lib/store';
 import { FloatingCompareDock } from '../ui/FloatingCompareDock';
 import { ToastContainer } from '../ui/Skeletons';
 import { CommandPalette } from './CommandPalette';
+import { helpTopicForPath } from '../../pages/MethodologyPage';
 
 const NAV_ITEMS = [
   { to: '/', label: '平台首页', icon: Home, end: true },
@@ -53,8 +53,6 @@ const NAV_ITEMS = [
   { to: '/recommend', label: '约束选型推荐', icon: Compass },
   { to: '/toolkit/verify', label: '离线校验与算分', icon: FileCheck2 },
   { to: '/toolkit/params', label: '运行参数对照台账', icon: Sliders },
-  { to: '/toolkit/manuals', label: '框架与平台手册', icon: BookText },
-  { to: '/toolkit/methodology', label: '方法学与口径', icon: BookOpen },
 ];
 
 function ThemeToggleButton() {
@@ -80,8 +78,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const user = useAppStore((s) => s.user);
   const setUser = useAppStore((s) => s.setUser);
-  const reducedMotion = useAppStore((s) => s.reducedMotion);
-  const setReducedMotion = useAppStore((s) => s.setReducedMotion);
   const collapsed = useAppStore((s) => s.sidebarCollapsed);
   const setCollapsed = useAppStore((s) => s.setSidebarCollapsed);
   const setCmdOpen = useAppStore((s) => s.setCommandPaletteOpen);
@@ -160,6 +156,15 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </kbd>
           </button>
 
+          <Link
+            to={`/toolkit/methodology#${helpTopicForPath(location.pathname)}`}
+            aria-label="评测帮助"
+            title="评测帮助"
+            className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-1.5 text-[var(--text-secondary)] hover:text-[var(--brand-primary)]"
+          >
+            <CircleHelp className="h-4 w-4" aria-hidden="true" />
+          </Link>
+
           <ThemeToggleButton />
 
           {user && (
@@ -167,6 +172,8 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <button
                 type="button"
                 onClick={() => setUserMenuOpen((v) => !v)}
+                aria-expanded={userMenuOpen}
+                aria-label="用户菜单"
                 className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:border-[var(--border-strong)] cursor-pointer"
               >
                 <span className="inline-flex items-center justify-center w-5 h-5 rounded-full bg-[var(--brand-tint)] text-[var(--brand-primary)] text-[11px] font-bold uppercase">
@@ -180,7 +187,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
               {userMenuOpen && (
                 <div
-                  onMouseLeave={() => setUserMenuOpen(false)}
                   className="lrm-glass absolute right-0 top-11 z-40 w-60 rounded-xl p-2 text-xs"
                 >
                   <div className="px-2.5 py-2 border-b border-[var(--border-subtle)]">
@@ -190,24 +196,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                     </div>
                   </div>
                   <div className="py-1.5 space-y-1">
-                    <button
-                      type="button"
-                      onClick={() => setReducedMotion(!reducedMotion)}
-                      className="w-full flex items-center justify-between rounded-lg px-2.5 py-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] cursor-pointer"
+                    <Link
+                      to="/toolkit/manuals"
+                      onClick={() => setUserMenuOpen(false)}
+                      className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] no-underline"
                     >
-                      <span className="inline-flex items-center gap-1.5">
-                        <Sparkles className="w-3.5 h-3.5" /> 精简动效 (0ms)
-                      </span>
-                      <span
-                        className={`rounded-full px-1.5 py-0.5 text-[10px] font-semibold ${
-                          reducedMotion
-                            ? 'bg-[var(--brand-tint)] text-[var(--brand-primary)]'
-                            : 'bg-[var(--bg-elevated)] text-[var(--text-muted)]'
-                        }`}
-                      >
-                        {reducedMotion ? 'ON' : 'OFF'}
-                      </span>
-                    </button>
+                      <BookText className="w-3.5 h-3.5" /> 框架与平台手册
+                    </Link>
 
                     {user.role === 'admin' && (
                       <Link
@@ -215,7 +210,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                         onClick={() => setUserMenuOpen(false)}
                         className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] no-underline"
                       >
-                        <Activity className="w-3.5 h-3.5" /> 系统健康与运维
+                        <Activity className="w-3.5 h-3.5" /> 系统监控
                       </Link>
                     )}
 
@@ -264,22 +259,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 );
               })}
 
-              {user?.role === 'admin' && (
-                <NavLink
-                  to="/admin/health"
-                  title={collapsed ? '系统健康与运维' : undefined}
-                  className={({ isActive }) =>
-                    `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium no-underline transition-colors ${
-                      isActive
-                        ? 'bg-[var(--brand-tint)] text-[var(--brand-primary)] font-semibold'
-                        : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
-                    }`
-                  }
-                >
-                  <Activity className="w-4 h-4 shrink-0" />
-                  {!collapsed && <span className="truncate">系统健康与运维</span>}
-                </NavLink>
-              )}
             </nav>
           </aside>
         )}

@@ -28,7 +28,6 @@ interface AppStoreState {
   toggleTheme: () => void;
 
   reducedMotion: boolean;
-  setReducedMotion: (v: boolean) => void;
 
   sidebarCollapsed: boolean;
   setSidebarCollapsed: (v: boolean) => void;
@@ -79,10 +78,6 @@ export const useAppStore = create<AppStoreState>()(
       },
 
       reducedMotion: false,
-      setReducedMotion: (reducedMotion) => {
-        document.documentElement.setAttribute('data-reduced-motion', reducedMotion ? 'true' : 'false');
-        set({ reducedMotion });
-      },
 
       sidebarCollapsed: false,
       setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
@@ -153,9 +148,13 @@ export const useAppStore = create<AppStoreState>()(
     }),
     {
       name: 'lrm-eval-prefs-v1',
+      merge: (persisted, current) => ({
+        ...current,
+        ...(persisted as Partial<AppStoreState>),
+        reducedMotion: current.reducedMotion,
+      }),
       partialize: (s) => ({
         theme: s.theme,
-        reducedMotion: s.reducedMotion,
         sidebarCollapsed: s.sidebarCollapsed,
         density: s.density,
         columnPreset: s.columnPreset,
