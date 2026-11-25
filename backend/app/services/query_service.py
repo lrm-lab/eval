@@ -1326,40 +1326,41 @@ class QueryService:
         if not include_legacy:
             where.append("b.source_namespace IN ('harbor_runs', 'runner_published')")
 
-        # Auth-before-dedup trial aggregation per (model, harness, release, scoring_protocol, run_scope)
+        # Filter batches before ranking trials. Keep batch metadata out of the trial window sort.
         dedup_rows = self.db.fetchall(
             f"""
-            WITH auth_tps AS (
-                SELECT t.canonical_trial_key, t.scoring_protocol, t.batch_id, t.dataset_release_id,
-                       t.status, t.reward, t.reward_valid,
-                       b.model_canonical, b.model_route, b.harness, b.harness_version, b.runner,
+            WITH auth_batches AS MATERIALIZED (
+                SELECT b.batch_id, b.model_canonical, b.model_route, b.harness, b.harness_version, b.runner,
                        b.run_scope, b.source_namespace, b.raw_dataset_name, b.official_status,
-                       b.planned, b.recorded, b.scored, b.coverage, b.valid_mean, b.benchmark_slug,
-                       bm.track_slug, bm.track_display_name, bm.capability, bm.display_name AS bm_display_name,
-                       r.scale_type, r.default_protocol,
+                       b.benchmark_slug, bm.capability, bm.display_name AS bm_display_name,
+                       r.scale_type, r.default_protocol
+                FROM batches b
+                JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
+                JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                WHERE {' AND '.join(where)}
+            ), auth_tps AS (
+                SELECT t.scoring_protocol, t.batch_id, t.dataset_release_id, t.reward, t.reward_valid,
                        ROW_NUMBER() OVER (
                            PARTITION BY t.canonical_trial_key, t.scoring_protocol
                            ORDER BY t.source_priority_rank ASC, t.batch_id ASC
                        ) AS rn
                 FROM trial_protocol_scores t
-                JOIN batches b ON b.batch_id = t.batch_id
-                JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
-                JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
-                WHERE {' AND '.join(where)}
+                JOIN auth_batches b ON b.batch_id = t.batch_id
             )
-            SELECT model_canonical, model_route, harness, harness_version, runner,
-                   benchmark_slug, dataset_release_id, raw_dataset_name, bm_display_name,
-                   capability, scale_type, default_protocol, run_scope, scoring_protocol,
-                   source_namespace, official_status,
-                   MIN(batch_id) AS sample_batch_id,
+            SELECT b.model_canonical, b.model_route, b.harness, b.harness_version, b.runner,
+                   b.benchmark_slug, t.dataset_release_id, b.raw_dataset_name, b.bm_display_name,
+                   b.capability, b.scale_type, b.default_protocol, b.run_scope, t.scoring_protocol,
+                   b.source_namespace, b.official_status,
+                   MIN(t.batch_id) AS sample_batch_id,
                    COUNT(*) AS dedup_recorded,
-                   SUM(CASE WHEN reward_valid = 1 THEN 1 ELSE 0 END) AS dedup_scored,
-                   AVG(CASE WHEN reward_valid = 1 THEN reward END) AS dedup_valid_mean
-            FROM auth_tps
-            WHERE rn = 1
-            GROUP BY COALESCE(model_canonical, model_route, 'unknown'),
-                     COALESCE(harness, runner, 'unknown'),
-                     harness_version, dataset_release_id, scoring_protocol, run_scope
+                   SUM(CASE WHEN t.reward_valid = 1 THEN 1 ELSE 0 END) AS dedup_scored,
+                   AVG(CASE WHEN t.reward_valid = 1 THEN t.reward END) AS dedup_valid_mean
+            FROM auth_tps t
+            JOIN auth_batches b ON b.batch_id = t.batch_id
+            WHERE t.rn = 1
+            GROUP BY COALESCE(b.model_canonical, b.model_route, 'unknown'),
+                     COALESCE(b.harness, b.runner, 'unknown'),
+                     b.harness_version, t.dataset_release_id, t.scoring_protocol, b.run_scope
             """,
             params,
         )
