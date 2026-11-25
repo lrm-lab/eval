@@ -26,6 +26,7 @@ import { CompositeScoreCell } from '../components/ui/CompositeScoreCell';
 import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
+import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { SlideOverDrawer } from '../components/ui/SlideOverDrawer';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
@@ -1077,6 +1078,12 @@ export function ComparePage() {
           {subjects.length === 0 && <span className="text-[var(--text-muted)]">请从上方预设或下拉框添加至少 2 个对比对象。</span>}
         </div>
       </div>
+
+      <PublicBaselinePanel
+        candidates={subjects.map((subject) => ({ id: subject.id, label: subject.alias, batchId: subject.batch_id }))}
+        emptyMessage="添加一个站内批次即可与所选公榜基准比较。"
+        disabledReason={sampleSetId ? '当前对比限定为自定义样本集，公榜没有该样本集的分数。' : undefined}
+      />
 
       {/* Results Area */}
       {runCompareMut.isPending ? (

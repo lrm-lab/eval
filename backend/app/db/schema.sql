@@ -426,3 +426,13 @@ CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
     required_scope UNINDEXED,
     tokenize = 'unicode61'
 );
+
+-- Public aggregate leaderboard snapshots, kept outside the site batch and ranking tables.
+CREATE TABLE IF NOT EXISTS public_baseline_snapshots (
+    source_id     TEXT PRIMARY KEY,
+    synced_at     TEXT,
+    attempted_at  TEXT NOT NULL,
+    published_at  TEXT,
+    rows_json     TEXT NOT NULL DEFAULT '[]',
+    succeeded     INTEGER NOT NULL CHECK (succeeded IN (0, 1))
+);

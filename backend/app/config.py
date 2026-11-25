@@ -78,6 +78,7 @@ class Settings:
     # Indexing & Budget
     poll_interval_seconds: int = field(default_factory=lambda: int(os.environ.get("LRM_POLL_INTERVAL_SECONDS", "15")))
     enable_background_indexer: bool = field(default_factory=lambda: _env_bool("LRM_ENABLE_BG_INDEXER", True))
+    public_baseline_sync_seconds: int = field(default_factory=lambda: int(os.environ.get("LRM_PUBLIC_BASELINE_SYNC_SECONDS", "21600")))
     local_budget_mb: int = 750
     root_disk_min_free_gb: float = 1.5
     max_upload_bytes: int = 50 * 1024 * 1024
