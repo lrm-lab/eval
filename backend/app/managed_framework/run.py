@@ -490,7 +490,22 @@ def handoff_command(args, dataset, bundle, profile):
     return cmd
 
 
-def prepare_wildclaw(source, bundle, work, suite_id):
+def prepare_wildclaw(source, bundle, work, suite_id, tasks):
+    source = source.resolve()
+    selected = set(tasks)
+    for name in selected:
+        task_dir = source / name
+        task_file = task_dir / "task.toml"
+        if (not re.fullmatch(r"[A-Za-z0-9._-]+", name) or task_dir.resolve().parent != source
+                or task_dir.is_symlink()
+                or not task_file.is_file() or not task_file.resolve().is_relative_to(task_dir)):
+            raise ValueError(f"Task is missing from dataset: {name}")
+
+    def ignore_unselected(directory, entries):
+        if not selected or Path(directory) != source:
+            return []
+        return [entry for entry in entries if entry not in selected and (source / entry).is_dir()]
+
     working_root = work / "prepared" / suite_id
     destination = working_root / "datasets" / "wildclaw-run"
     working_root.mkdir(parents=True, exist_ok=True)
@@ -504,7 +519,8 @@ def prepare_wildclaw(source, bundle, work, suite_id):
                 script = staging / "install" / "prepare-wildclaw.py"
                 shutil.copyfile(bundle / "install" / script.name, script)
                 shutil.copytree(source,
-                                staging / "datasets" / "wildclaw-harbor", symlinks=True)
+                                staging / "datasets" / "wildclaw-harbor", symlinks=True,
+                                ignore=ignore_unselected)
                 subprocess.run([sys.executable, str(script)], check=True)
                 destination.parent.mkdir(exist_ok=True)
                 (staging / "datasets" / "wildclaw-run").rename(destination)
@@ -935,7 +951,7 @@ def main():
                          "and does not take native agent, verifier, or mount overrides")
         try:
             if suite.get("prepare") == "wildclaw-crlf" and not args.plan:
-                dataset = prepare_wildclaw(dataset, bundle, args.work, args.suite)
+                dataset = prepare_wildclaw(dataset, bundle, args.work, args.suite, args.task)
             return execute_gateway(args, dataset, output, metadata, bundle, suite)
         except (OSError, ValueError, RuntimeError) as error:
             parser.error(str(error))
@@ -1010,9 +1026,9 @@ def main():
         parser.error("Set PI_BENCH_RUNNER_BIN to the unpacked runner bin or install uvx")
     if subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL).returncode:
         parser.error("The execution account cannot reach Docker")
-    if suite.get("prepare") == "wildclaw-crlf":
-        dataset = prepare_wildclaw(dataset, bundle, args.work, args.suite)
     try:
+        if suite.get("prepare") == "wildclaw-crlf":
+            dataset = prepare_wildclaw(dataset, bundle, args.work, args.suite, args.task)
         cmd = command_for(args, dataset, bundle, suite)
     except (ImportError, OSError, ValueError) as error:
         parser.error(str(error))

@@ -15,6 +15,51 @@ from app.security.managed_exec import build_sanitized_subprocess_env, resolve_ve
 from tests.test_api_m3 import _start_external_runner_daemon
 
 
+def test_wildclaw_prepares_only_selected_tasks(tmp_path: Path):
+    bundle = tmp_path / "bundle"
+    source = bundle / "datasets" / "wildclaw-harbor"
+    for name in ("first", "second", "unselected"):
+        task = source / name
+        task.mkdir(parents=True)
+        (task / "task.toml").write_text("")
+        (task / "setup.sh").write_bytes(b"#!/bin/sh\r\n")
+
+    installer = bundle / "install" / "prepare-wildclaw.py"
+    installer.parent.mkdir()
+    installer.write_text("""
+from pathlib import Path
+import shutil
+
+datasets = Path(__file__).resolve().parents[1] / "datasets"
+target = datasets / "wildclaw-run"
+shutil.copytree(datasets / "wildclaw-harbor", target)
+for path in target.glob("*/setup.sh"):
+    path.write_bytes(path.read_bytes().replace(b"\\r\\n", b"\\n"))
+""")
+
+    managed_dir = Path(__file__).resolve().parents[1] / "app" / "managed_framework"
+    subprocess.run(
+        [sys.executable, "-c", """
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from run import prepare_wildclaw
+
+source, bundle, work = map(Path, sys.argv[2:])
+prepared = prepare_wildclaw(source, bundle, work, "wildclaw", ["first", "second"])
+assert {path.name for path in prepared.iterdir()} == {"first", "second"}
+assert (prepared / "first" / "setup.sh").read_bytes() == b"#!/bin/sh\\n"
+assert (source / "first" / "setup.sh").read_bytes() == b"#!/bin/sh\\r\\n"
+assert prepare_wildclaw(source, bundle, work, "wildclaw", ["first", "second"]) == prepared
+
+all_tasks = prepare_wildclaw(source, bundle, work / "all", "wildclaw", [])
+assert {path.name for path in all_tasks.iterdir()} == {"first", "second", "unselected"}
+""", str(managed_dir), str(source), str(bundle), str(tmp_path / "work")],
+        check=True,
+    )
+
+
 @pytest.mark.parametrize(("kind", "mode"), [
     ("harbor", None), ("harbor_gateway", None), ("vlmevalkit", "infer"),
     ("vlmevalkit", "all"), ("direct", None),
