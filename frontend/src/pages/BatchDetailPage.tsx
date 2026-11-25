@@ -135,7 +135,7 @@ export function BatchDetailPage() {
               onClick={() => addToCompare({ id: batch.batch_id, kind: 'batch', batch_id: batch.batch_id, alias: batch.batch_name })}
               className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--brand-primary)] hover:bg-[var(--brand-hover)] px-3 py-1.5 text-xs font-semibold text-white cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" /> 加入动态对比篮
+              <Plus className="w-3.5 h-3.5" /> 加入对比
             </button>
           </div>
         )}

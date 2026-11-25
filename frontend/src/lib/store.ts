@@ -100,11 +100,11 @@ export const useAppStore = create<AppStoreState>()(
       addToCompare: (item) => {
         const cur = get().compareBasket;
         if (cur.some((x) => x.id === item.id)) {
-          get().pushToast('info', `「${item.alias}」已在对比篮中`);
+          get().pushToast('info', `「${item.alias}」已在对比中`);
           return;
         }
         if (cur.length >= 8) {
-          get().pushToast('warning', '对比篮最多支持 8 个对比对象');
+          get().pushToast('warning', '对比最多支持 8 个对象');
           return;
         }
         const next = [...cur, item];
@@ -112,7 +112,7 @@ export const useAppStore = create<AppStoreState>()(
           compareBasket: next,
           baselineId: get().baselineId || item.id,
         });
-        get().pushToast('success', `已加入对比篮：${item.alias}`);
+        get().pushToast('success', `已加入对比：${item.alias}`);
       },
       removeFromCompare: (id) => {
         const next = get().compareBasket.filter((x) => x.id !== id);
