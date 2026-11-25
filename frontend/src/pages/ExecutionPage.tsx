@@ -29,7 +29,7 @@ import {
 } from 'lucide-react';
 import { ApiError, apiFetch } from '../lib/api';
 import { fmtDateShort, fmtDuration, fmtPct, runScopeLabel } from '../lib/format';
-import { useAppStore } from '../lib/store';
+import { useAppStore, type ToastMessage } from '../lib/store';
 import { AnimatedNumber, PageTransition } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
@@ -121,7 +121,6 @@ export interface GatewayPublicProfile {
   profile_id: string;
   display_name: string;
   kind?: string;
-  base_url: string;
   default_model?: string;
   api_key_env?: string;
   key_configured: boolean;
@@ -215,7 +214,6 @@ export interface ExecutionPlanSpec {
   effective_official_status: string;
   model_route: string;
   gateway_profile_id: string;
-  gateway_base_url: string;
   judge_profile_id: string | null;
   agent: string;
   harness_version: string;
@@ -775,9 +773,13 @@ function ExecutionFieldLabel({ label, field }: { label: string; field?: string }
 
 export function ExecutionPage() {
   const user = useAppStore((s) => s.user);
+  const userId = user?.user_id;
   const reducedMotion = useAppStore((s) => s.reducedMotion);
-  const pushToast = useAppStore((s) => s.pushToast);
-  const canWrite = Boolean(user && ['researcher', 'admin'].includes(user.role));
+  const pushToast = useCallback((tone: ToastMessage['tone'], text: string) => {
+    const session = useAppStore.getState();
+    if (session.user?.user_id === userId) session.pushToast(tone, text);
+  }, [userId]);
+  const canStart = Boolean(user);
 
   // ---------- Section 1: Test Configuration State ----------
   const [runnerChoice, setKind] = useState<RunnerKind | null>(null);
@@ -819,9 +821,10 @@ export function ExecutionPage() {
 
   // ---------- Queries ----------
   const capsQ = useQuery({
-    queryKey: ['execution-capabilities'],
+    queryKey: ['execution-capabilities', userId],
     queryFn: () => apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities'),
   });
+  const webhookProfiles = capsQ.data?.webhook_profiles ?? [];
   const configuredRunners = readyRunners(capsQ.data);
   const registeredSuites = capsQ.data?.suites ?? [];
   const selectedSuite = registeredSuites.find((suite) => suite.suite_id === suiteId);
@@ -831,17 +834,17 @@ export function ExecutionPage() {
   const kind = suiteRunner ?? runnerChoice ?? suggestedKind ?? 'harbor';
 
   const jobsQ = useQuery({
-    queryKey: ['execution-jobs'],
+    queryKey: ['execution-jobs', userId],
     queryFn: () => apiFetch<ExecutionJobListResp>('/api/v1/execution/jobs?limit=50'),
   });
 
   const notificationsQ = useQuery({
-    queryKey: ['execution-notifications'],
+    queryKey: ['execution-notifications', userId],
     queryFn: () => apiFetch<ExecutionNotificationsResp>('/api/v1/execution/notifications?limit=20'),
   });
 
   const jobDetailQ = useQuery({
-    queryKey: ['execution-job-detail', selectedJobId],
+    queryKey: ['execution-job-detail', userId, selectedJobId],
     enabled: Boolean(selectedJobId),
     queryFn: () => apiFetch<ExecutionJobDetail>(`/api/v1/execution/jobs/${encodeURIComponent(selectedJobId!)}`),
   });
@@ -952,7 +955,7 @@ export function ExecutionPage() {
       ...(batchName.trim() ? { batch_name: batchName.trim() } : {}),
       notify: {
         in_app: notifyInApp,
-        webhook_profile_id: webhookProfileId.trim() || null,
+        webhook_profile_id: user?.role === 'viewer' ? null : webhookProfileId.trim() || null,
         on_events: notifyEvents.length > 0 ? notifyEvents : ['finished', 'failed', 'paused_by_guard'],
       },
     };
@@ -972,6 +975,7 @@ export function ExecutionPage() {
     pauseAfter,
     selectionMode,
     suiteId,
+    user?.role,
     vlmevalkitMode,
     webhookProfileId,
   ]);
@@ -1430,6 +1434,8 @@ export function ExecutionPage() {
   const activeStatus: JobStatus | null =
     liveOverlay?.status ?? selectedJobDetail?.status ?? selectedJobFromList?.status ?? null;
   const activeKind: RunnerKind | null = selectedJobDetail?.kind ?? selectedJobFromList?.kind ?? null;
+  const activeOwnerId = selectedJobDetail?.owner_id ?? selectedJobFromList?.owner_id;
+  const canManageActive = Boolean(user && (user.role !== 'viewer' || activeOwnerId === user.user_id));
   const activeBatchName = selectedJobDetail?.batch_name ?? selectedJobFromList?.batch_name ?? '';
   const activeLastSeq = Math.max(
     liveOverlay?.lastSeqId ?? 0,
@@ -1466,17 +1472,17 @@ export function ExecutionPage() {
   const stdioTruncated = selectedJobDetail?.stdio_log_truncated;
 
   const canStopActive = Boolean(
-    canWrite && selectedJobId && activeStatus && (activeStatus === 'queued' || activeStatus === 'running')
+    canManageActive && selectedJobId && (activeStatus === 'queued' || activeStatus === 'running')
   );
   const isResumableStatus = Boolean(activeStatus && RESUMABLE_STATUSES.has(activeStatus));
   const isHarborStandard = activeKind === 'harbor';
-  const canNativeResume = Boolean(canWrite && selectedJobId && isHarborStandard && isResumableStatus);
-  const canDerivedResume = Boolean(canWrite && selectedJobId && isResumableStatus);
+  const canNativeResume = Boolean(canManageActive && selectedJobId && isHarborStandard && isResumableStatus);
+  const canDerivedResume = Boolean(canManageActive && selectedJobId && isResumableStatus);
 
-  const nativeResumeTooltip = !canWrite
-    ? '仅 Researcher/Admin 可触发续跑'
-    : !selectedJobId
-      ? '请先选择执行作业'
+  const nativeResumeTooltip = !selectedJobId
+    ? '请先选择执行作业'
+    : !canManageActive
+      ? '当前账号无权管理此作业'
       : !isHarborStandard
         ? `运行器 ${activeKind ?? 'unknown'} 原生不支持 --resume（调用将返回 409 RESUME_UNSUPPORTED），请使用「任务级派生续跑」`
         : !isResumableStatus
@@ -1516,16 +1522,16 @@ export function ExecutionPage() {
           className="rounded-xl border border-[var(--sem-running-border)] bg-[var(--sem-running-bg)] px-4 py-3 text-xs"
         >
           <div className="flex items-start justify-between gap-3">
-            <div className="flex items-start gap-2.5 min-w-0">
+            <div className="flex min-w-0 flex-1 items-start gap-2.5">
               <Bell className="w-4 h-4 text-[var(--sem-running-fg)] shrink-0 mt-0.5" />
-              <div className="space-y-1.5 min-w-0">
+              <div className="min-w-0 flex-1 space-y-1.5">
                 <div className="font-semibold text-[var(--text-primary)] flex items-center gap-2">
                   <span>最新站内作业通知</span>
                   <span className="rounded-full bg-[var(--bg-surface)] border border-[var(--border-subtle)] px-1.5 py-0.2 text-[10px] font-mono tabular-nums text-[var(--text-secondary)]">
                     {notifications.length} 条
                   </span>
                 </div>
-                <div className="flex flex-wrap gap-2">
+                <div className="flex min-w-0 flex-wrap gap-2">
                   {notifications.slice(0, 3).map((n) => (
                     <button
                       key={`${n.job_id}-${n.seq_id}`}
@@ -1534,11 +1540,13 @@ export function ExecutionPage() {
                         connectFromSeqRef.current = 0;
                         setSelectedJobId(n.job_id);
                       }}
-                      className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--brand-primary)] px-2.5 py-1 text-[11px] text-left cursor-pointer transition-colors"
+                      className="inline-flex min-w-0 max-w-full items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--brand-primary)] px-2.5 py-1 text-[11px] text-left cursor-pointer transition-colors"
                     >
-                      <span className={`inline-block w-1.5 h-1.5 rounded-full ${n.status === 'finished' ? 'bg-[var(--sem-pass-fg)]' : n.status === 'failed' ? 'bg-[var(--sem-err-fg)]' : 'bg-[var(--sem-zero-fg)]'}`} />
-                      <span className="font-medium text-[var(--text-primary)] truncate max-w-[320px]">{n.message}</span>
-                      <span className="font-mono text-[10px] text-[var(--text-muted)]">{fmtDateShort(n.created_at)}</span>
+                      <span className={`inline-block w-1.5 h-1.5 shrink-0 rounded-full ${n.status === 'finished' ? 'bg-[var(--sem-pass-fg)]' : n.status === 'failed' ? 'bg-[var(--sem-err-fg)]' : 'bg-[var(--sem-zero-fg)]'}`} />
+                      <span className="min-w-0 truncate font-medium text-[var(--text-primary)]">{n.message}</span>
+                      <time dateTime={n.created_at} className="shrink-0 whitespace-nowrap font-mono text-[10px] text-[var(--text-muted)]">
+                        {fmtDateShort(n.created_at)}
+                      </time>
                     </button>
                   ))}
                 </div>
@@ -1996,22 +2004,24 @@ export function ExecutionPage() {
                     <span>站内通知</span>
                   </label>
 
-                  <label className="inline-flex items-center gap-1.5">
-                    <span className="text-[var(--text-secondary)]">Webhook 通知</span>
-                    <select
-                      aria-label="选择 Webhook 通知通道"
-                      value={webhookProfileId}
-                      onChange={(e) => setWebhookProfileId(e.target.value)}
-                      className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
-                    >
-                      <option value="">不推送 Webhook</option>
-                      {(capsQ.data?.webhook_profiles || []).map((w) => (
-                        <option key={w.profile_id} value={w.profile_id}>
-                          {w.display_name}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                  {webhookProfiles.length > 0 && (
+                    <label className="inline-flex items-center gap-1.5">
+                      <span className="text-[var(--text-secondary)]">Webhook 通知</span>
+                      <select
+                        aria-label="选择 Webhook 通知通道"
+                        value={webhookProfileId}
+                        onChange={(e) => setWebhookProfileId(e.target.value)}
+                        className="rounded-md border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 text-[11px] text-[var(--text-primary)]"
+                      >
+                        <option value="">不推送 Webhook</option>
+                        {webhookProfiles.map((w) => (
+                          <option key={w.profile_id} value={w.profile_id}>
+                            {w.display_name}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  )}
 
                   <div className="flex w-full flex-wrap items-center gap-1.5">
                     <span className="text-[10px] text-[var(--text-muted)]">触发事件</span>
@@ -2147,15 +2157,15 @@ export function ExecutionPage() {
             </p>
             {environmentNotice && <p role="status" className="text-[11px] leading-4">运行环境状态已变化。请选择当前可运行的题库。</p>}
           </div>
-          {!canWrite && (
+          {!canStart && (
             <p className="flex items-start gap-1.5 text-[11px] text-[var(--text-secondary)]">
-              <Lock aria-hidden="true" className="mt-0.5 size-3 shrink-0" /> 预检与启动需要研究员或管理员权限。
+              <Lock aria-hidden="true" className="mt-0.5 size-3 shrink-0" /> 请登录后预检或启动评测。
             </p>
           )}
           <div className="grid gap-2">
             <button
               type="button"
-              disabled={!canWrite || submitMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
+              disabled={!canStart || submitMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
               onClick={() => submitMut.mutate()}
               aria-label="启动隔离执行作业"
               className="lrm-press inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white hover:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-45"
@@ -2165,7 +2175,7 @@ export function ExecutionPage() {
             </button>
             <button
               type="button"
-              disabled={!canWrite || planMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
+              disabled={!canStart || planMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
               onClick={() => {
                 const preview = cliPreviewRef.current;
                 if (preview) {
