@@ -183,7 +183,8 @@ async function main() {
   await page.mouse.click(shiftPoint.x, shiftPoint.y);
   await page.keyboard.up('Shift');
   await page.waitForSelector('text=已选 1 组', { timeout: 5000 });
-  const scatterSelectBtns = page.locator('button[aria-pressed="false"]');
+  const scatterSelectBtns = page.getByText('框选 / Shift+点选送对比：', { exact: true })
+    .locator('..').getByRole('button', { pressed: false });
   assert((await scatterSelectBtns.count()) >= 1, 'Expected >=1 remaining selectable scatter point on TB2.1');
   await scatterSelectBtns.nth(0).click();
   await page.waitForSelector('text=已选 2 组', { timeout: 5000 });

@@ -163,7 +163,7 @@ async function main() {
   await recordCls('/toolkit/verify');
   await page.getByRole('button', { name: '导入离线结果' }).click();
   await page.getByRole('radio', { name: '粘贴内容' }).check();
-  const reportName = 'E2E 离线验证报告';
+  const reportName = 'E2E 离线验证报告 ' + Date.now();
   await page.getByLabel('报告名称').fill(reportName);
   await page.getByLabel('原始文件名').fill('official-result.json');
   await page.getByLabel('JSON 或 JSONL 内容').fill(JSON.stringify({
