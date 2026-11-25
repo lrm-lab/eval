@@ -47,6 +47,10 @@ import { EfficiencyScatterChart } from '../components/charts/EfficiencyScatterCh
 
 type ViewMode = 'table' | 'trend' | 'bar' | 'scatter';
 
+const filterFieldClass = 'h-9 w-full min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-xs text-[var(--text-primary)] hover:border-[var(--border-strong)]';
+const toolbarButtonClass = 'inline-flex h-9 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border px-2.5 text-xs font-medium cursor-pointer motion-safe:transition-colors';
+const defaultButtonClass = 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)]';
+
 const columnHelper = createColumnHelper<LeaderboardItem>();
 
 function LeaderboardTrendBarChart({
@@ -268,7 +272,7 @@ export function LeaderboardPage() {
               </div>
               <button
                 type="button"
-                title={firstBatchId ? '加入对比篮' : '历史汇总对象加入对比篮'}
+                title={firstBatchId ? '加入对比' : '历史汇总对象加入对比'}
                 onClick={(e) => {
                   e.stopPropagation();
                   if (firstBatchId) {
@@ -467,6 +471,7 @@ export function LeaderboardPage() {
 
         <SlidingTabs
           layoutId="lb-view-switcher"
+          className="max-w-full max-sm:grid max-sm:w-full max-sm:grid-cols-2 max-sm:items-stretch max-sm:[&>button]:min-w-0 max-sm:[&>button]:justify-center"
           size="sm"
           value={viewMode}
           onChange={(v) => updateParam('view', v)}
@@ -483,6 +488,7 @@ export function LeaderboardPage() {
       <div className="overflow-x-auto pb-1">
         <SlidingTabs
           layoutId="lb-track-tabs"
+          className="whitespace-nowrap"
           size="sm"
           value={activeTrack}
           onChange={(t) => {
@@ -493,217 +499,198 @@ export function LeaderboardPage() {
         />
       </div>
 
-      {/* LLM Stats-inspired Real Harbor Filter Toolbar */}
-      <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3 flex flex-wrap items-center gap-2 text-xs">
-        <div className="relative flex-1 min-w-[180px] max-w-xs">
-          <Search className="w-3.5 h-3.5 text-[var(--text-muted)] absolute left-2.5 top-1/2 -translate-y-1/2" />
-          <input
-            type="text"
-            value={modelFamily}
-            onChange={(e) => updateParam('q', e.target.value || null)}
-            placeholder="搜索模型族 / 模型名..."
-            className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] pl-8 pr-2.5 py-1.5 text-xs text-[var(--text-primary)] outline-none focus:border-[var(--brand-primary)]"
-          />
-        </div>
-
-        <select
-          aria-label="筛选评估范围"
-          value={runScope}
-          onChange={(e) => updateParam('run_scope', e.target.value || null)}
-          className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] cursor-pointer"
-        >
-          <option value="">范围: 全部</option>
-          <option value="full_split">Formal Full</option>
-          <option value="subset">Subset</option>
-          <option value="smoke">Smoke</option>
-          <option value="reference">Reference</option>
-        </select>
-
-        <select
-          aria-label="筛选 Harness"
-          value={harness}
-          onChange={(e) => updateParam('harness', e.target.value || null)}
-          className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] cursor-pointer"
-        >
-          <option value="">Harness: 全部</option>
-          {(availableFilters?.harnesses || []).map((h) => (
-            <option key={h} value={h}>
-              {h}
-            </option>
-          ))}
-        </select>
-
-        <select
-          aria-label="筛选 Runner"
-          value={runner}
-          onChange={(e) => updateParam('runner', e.target.value || null)}
-          className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] cursor-pointer"
-        >
-          <option value="">Runner: 全部</option>
-          {(availableFilters?.runners || []).map((r) => (
-            <option key={r} value={r}>
-              {r}
-            </option>
-          ))}
-        </select>
-
-        <select
-          aria-label="筛选协议"
-          value={protocol}
-          onChange={(e) => updateParam('protocol', e.target.value || null)}
-          className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] max-w-[180px] cursor-pointer"
-        >
-          <option value="">协议: 全部</option>
-          {(availableFilters?.protocols || []).map((p) => (
-            <option key={p} value={p}>
-              {p}
-            </option>
-          ))}
-        </select>
-
-        <button
-          type="button"
-          onClick={() => updateParam('include_legacy', includeLegacy ? 'false' : null)}
-          className={`rounded-lg border px-2.5 py-1.5 font-medium cursor-pointer ${
-            includeLegacy
-              ? 'border-[var(--sem-legacy-border)] bg-[var(--sem-legacy-bg)] text-[var(--sem-legacy-fg)]'
-              : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-          }`}
-        >
-          含 2026-11-20 基线
-        </button>
-
-        <button
-          type="button"
-          onClick={() => updateParam('trained_only', trainedOnly ? null : 'true')}
-          className={`rounded-lg border px-2.5 py-1.5 font-medium cursor-pointer ${
-            trainedOnly
-              ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
-              : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-          }`}
-        >
-          仅 Trained CK
-        </button>
-
-        <button
-          type="button"
-          onClick={() => updateParam('has_atif', hasAtif ? null : 'true')}
-          className={`rounded-lg border px-2.5 py-1.5 font-medium cursor-pointer ${
-            hasAtif
-              ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
-              : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-          }`}
-        >
-          含 ATIF
-        </button>
-
-        <button
-          type="button"
-          onClick={() => updateParam('has_gateway', hasGateway ? null : 'true')}
-          className={`rounded-lg border px-2.5 py-1.5 font-medium cursor-pointer ${
-            hasGateway
-              ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
-              : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-          }`}
-        >
-          含网关抓包
-        </button>
-
-        <div className="ml-auto flex items-center gap-1.5">
-          {/* Column Presets Menu */}
-          <div className="relative">
-            <button
-              type="button"
-              onClick={() => setColsMenuOpen((v) => !v)}
-              className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-            >
-              <Columns3 className="w-3.5 h-3.5" />
-              <span>Columns</span>
-            </button>
-            {colsMenuOpen && (
-              <div
-                onMouseLeave={() => setColsMenuOpen(false)}
-                className="lrm-glass absolute right-0 top-9 z-40 w-56 rounded-xl p-2.5 text-xs space-y-2"
-              >
-                <div className="font-semibold text-[var(--text-primary)]">列视图预设</div>
-                {(
-                  [
-                    { id: 'overview', label: '核心总览 (默认 L0)' },
-                    { id: 'efficiency', label: '效率对比 (耗时 + Token)' },
-                    { id: 'diagnostics', label: '完整诊断 (全列展开)' },
-                    { id: 'custom', label: '自定义勾选' },
-                  ] as Array<{ id: ColumnPreset; label: string }>
-                ).map((p) => (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => setColumnPreset(p.id)}
-                    className={`w-full text-left rounded-md px-2 py-1.5 cursor-pointer ${
-                      columnPreset === p.id
-                        ? 'bg-[var(--brand-tint)] text-[var(--brand-primary)] font-semibold'
-                        : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]'
-                    }`}
-                  >
-                    {p.label}
-                  </button>
-                ))}
-                {columnPreset === 'custom' && (
-                  <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1">
-                    {[
-                      { id: 'comparative_macro_avg', label: '可比宏观均分' },
-                      { id: 'self_coverage_avg', label: '自覆盖参考均分' },
-                      { id: 'avg_duration_sec', label: '平均总耗时' },
-                      { id: 'tokens', label: 'Token 构成' },
-                    ].map((c) => {
-                      const checked = customColumns.includes(c.id);
-                      return (
-                        <label key={c.id} className="flex items-center gap-2 text-[11px] cursor-pointer">
-                          <input
-                            type="checkbox"
-                            checked={checked}
-                            onChange={() =>
-                              setCustomColumns(
-                                checked ? customColumns.filter((x) => x !== c.id) : [...customColumns, c.id]
-                              )
-                            }
-                          />
-                          <span>{c.label}</span>
-                        </label>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
+      <div role="search" aria-label="主榜筛选" className="@container rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
+        <div className="grid grid-cols-2 gap-2 @min-[31rem]:grid-cols-4 @min-[49rem]:grid-cols-[minmax(0,1fr)_repeat(4,minmax(0,9rem))]">
+          <div className="relative col-span-full @min-[49rem]:col-span-1">
+            <Search aria-hidden="true" className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-[var(--text-muted)]" />
+            <input
+              type="search"
+              aria-label="搜索模型族或模型名"
+              value={modelFamily}
+              onChange={(e) => updateParam('q', e.target.value || null)}
+              placeholder="搜索模型族 / 模型名..."
+              className={`${filterFieldClass} pl-9 pr-2.5`}
+            />
           </div>
 
-          <button
-            type="button"
-            onClick={() => setDensity(density === 'compact' ? 'comfortable' : 'compact')}
-            title="切换表格密度"
-            className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+          <select
+            aria-label="筛选评估范围"
+            value={runScope}
+            onChange={(e) => updateParam('run_scope', e.target.value || null)}
+            className={`${filterFieldClass} cursor-pointer truncate px-2.5`}
           >
-            <SlidersHorizontal className="w-3.5 h-3.5" />
-            <span>{density === 'compact' ? '紧凑' : '舒适'}</span>
-          </button>
+            <option value="">范围: 全部</option>
+            <option value="full_split">Formal Full</option>
+            <option value="subset">Subset</option>
+            <option value="smoke">Smoke</option>
+            <option value="reference">Reference</option>
+          </select>
 
-          <button
-            type="button"
-            onClick={copyShareLink}
-            className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
+          <select
+            aria-label="筛选 Harness"
+            value={harness}
+            onChange={(e) => updateParam('harness', e.target.value || null)}
+            className={`${filterFieldClass} cursor-pointer truncate px-2.5`}
           >
-            {copiedLink ? <Check className="w-3.5 h-3.5 text-[var(--sem-pass-fg)]" /> : <Copy className="w-3.5 h-3.5" />}
-            <span>Copy link</span>
-          </button>
+            <option value="">Harness: 全部</option>
+            {(availableFilters?.harnesses || []).map((h) => (
+              <option key={h} value={h}>
+                {h}
+              </option>
+            ))}
+          </select>
 
-          <button
-            type="button"
-            onClick={() => navigate('/eval/compare')}
-            className="inline-flex items-center gap-1 rounded-lg bg-[var(--brand-primary)] hover:bg-[var(--brand-hover)] px-2.5 py-1.5 font-semibold text-white cursor-pointer"
+          <select
+            aria-label="筛选 Runner"
+            value={runner}
+            onChange={(e) => updateParam('runner', e.target.value || null)}
+            className={`${filterFieldClass} cursor-pointer truncate px-2.5`}
           >
-            <GitCompareArrows className="w-3.5 h-3.5" />
-            <span>Compare ({compareBasket.length})</span>
-          </button>
+            <option value="">Runner: 全部</option>
+            {(availableFilters?.runners || []).map((r) => (
+              <option key={r} value={r}>
+                {r}
+              </option>
+            ))}
+          </select>
+
+          <select
+            aria-label="筛选协议"
+            value={protocol}
+            onChange={(e) => updateParam('protocol', e.target.value || null)}
+            className={`${filterFieldClass} cursor-pointer truncate px-2.5`}
+          >
+            <option value="">协议: 全部</option>
+            {(availableFilters?.protocols || []).map((p) => (
+              <option key={p} value={p}>
+                {p}
+              </option>
+            ))}
+          </select>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center justify-between gap-x-5 gap-y-2 border-t border-[var(--border-subtle)] pt-3">
+          <div role="group" aria-label="附加筛选" className="flex max-w-full flex-wrap items-center gap-2">
+            {[
+              { key: 'include_legacy', label: '含 2026-11-20 基线', active: includeLegacy, next: includeLegacy ? 'false' : null },
+              { key: 'trained_only', label: '仅 Trained CK', active: trainedOnly, next: trainedOnly ? null : 'true' },
+              { key: 'has_atif', label: '含 ATIF', active: hasAtif, next: hasAtif ? null : 'true' },
+              { key: 'has_gateway', label: '含网关抓包', active: hasGateway, next: hasGateway ? null : 'true' },
+            ].map(({ key, label, active, next }) => (
+              <button
+                key={key}
+                type="button"
+                aria-pressed={active}
+                onClick={() => updateParam(key, next)}
+                className={`${toolbarButtonClass} ${defaultButtonClass} aria-pressed:border-[var(--brand-primary)] aria-pressed:bg-[var(--brand-tint)] aria-pressed:text-[var(--text-primary)]`}
+              >
+                <span aria-hidden="true" className={`grid size-3.5 place-items-center rounded-sm border ${
+                  active ? 'border-[var(--brand-primary)] text-[var(--brand-primary)]' : 'border-[var(--border-strong)]'
+                }`}>
+                  {active && <Check className="size-3" />}
+                </span>
+                {label}
+              </button>
+            ))}
+          </div>
+
+          <div role="group" aria-label="主榜操作" className="relative flex max-w-full flex-wrap items-center gap-2 @min-[31rem]:ml-auto">
+            {/* Column Presets Menu */}
+            <div>
+              <button
+                type="button"
+                aria-expanded={colsMenuOpen}
+                onClick={() => setColsMenuOpen((v) => !v)}
+                className={`${toolbarButtonClass} ${defaultButtonClass}`}
+              >
+                <Columns3 className="w-3.5 h-3.5" />
+                <span>Columns</span>
+              </button>
+              {colsMenuOpen && (
+                <div
+                  onMouseLeave={() => setColsMenuOpen(false)}
+                  className="lrm-glass absolute start-0 top-full z-40 mt-1 w-56 max-w-full rounded-xl p-2.5 text-xs space-y-2"
+                >
+                  <div className="font-semibold text-[var(--text-primary)]">列视图预设</div>
+                  {(
+                    [
+                      { id: 'overview', label: '核心总览 (默认 L0)' },
+                      { id: 'efficiency', label: '效率对比 (耗时 + Token)' },
+                      { id: 'diagnostics', label: '完整诊断 (全列展开)' },
+                      { id: 'custom', label: '自定义勾选' },
+                    ] as Array<{ id: ColumnPreset; label: string }>
+                  ).map((p) => (
+                    <button
+                      key={p.id}
+                      type="button"
+                      onClick={() => setColumnPreset(p.id)}
+                      className={`w-full text-left rounded-md px-2 py-1.5 cursor-pointer ${
+                        columnPreset === p.id
+                          ? 'bg-[var(--brand-tint)] text-[var(--brand-primary)] font-semibold'
+                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  ))}
+                  {columnPreset === 'custom' && (
+                    <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1">
+                      {[
+                        { id: 'comparative_macro_avg', label: '可比宏观均分' },
+                        { id: 'self_coverage_avg', label: '自覆盖参考均分' },
+                        { id: 'avg_duration_sec', label: '平均总耗时' },
+                        { id: 'tokens', label: 'Token 构成' },
+                      ].map((c) => {
+                        const checked = customColumns.includes(c.id);
+                        return (
+                          <label key={c.id} className="flex items-center gap-2 text-[11px] cursor-pointer">
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={() =>
+                                setCustomColumns(
+                                  checked ? customColumns.filter((x) => x !== c.id) : [...customColumns, c.id]
+                                )
+                              }
+                            />
+                            <span>{c.label}</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setDensity(density === 'compact' ? 'comfortable' : 'compact')}
+              title="切换表格密度"
+              className={`${toolbarButtonClass} ${defaultButtonClass}`}
+            >
+              <SlidersHorizontal className="w-3.5 h-3.5" />
+              <span>{density === 'compact' ? '紧凑' : '舒适'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={copyShareLink}
+              className={`${toolbarButtonClass} ${defaultButtonClass}`}
+            >
+              {copiedLink ? <Check className="w-3.5 h-3.5 text-[var(--sem-pass-fg)]" /> : <Copy className="w-3.5 h-3.5" />}
+              <span>Copy link</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate('/eval/compare')}
+              className={`${toolbarButtonClass} border-transparent bg-[color-mix(in_srgb,var(--brand-primary)_80%,black)] text-white hover:bg-[color-mix(in_srgb,var(--brand-hover)_75%,black)]`}
+            >
+              <GitCompareArrows className="w-3.5 h-3.5" />
+              <span>Compare ({compareBasket.length})</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -885,7 +872,7 @@ export function LeaderboardPage() {
                 }
                 className="rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] px-3.5 py-2 font-medium text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] cursor-pointer"
               >
-                + 加入底部对比篮
+                + 加入对比
               </button>
               {compareBasket.find((x) => x.kind === 'batch' && x.batch_id && x.batch_id !== drawerBatchId) && (
                 <button
@@ -896,7 +883,7 @@ export function LeaderboardPage() {
                   }}
                   className="rounded-lg border border-[var(--brand-primary)] bg-[var(--brand-tint)] px-3.5 py-2 font-semibold text-[var(--brand-primary)] hover:bg-[var(--brand-primary)] hover:text-white transition-colors cursor-pointer"
                 >
-                  查看差异题 (vs 对比篮基线)
+                  查看差异题 (vs 对比基线)
                 </button>
               )}
             </div>

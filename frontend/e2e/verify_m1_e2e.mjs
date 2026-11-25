@@ -186,7 +186,7 @@ async function main() {
   assert((await scatterSelectBtns.count()) >= 1, 'Expected >=1 remaining selectable scatter point on TB2.1');
   await scatterSelectBtns.nth(0).click();
   await page.waitForSelector('text=已选 2 组', { timeout: 5000 });
-  await page.click('button:has-text("选中项入对比篮")');
+  await page.getByRole('button', { name: '选中项加入对比', exact: true }).click();
   await page.waitForSelector('[aria-label="悬浮对比停靠栏"]', { timeout: 5000 });
 
   // Recorded cost coverage guardrail (0 plottable full coverage points -> honest warning!)

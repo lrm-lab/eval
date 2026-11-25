@@ -4,6 +4,8 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import type * as echarts from 'echarts';
 import {
   Bookmark,
+  Check,
+  ChevronDown,
   Crown,
   Download,
   GitCompareArrows,
@@ -23,6 +25,7 @@ import { PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { CompositeScoreCell } from '../components/ui/CompositeScoreCell';
 import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { SlideOverDrawer } from '../components/ui/SlideOverDrawer';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
@@ -71,6 +74,18 @@ interface CompareOptionsResp {
     task_ids: string[];
   }>;
 }
+
+const COLLAPSED_PRESET_COUNT = 6;
+const PRESET_TRACK_LABELS: Record<string, string> = {
+  'qwen38-3track-ck133': '跨赛道',
+  'qwen38-text-ck133': 'LLM-Text',
+  'qwen38-vision-ck133': 'Vision',
+  'qwen35-4b-ck105': '模型检查点',
+  'deepswe-2way': 'Agentic',
+  'deepswe-3way': 'Agentic',
+  'gaia-2way': 'Agentic',
+  'tb21-6way': 'Agentic',
+};
 
 interface TaskDiffResp {
   comparison_id: string;
@@ -153,13 +168,141 @@ function parseDiffFilter(raw: string | null): DiffFilterKind {
   return 'divergent';
 }
 
+function CompareScoreCharts({
+  comparisonId,
+  rows,
+  subjects,
+}: {
+  comparisonId: string;
+  rows: CompareQueryResponse['rows'];
+  subjects: Array<{ id: string; alias: string }>;
+}) {
+  const theme = useAppStore((s) => s.theme);
+  const sectionRef = useRef<HTMLElement>(null);
+  const [stacked, setStacked] = useState(false);
+
+  useEffect(() => {
+    const section = sectionRef.current;
+    if (!section) return;
+    const observer = new ResizeObserver(([entry]) => setStacked(entry.contentRect.width < 760));
+    observer.observe(section);
+    return () => observer.disconnect();
+  }, []);
+
+  const hasRadar = rows.length >= 3;
+  const option = useMemo<echarts.EChartsOption>(() => {
+    const textColor = theme === 'dark' ? '#a1a1aa' : '#475569';
+    const gridColor = theme === 'dark' ? '#3f3f46' : '#e5e7eb';
+    const radarCenter = stacked ? '50%' : '16.67%';
+    const barTitleTop = stacked ? (hasRadar ? 284 : 88) : 6;
+    const titleStyle = { color: textColor, fontSize: 13, fontWeight: 600 };
+    const datasetNames = rows.map((row) => row.raw_dataset_name);
+    const scores = subjects.map(({ id, alias }) => ({
+      name: subjects.some((other) => other.id !== id && other.alias === alias) ? `${alias} (${id})` : alias,
+      color: stableColorForKey(id),
+      values: rows.map((row) => row.cells[id]?.common_valid?.score ?? null),
+    }));
+
+    return {
+      title: [
+        {
+          text: '多维雷达图',
+          subtext: hasRadar ? undefined : '至少需要 3 个共同可比基准',
+          textStyle: titleStyle,
+          subtextStyle: { color: textColor, fontSize: 11 },
+          left: radarCenter,
+          top: 6,
+          textAlign: 'center',
+        },
+        {
+          text: '分组柱状图',
+          textStyle: titleStyle,
+          left: stacked ? '50%' : '66.67%',
+          top: barTitleTop,
+          textAlign: 'center',
+        },
+      ],
+      tooltip: { ...glassTooltipConfig(theme), trigger: 'axis' },
+      legend: {
+        type: 'scroll',
+        data: scores.map(({ name }) => name),
+        left: 4,
+        right: 4,
+        bottom: 32,
+        textStyle: { color: textColor, fontSize: 11 },
+        pageTextStyle: { color: textColor },
+      },
+      radar: hasRadar ? {
+        center: [radarCenter, stacked ? 148 : 158],
+        radius: stacked ? 78 : 86,
+        indicator: datasetNames.map((name) => ({ name, max: 100 })),
+        axisName: { color: textColor, fontSize: 10, width: 68, overflow: 'truncate' },
+        axisNameGap: 6,
+        axisLine: { lineStyle: { color: gridColor } },
+        splitLine: { lineStyle: { color: gridColor } },
+        splitArea: { show: false },
+      } : undefined,
+      grid: { top: barTitleTop + 35, right: 12, bottom: 90, left: stacked ? 42 : '38%' },
+      xAxis: {
+        type: 'category',
+        data: datasetNames,
+        axisLabel: {
+          color: textColor,
+          fontSize: 10,
+          width: stacked ? 58 : 82,
+          overflow: 'truncate',
+          rotate: rows.length > 6 || stacked ? 30 : 0,
+          hideOverlap: true,
+        },
+      },
+      yAxis: {
+        type: 'value',
+        min: 0,
+        max: 100,
+        axisLabel: { color: textColor, fontSize: 11, formatter: '{value}%' },
+        splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
+      },
+      series: [
+        ...scores.map(({ name, color, values }): echarts.BarSeriesOption => ({
+          name,
+          type: 'bar',
+          itemStyle: { color, borderRadius: [4, 4, 0, 0] },
+          data: values,
+        })),
+        ...(hasRadar ? [{
+          type: 'radar' as const,
+          tooltip: { trigger: 'item' as const },
+          symbolSize: 4,
+          data: scores.map(({ name, color, values }) => ({
+            name,
+            value: values.map((value) => value ?? '-'),
+            lineStyle: { color, width: 2 },
+            itemStyle: { color },
+          })),
+        }] : []),
+      ],
+    };
+  }, [hasRadar, rows, stacked, subjects, theme]);
+
+  const height = stacked ? (hasRadar ? 600 : 390) : 340;
+  return (
+    <section
+      ref={sectionRef}
+      aria-labelledby="compare-scores-heading"
+      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4"
+    >
+      <h2 id="compare-scores-heading" className="mb-2 text-sm font-bold text-[var(--text-primary)]">共同可比基准得分可视化</h2>
+      <EChartBox option={option} height={height} exportName={`compare-${comparisonId}`} />
+    </section>
+  );
+}
+
 export function ComparePage() {
   const { shortId, a: routeA, b: routeB } = useParams<{ shortId?: string; a?: string; b?: string }>();
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
 
-  const theme = useAppStore((s) => s.theme);
   const user = useAppStore((s) => s.user);
   const compareBasket = useAppStore((s) => s.compareBasket);
   const basketBaselineId = useAppStore((s) => s.baselineId);
@@ -180,7 +323,7 @@ export function ComparePage() {
   });
   const [enableFaultsAsZero, setEnableFaultsAsZero] = useState<boolean>(true);
   const [sampleSetId, setSampleSetId] = useState<string>('');
-  const [chartType, setChartType] = useState<'bar' | 'radar'>('bar');
+  const [presetsExpanded, setPresetsExpanded] = useState(false);
   const [diffFilter, setDiffFilter] = useState<DiffFilterKind>(() => parseDiffFilter(searchParams.get('diff_filter')));
   const [diffSubjectA, setDiffSubjectA] = useState<string>(() => searchParams.get('diff_a') || '');
   const [diffSubjectB, setDiffSubjectB] = useState<string>(() => searchParams.get('diff_b') || '');
@@ -686,60 +829,26 @@ export function ComparePage() {
     }));
   }, [result, subjects]);
 
-  const compareChartOpt = useMemo<echarts.EChartsCoreOption>(() => {
-    if (!result || result.rows.length === 0) return {};
-    const textColor = theme === 'dark' ? '#a1a1aa' : '#475569';
-    const gridColor = theme === 'dark' ? '#27272a' : '#e5e7eb';
-    const rows = result.rows.filter((r) => r.comparable).slice(0, 14);
-    if (rows.length === 0) return {};
-
-    if (chartType === 'radar' && rows.length >= 3) {
-      return {
-        tooltip: glassTooltipConfig(theme),
-        legend: { bottom: 4, textStyle: { color: textColor, fontSize: 11 } },
-        radar: {
-          indicator: rows.map((r) => ({ name: r.raw_dataset_name, max: 100 })),
-          axisName: { color: textColor, fontSize: 11 },
-        },
-        series: [
-          {
-            type: 'radar',
-            data: subjectMetaList.map((sm) => ({
-              name: sm.alias,
-              value: rows.map((r) => r.cells[sm.id]?.common_valid?.score ?? 0),
-              lineStyle: { color: stableColorForKey(sm.id), width: 2 },
-              itemStyle: { color: stableColorForKey(sm.id) },
-            })),
-          },
-        ],
-      };
-    }
-
-    return {
-      tooltip: { ...glassTooltipConfig(theme), trigger: 'axis' },
-      legend: { type: 'scroll', bottom: 4, textStyle: { color: textColor, fontSize: 11 } },
-      grid: { top: 24, right: 20, bottom: 58, left: 48 },
-      xAxis: {
-        type: 'category',
-        data: rows.map((r) => r.raw_dataset_name),
-        axisLabel: { color: textColor, fontSize: 11, rotate: rows.length > 6 ? 22 : 0 },
-      },
-      yAxis: {
-        type: 'value',
-        min: 0,
-        max: 100,
-        axisLabel: { color: textColor, fontSize: 11, formatter: '{value}%' },
-        splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
-      },
-      series: subjectMetaList.map((sm) => ({
-        name: sm.alias,
-        type: 'bar',
-        universalTransition: true,
-        itemStyle: { color: stableColorForKey(sm.id), borderRadius: [4, 4, 0, 0] },
-        data: rows.map((r) => r.cells[sm.id]?.common_valid?.score ?? null),
-      })),
-    };
-  }, [result, subjectMetaList, chartType, theme]);
+  const chartRows = useMemo(() => result?.rows.filter((row) => row.comparable).slice(0, 14) ?? [], [result]);
+  const presets = optsQ.data?.presets ?? [];
+  const selectedPreset = presets.find(({ payload }) =>
+    !sampleSetId &&
+    baselineId === payload.baseline_subject_id &&
+    scoringProtocol === (payload.scoring_protocol || '') &&
+    subjects.length === payload.subjects.length &&
+    payload.subjects.every((presetSubject, index) => {
+      const subject = subjects[index];
+      return subject.id === presetSubject.id &&
+        subject.kind === presetSubject.kind &&
+        subject.batch_id === presetSubject.batch_id &&
+        (subject.model_cols?.join(',') ?? subject.model_col) ===
+          (presetSubject.model_cols?.join(',') ?? presetSubject.model_col);
+    })
+  );
+  const visiblePresets = presetsExpanded ? presets : presets.slice(0, COLLAPSED_PRESET_COUNT);
+  if (!presetsExpanded && selectedPreset && !visiblePresets.includes(selectedPreset)) {
+    visiblePresets[COLLAPSED_PRESET_COUNT - 1] = selectedPreset;
+  }
 
   return (
     <PageTransition className="max-w-[1520px] mx-auto px-5 py-6 space-y-5">
@@ -771,26 +880,59 @@ export function ComparePage() {
         )}
       </div>
 
-      {/* Real 197 Curated Presets Strip */}
-      {optsQ.data && optsQ.data.presets.length > 0 && (
-        <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5">
-          <div className="text-xs font-semibold text-[var(--text-secondary)] mb-2 flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-[var(--brand-primary)]" /> 197 实测一键预设对比组合
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {optsQ.data.presets.map((p) => (
+      {presets.length > 0 && (
+        <section
+          aria-labelledby="compare-presets-heading"
+          className="@container rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5"
+        >
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            <h2 id="compare-presets-heading" className="flex items-center gap-1.5 text-sm font-bold text-[var(--text-primary)]">
+              <Sparkles aria-hidden="true" className="size-4 shrink-0 text-[var(--brand-primary)]" /> 197 实测一键预设对比组合
+            </h2>
+            {presets.length > COLLAPSED_PRESET_COUNT && (
               <button
-                key={p.preset_id}
                 type="button"
-                onClick={() => applyPreset(p)}
-                className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-[var(--brand-primary)] px-3 py-1.5 text-left text-xs transition-colors cursor-pointer"
+                aria-expanded={presetsExpanded}
+                aria-controls="compare-preset-grid"
+                onClick={() => setPresetsExpanded(!presetsExpanded)}
+                className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[var(--brand-primary)] hover:bg-[var(--brand-tint)]"
               >
-                <div className="font-semibold text-[var(--text-primary)]">{p.title}</div>
-                <div className="text-[10px] text-[var(--text-muted)]">{p.common_note}</div>
+                {presetsExpanded ? '收起预设' : `展开全部 ${presets.length} 组`}
+                <ChevronDown aria-hidden="true" className={`size-3.5 ${presetsExpanded ? 'rotate-180' : ''}`} />
               </button>
-            ))}
+            )}
           </div>
-        </div>
+          <div id="compare-preset-grid" className="grid auto-rows-fr grid-cols-1 gap-2.5 @min-[310px]:grid-cols-2 @min-[780px]:grid-cols-3">
+            {visiblePresets.map((preset) => {
+              const selected = preset === selectedPreset;
+              return (
+                <button
+                  key={preset.preset_id}
+                  type="button"
+                  aria-pressed={selected}
+                  title={`${preset.title} · ${preset.common_note}`}
+                  onClick={() => applyPreset(preset)}
+                  className={`grid min-h-27 min-w-0 cursor-pointer grid-rows-[auto_1fr_auto] gap-1 rounded-lg border px-2.5 py-2 text-left transition-colors hover:border-[var(--brand-primary)] @min-[480px]:px-3 ${
+                    selected
+                      ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)]'
+                      : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)]'
+                  }`}
+                >
+                  <span className="flex items-center justify-between gap-1">
+                    <span className="rounded bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-secondary)]">
+                      {PRESET_TRACK_LABELS[preset.preset_id] ?? '其他'}
+                    </span>
+                    {selected && <Check aria-hidden="true" className="size-4 shrink-0 text-[var(--brand-primary)]" />}
+                  </span>
+                  <span className="line-clamp-3 text-xs leading-4 font-semibold text-[var(--text-primary)] @min-[480px]:line-clamp-2">
+                    {preset.title}
+                  </span>
+                  <span className="line-clamp-2 text-[11px] leading-4 text-[var(--text-secondary)]">{preset.common_note}</span>
+                </button>
+              );
+            })}
+          </div>
+        </section>
       )}
 
       {/* 4-Step Builder Panel */}
@@ -1031,24 +1173,8 @@ export function ComparePage() {
             })}
           </div>
 
-          {/* Visual Grouped Bar / Radar Chart */}
-          {Object.keys(compareChartOpt).length > 0 && (
-            <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4">
-              <div className="flex items-center justify-between mb-2">
-                <span className="text-xs font-bold text-[var(--text-primary)]">共同可比基准得分可视化</span>
-                <SlidingTabs
-                  layoutId="compare-chart-type"
-                  size="sm"
-                  value={chartType}
-                  onChange={(v) => setChartType(v as 'bar' | 'radar')}
-                  options={[
-                    { id: 'bar', label: '分组柱状图' },
-                    { id: 'radar', label: '多维雷达图' },
-                  ]}
-                />
-              </div>
-              <EChartBox option={compareChartOpt} height={340} exportName={`compare-${result.comparison_id}`} />
-            </div>
+          {chartRows.length > 0 && (
+            <CompareScoreCharts comparisonId={result.comparison_id} rows={chartRows} subjects={subjectMetaList} />
           )}
 
           {/* Multi-Denominator Pivot Matrix */}
@@ -1557,15 +1683,13 @@ export function ComparePage() {
                   },
                 ].map((side) => (
                   <div key={side.label} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-4 space-y-3">
-                    <div className="flex items-center justify-between gap-2 pb-2 border-b border-[var(--border-subtle)]">
+                    <div className="group/row-action flex items-center justify-between gap-2 pb-2 border-b border-[var(--border-subtle)]">
                       <span className="font-bold text-[var(--text-primary)] truncate">{side.label}</span>
                       {splitPair.kind === 'batch' && (
-                        <Link
+                        <RowActionIcon
+                          variant="microscope"
                           to={`/eval/batches/${encodeURIComponent(side.batch)}/trials/${encodeURIComponent(side.trial)}?returnTo=${encodeURIComponent(returnToUrl)}`}
-                          className="text-[var(--brand-primary)] no-underline hover:underline shrink-0"
-                        >
-                          打开显微镜
-                        </Link>
+                        />
                       )}
                     </div>
                     {side.q.isLoading ? (
