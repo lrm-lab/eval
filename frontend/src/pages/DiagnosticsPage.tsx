@@ -9,6 +9,7 @@ import {
   Flame,
   Gauge,
   Grid,
+  RefreshCw,
   ShieldAlert,
   Wrench,
 } from 'lucide-react';
@@ -144,10 +145,17 @@ interface ToolsResp {
   by_harness: Array<{ harness: string; total_calls: number; top_tools: Record<string, number> }>;
 }
 
+interface ClueEvidenceCoverage {
+  verified_trials: number;
+  pending_trials: number;
+  unavailable_trials: number;
+}
+
 interface CluesResp {
   banner: DiagBanner;
   facets: DiagFacets;
   honest_clue_policy: string;
+  evidence_coverage?: Record<'atif' | 'gateway', ClueEvidenceCoverage>;
   clues: Array<{
     code: string;
     title: string;
@@ -171,6 +179,7 @@ interface CluesResp {
 
 export function DiagnosticsPage() {
   const theme = useAppStore((s) => s.theme);
+  const user = useAppStore((s) => s.user);
   const [tab, setTab] = useState<DiagTab>('failures');
   const [runner, setRunner] = useState('');
   const [harness, setHarness] = useState('');
@@ -221,13 +230,13 @@ export function DiagnosticsPage() {
   });
 
   const cluesQ = useQuery({
-    queryKey: ['diag-clues', filterQs, minRepeat, minConsecErr],
+    queryKey: ['diag-clues', user?.user_id, user?.role, user?.projects, user?.scopes, filterQs, minRepeat, minConsecErr],
     enabled: tab === 'clues',
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       const qp = new URLSearchParams(filterQs);
       qp.set('min_repeat', String(minRepeat));
       qp.set('min_consec_errors', String(minConsecErr));
-      return apiFetch<CluesResp>(`/api/v1/diagnostics/clues?${qp.toString()}`);
+      return apiFetch<CluesResp>(`/api/v1/diagnostics/clues?${qp.toString()}`, { signal });
     },
   });
 
@@ -749,16 +758,16 @@ export function DiagnosticsPage() {
       {tab === 'clues' && (
         cluesQ.isLoading ? (
           <CardGridSkeleton count={4} />
-        ) : cluesQ.isError ? (
-          <StateNoticeCard kind="error" title="客观线索加载失败" description={(cluesQ.error as Error).message} />
+        ) : cluesQ.isError && !cluesQ.data ? (
+          <StateNoticeCard kind="error" title="客观线索加载失败" description={cluesQ.error.message} onRetry={() => cluesQ.refetch()} />
         ) : cluesQ.data ? (
           <div className="space-y-4">
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5 flex flex-wrap items-center justify-between gap-3 text-xs">
               <span className="text-[var(--text-secondary)] inline-flex items-center gap-1.5">
-                <ShieldAlert className="w-4 h-4 text-[var(--brand-primary)]" />
+                <ShieldAlert aria-hidden="true" className="w-4 h-4 shrink-0 text-[var(--brand-primary)]" />
                 {cluesQ.data.honest_clue_policy}
               </span>
-              <div className="flex items-center gap-3 text-[11px]">
+              <div className="flex flex-wrap items-center gap-3 text-[11px]">
                 <label className="inline-flex items-center gap-1">
                   连续同参数阈值:
                   <input
@@ -766,7 +775,7 @@ export function DiagnosticsPage() {
                     min={2}
                     max={20}
                     value={minRepeat}
-                    onChange={(e) => setMinRepeat(Math.max(2, Number(e.target.value) || 3))}
+                    onChange={(e) => setMinRepeat(Math.min(20, Math.max(2, Number(e.target.value) || 3)))}
                     className="w-14 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-1.5 py-0.5 font-mono"
                   />
                 </label>
@@ -777,12 +786,45 @@ export function DiagnosticsPage() {
                     min={2}
                     max={20}
                     value={minConsecErr}
-                    onChange={(e) => setMinConsecErr(Math.max(2, Number(e.target.value) || 4))}
+                    onChange={(e) => setMinConsecErr(Math.min(20, Math.max(2, Number(e.target.value) || 4)))}
                     className="w-14 rounded border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-1.5 py-0.5 font-mono"
                   />
                 </label>
+                <button
+                  type="button"
+                  onClick={() => cluesQ.refetch()}
+                  disabled={cluesQ.isFetching}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--border-subtle)] px-2.5 py-1.5 font-medium text-[var(--text-primary)] hover:border-[var(--brand-primary)] disabled:opacity-50 cursor-pointer"
+                >
+                  <RefreshCw aria-hidden="true" className={`size-3.5 ${cluesQ.isFetching ? 'motion-safe:animate-spin' : ''}`} />
+                  {cluesQ.isFetching ? '正在刷新…' : '刷新线索'}
+                </button>
               </div>
             </div>
+
+            {cluesQ.isError && <p role="alert" className="m-0 text-xs text-[var(--sem-err-fg)]">刷新失败，当前显示上次结果。</p>}
+
+            {cluesQ.data.evidence_coverage && (
+              <section aria-label="线索证据覆盖" aria-live="polite" className="grid gap-3 sm:grid-cols-2">
+                {Object.entries(cluesQ.data.evidence_coverage).map(([kind, counts]) => {
+                  return (
+                    <div key={kind} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-4 py-3 text-xs">
+                      <h2 className="m-0 font-semibold">{kind === 'atif' ? 'ATIF 轨迹' : '网关捕获'}</h2>
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 tabular-nums">
+                        <span>已核验 <strong>{counts.verified_trials}</strong></span>
+                        <span className={counts.pending_trials ? 'font-semibold text-[var(--sem-zero-fg)]' : 'text-[var(--text-secondary)]'}>
+                          待补录 {counts.pending_trials}
+                        </span>
+                        {counts.unavailable_trials > 0 && <span className="text-[var(--text-secondary)]">当前无法使用 {counts.unavailable_trials}</span>}
+                      </div>
+                      {counts.pending_trials > 0 && (
+                        <p className="m-0 mt-1.5 text-[var(--text-secondary)]">后台补录完成后可刷新。线索分母仅统计已核验的适用样本。</p>
+                      )}
+                    </div>
+                  );
+                })}
+              </section>
+            )}
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               {cluesQ.data.clues.map((card) => (
@@ -790,7 +832,8 @@ export function DiagnosticsPage() {
                   <div className="flex items-center justify-between gap-2">
                     <div className="font-bold text-[var(--text-primary)]">{card.title}</div>
                     <span className="rounded-full px-2 py-0.5 font-mono text-[11px] bg-[var(--brand-tint)] text-[var(--brand-primary)] tabular-nums">
-                      命中 {card.hit_count} / 适用 {card.applicable_denominator} ({card.hit_rate_pct.toFixed(1)}%)
+                      命中 {card.hit_count} / 已核验适用 {card.applicable_denominator}
+                      {card.applicable_denominator > 0 ? ` (${card.hit_rate_pct.toFixed(1)}%)` : '（暂无可计算占比）'}
                     </span>
                   </div>
                   <div className="text-[var(--text-secondary)] font-mono text-[11px]">{card.formula}</div>

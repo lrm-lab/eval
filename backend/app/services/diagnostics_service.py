@@ -3,11 +3,16 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import re
 import threading
-from collections import Counter, defaultdict
+from collections import Counter, OrderedDict, defaultdict
+from collections.abc import Iterable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
+
+import ijson
 
 from app.api.errors import AppError
 from app.config import Settings
@@ -167,15 +172,11 @@ def compute_atif_tool_and_clues(
     }
 
 
-def compute_gateway_clue(
-    gw_data: dict[str, Any],
+def _compute_gateway_turn_clue(
+    turns: Iterable[Any],
     *,
     msg_drop_pct: float = 30.0,
 ) -> dict[str, Any] | None:
-    """Compute objective `gateway_discarded_or_msg_drop` clue from model-gateway.json (02-5 §2.5)."""
-    turns = gw_data.get("turns")
-    if not isinstance(turns, list) or not turns:
-        return None
     discarded_turns = 0
     max_drop_pct = 0.0
     drop_indices: list[int] = []
@@ -185,7 +186,9 @@ def compute_gateway_clue(
             continue
         if t.get("discarded") is True:
             discarded_turns += 1
-        msgs = t.get("request_messages") or (t.get("request") or {}).get("messages")
+        msgs = t.get("request_messages")
+        if not msgs and isinstance(t.get("request"), dict):
+            msgs = t["request"].get("messages")
         if isinstance(msgs, list):
             cur_len = len(msgs)
             if prev_len and prev_len > 0 and cur_len < prev_len:
@@ -204,6 +207,68 @@ def compute_gateway_clue(
             "threshold_pct": msg_drop_pct,
         }
     return None
+
+
+def compute_gateway_clue(gw_data: dict[str, Any], *, msg_drop_pct: float = 30.0) -> dict[str, Any] | None:
+    """Compute the objective gateway clue from a capture (02-5 §2.5)."""
+    turns = gw_data.get("turns")
+    return _compute_gateway_turn_clue(turns, msg_drop_pct=msg_drop_pct) if isinstance(turns, list) else None
+
+
+def _evidence_file_identity(st: os.stat_result) -> tuple[int, int, int, int]:
+    return st.st_ino, st.st_mtime_ns, st.st_ctime_ns, st.st_size
+
+
+GATEWAY_CLUE_SUMMARY_VERSION = 1
+
+
+class _GatewayDigestReader:
+    def __init__(self, stream: BinaryIO) -> None:
+        self.stream = stream
+        self.digest = hashlib.sha256()
+        self.root_token = b""
+
+    def read(self, size: int) -> bytes:
+        chunk = self.stream.read(size)
+        self.digest.update(chunk)
+        if not self.root_token:
+            self.root_token = chunk.lstrip()[:1]
+        return chunk
+
+
+def read_gateway_clue_for_index(
+    path: Path, expected_identity: tuple[int, int, int] | None, expected_digest: str | None,
+) -> tuple[str, dict[str, Any] | None] | None:
+    """Derive a bounded summary while binding the capture in the background indexer."""
+    with path.open("rb") as fh:
+        identity = _evidence_file_identity(os.fstat(fh.fileno()))
+        if expected_identity is not None and (identity[0], identity[1], identity[3]) != expected_identity:
+            return None
+        reader = _GatewayDigestReader(fh)
+        valid_json = True
+        try:
+            clue = _compute_gateway_turn_clue(ijson.items(reader, "turns.item"))
+        except (ijson.JSONError, UnicodeError, ValueError):
+            valid_json = False
+            clue = None
+            while reader.read(64 * 1024):
+                pass
+        if _evidence_file_identity(os.fstat(fh.fileno())) != identity:
+            return None
+    if _evidence_file_identity(path.stat()) != identity:
+        return None
+    digest = reader.digest.hexdigest()
+    if expected_digest is not None and digest != expected_digest:
+        return None
+    if not valid_json or reader.root_token != b"{":
+        return digest, None
+    return digest, {
+        "source": "gateway_capture",
+        "version": GATEWAY_CLUE_SUMMARY_VERSION,
+        "sha256": digest,
+        "file_identity": list(identity),
+        "clue": clue,
+    }
 
 
 def _percentile(values: list[float], pct: float) -> float | None:
@@ -237,7 +302,8 @@ class DiagnosticsService:
         self.db = db
         self.approval_registry = approval_registry or SourceApprovalRegistry(settings.source_approval_file)
         self._tool_cache_lock = threading.Lock()
-        self._batch_tool_cache: dict[tuple[str, str], dict[str, Any]] = {}
+        self._evidence_cache: OrderedDict[tuple[Any, ...], dict[str, Any] | None] = OrderedDict()
+        self._evidence_workers = ThreadPoolExecutor(max_workers=12, thread_name_prefix="diagnostics-evidence")
 
     def _holdout_task_pairs(self) -> set[tuple[str, str]]:
         rows = self.db.fetchall(
@@ -913,184 +979,169 @@ class DiagnosticsService:
             return None
         return resolve_within_root(bdir, rel)
 
-    def _read_verified_evidence_json(
+    def _verified_evidence_summary(
         self,
         path: Path,
-        expected_sha256: str | None,
         *,
-        generation_id: str | None,
-    ) -> tuple[dict[str, Any] | None, tuple[str, int, int]]:
-        """Read evidence bytes and verify exact same-generation SHA-256 (I-01).
-        Raises 409 GENERATION_MISMATCH on cross-generation overwrite!"""
-        if not path.is_file():
-            if expected_sha256:
-                raise AppError(
-                    409,
-                    "GENERATION_MISMATCH",
-                    "检测到诊断引用的同代证据文件已缺失或被跨代替换，拒绝跨代拼接，请触发重扫",
-                    {"generation_id": generation_id},
-                )
-            return None, (str(path), 0, 0)
-        st = path.stat()
-        raw_bytes = path.read_bytes()
-        if expected_sha256:
-            actual_sha = hashlib.sha256(raw_bytes).hexdigest()
-            if actual_sha != expected_sha256:
-                raise AppError(
-                    409,
-                    "GENERATION_MISMATCH",
-                    "检测到诊断轨迹/网关文件跨代覆写（摘要与已索引 generation_id 不一致），拒绝跨代拼接，请刷新重试",
-                    {
-                        "generation_id": generation_id,
-                        "expected_sha256": expected_sha256[:16],
-                        "actual_sha256": actual_sha[:16],
-                    },
-                )
-        parsed = json.loads(raw_bytes.decode("utf-8", errors="replace"))
-        return (parsed if isinstance(parsed, dict) else None), (str(path), st.st_mtime_ns, st.st_size)
+        kind: str,
+        digest: str,
+        generation_id: str,
+        indexed_gateway: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        def mismatch() -> AppError:
+            return AppError(
+                409,
+                "GENERATION_MISMATCH",
+                "诊断证据已缺失或与当前索引发布代不一致，请重扫后刷新",
+                {"generation_id": generation_id},
+            )
 
-    def _scan_batch_trajectories(self, batch_row: dict[str, Any]) -> dict[str, Any]:
-        bname = str(batch_row["source_locator"]).split(":", 1)[1] if ":" in str(batch_row["source_locator"]) else ""
         try:
-            bdir = resolve_within_root(self.settings.harbor_runs_dir, bname) if bname else None
-        except AppError:
-            bdir = None
-        ev_approval = str(batch_row.get("evidence_approval") or "pending")
-        allow_atif = bdir is not None and self.approval_registry.is_evidence_class_approved(
-            bdir, "atif_trajectory", ev_approval
-        )
-        allow_gw = bdir is not None and self.approval_registry.is_evidence_class_approved(
-            bdir, "gateway_capture", ev_approval
-        )
-
-        gen_id = str(batch_row.get("generation_id") or "")
-        td_sha = str(batch_row.get("trial_digests_sha256") or "")
-        key = (
-            batch_row["batch_id"],
-            f"{gen_id}:{td_sha}:{batch_row['content_digest']}:{int(allow_atif)}:{int(allow_gw)}",
-        )
+            file_id = _evidence_file_identity(path.stat())
+            if (
+                indexed_gateway is not None
+                and indexed_gateway.get("version") == GATEWAY_CLUE_SUMMARY_VERSION
+                and indexed_gateway.get("sha256") == digest
+                and indexed_gateway.get("file_identity") == list(file_id)
+                and "clue" in indexed_gateway
+            ):
+                return {"clue": indexed_gateway["clue"]}
+            key = (kind, path, generation_id, digest, file_id)
+            with self._tool_cache_lock:
+                if key in self._evidence_cache:
+                    self._evidence_cache.move_to_end(key)
+                    return self._evidence_cache[key]
+            with path.open("rb") as fh:
+                if _evidence_file_identity(os.fstat(fh.fileno())) != file_id:
+                    raise mismatch()
+                raw = fh.read()
+                if _evidence_file_identity(os.fstat(fh.fileno())) != file_id:
+                    raise mismatch()
+        except FileNotFoundError as exc:
+            raise mismatch() from exc
+        if hashlib.sha256(raw).hexdigest() != digest:
+            raise mismatch()
+        try:
+            data = json.loads(raw)
+        except (ValueError, UnicodeError):
+            data = None
+        if not isinstance(data, dict):
+            summary = None
+        elif kind == "gateway":
+            summary = {"clue": compute_gateway_clue(data)}
+        elif isinstance(data.get("steps"), list):
+            # Store the underlying maxima so custom thresholds apply without rescanning.
+            summary = compute_atif_tool_and_clues(data, min_repeat=2, min_consec_errors=2)
+        else:
+            summary = None
         with self._tool_cache_lock:
-            cached = self._batch_tool_cache.get(key)
-        if cached is not None:
-            # Re-verify tracked file (mtime_ns, size) against disk before trusting cache;
-            # any on-disk modification invalidates cache and triggers full SHA-256 verification!
-            files_unchanged = True
-            for fp_str, cached_mtime, cached_size in cached.get("_file_stats") or ():
-                try:
-                    st = Path(fp_str).stat()
-                    if st.st_mtime_ns != cached_mtime or st.st_size != cached_size:
-                        files_unchanged = False
-                        break
-                except OSError:
-                    files_unchanged = False
-                    break
-            if files_unchanged:
-                return cached
+            self._evidence_cache[key] = summary
+            self._evidence_cache.move_to_end(key)
+            if len(self._evidence_cache) > 4096:
+                self._evidence_cache.popitem(last=False)
+        return summary
 
+    def _scan_batch_trajectories(
+        self,
+        batch_row: dict[str, Any],
+        *,
+        include_gateway: bool = True,
+        user: AuthUser | None = None,
+        holdout_pairs: set[tuple[str, str]] | None = None,
+    ) -> list[dict[str, Any]]:
+        batch_approval = str(batch_row.get("evidence_approval") or "pending")
+        bname = str(batch_row["source_locator"]).partition(":")[2]
+        bdir = None
+        if bname and batch_approval in ("approved_public", "approved_restricted"):
+            try:
+                bdir = resolve_within_root(self.settings.harbor_runs_dir, bname)
+            except AppError:
+                pass
+        source_approval = "pending"
+        classes: frozenset[str] = frozenset()
+        if bdir is not None:
+            _, _, source_approval, classes = self.approval_registry.lookup_full(bdir)
+        restricted = "approved_restricted" in (batch_approval, source_approval)
+        source_approved = source_approval in ("approved_public", "approved_restricted")
+        allow_atif = source_approved and "atif_trajectory" in classes and (
+            user is None or not restricted or has_scope(user, "trace:read")
+        )
+        allow_gw = include_gateway and source_approved and "gateway_capture" in classes and (
+            user is None or not restricted or has_scope(user, "gateway:read")
+        )
+        gen_id = str(batch_row.get("generation_id") or "")
         eps = self.db.fetchall(
             """
             SELECT trial_id, task_id, status, reward, tool_call_count, input_tokens, output_tokens,
-                   duration_sec, trajectory_status, gateway_status, generation_id, evidence_refs_json, observable_clues_json
-            FROM episodes WHERE batch_id = ?
+                   duration_sec, evidence_refs_json, observable_clues_json
+            FROM episodes WHERE batch_id = ? AND generation_id = ?
+            ORDER BY trial_id
             """,
-            (batch_row["batch_id"],),
+            (batch_row["batch_id"], gen_id),
         )
+        if holdout_pairs is not None:
+            rel = str(batch_row.get("dataset_release_id") or "")
+            eps = [ep for ep in eps if (rel, str(ep["task_id"])) not in holdout_pairs]
 
-        def _inspect_ep(ep: dict[str, Any]) -> tuple[dict[str, Any], list[tuple[str, int, int]]]:
-            ev = json.loads(ep["evidence_refs_json"] or "{}")
-            traj_ref = ev.get("trajectory") if isinstance(ev.get("trajectory"), dict) else None
-            gw_ref = ev.get("gateway") if isinstance(ev.get("gateway"), dict) else None
-            ep_gen = str(ep.get("generation_id") or gen_id)
-            tracked_stats: list[tuple[str, int, int]] = []
+        def summarize(
+            ref: Any, kind: str, indexed_gateway: dict[str, Any] | None = None,
+        ) -> tuple[str, dict[str, Any] | None]:
+            if not isinstance(ref, dict) or not ref.get("rel_path"):
+                return "absent", None
+            if ref.get("generation_id") not in (None, gen_id):
+                raise AppError(409, "GENERATION_MISMATCH", "诊断证据引用与当前索引发布代不一致，请重扫后刷新")
+            digest = ref.get("sha256")
+            if "pending_file_identity" in ref:
+                return ("pending" if ref["pending_file_identity"] else "unavailable"), None
+            if not isinstance(digest, str) or not re.fullmatch(r"[a-fA-F0-9]{64}", digest):
+                return "pending", None
+            try:
+                path = self._resolve_evidence_path(bdir, ref)
+                if path is None:
+                    return "unavailable", None
+                summary = self._verified_evidence_summary(
+                    path, kind=kind, digest=digest.lower(), generation_id=gen_id, indexed_gateway=indexed_gateway,
+                )
+                return ("verified" if summary is not None else "unavailable"), summary
+            except AppError as exc:
+                if exc.code == "GENERATION_MISMATCH":
+                    raise
+            except OSError:
+                pass
+            return "unavailable", None
 
-            atif_info = {
-                "has_tool_events": False,
-                "step_count": 0,
-                "tool_call_count": ep["tool_call_count"] or 0,
-                "max_prompt_tokens": None,
-                "tools": {},
-                "clues": [],
+        def inspect_ep(ep: dict[str, Any]) -> dict[str, Any]:
+            refs = json.loads(ep["evidence_refs_json"] or "{}") if allow_atif or allow_gw else {}
+            atif_state, atif = summarize(refs.get("trajectory"), "atif") if allow_atif else ("absent", None)
+            gw_state, gw = "absent", None
+            if allow_gw and refs.get("gateway"):
+                try:
+                    indexed_rows = json.loads(ep["observable_clues_json"] or "[]")
+                except ValueError:
+                    indexed_rows = []
+                indexed = next((
+                    row for row in indexed_rows
+                    if isinstance(row, dict) and row.get("source") == "gateway_capture"
+                ), None) if isinstance(indexed_rows, list) else None
+                gw_state, gw = summarize(refs["gateway"], "gateway", indexed)
+            clues = list(atif["clues"]) if atif else []
+            if gw and gw["clue"]:
+                clues.append(gw["clue"])
+            return {
+                **ep,
+                "atif_state": atif_state,
+                "gateway_state": gw_state,
+                "has_tool_events": atif["has_tool_events"] if atif else False,
+                "step_count": atif["step_count"] if atif else 0,
+                "tool_call_count": atif["tool_call_count"] if atif else ep["tool_call_count"] or 0,
+                "max_prompt_tokens": atif["max_prompt_tokens"] if atif else None,
+                "tools": atif["tools"] if atif else {},
+                "clues": clues,
             }
-            has_atif_file = False
-            if allow_atif and traj_ref is not None:
-                try:
-                    tp = self._resolve_evidence_path(bdir, traj_ref)
-                    if tp is not None:
-                        raw, fstat = self._read_verified_evidence_json(
-                            tp,
-                            traj_ref.get("sha256"),
-                            generation_id=traj_ref.get("generation_id") or ep_gen,
-                        )
-                        tracked_stats.append(fstat)
-                        if isinstance(raw, dict) and isinstance(raw.get("steps"), list):
-                            has_atif_file = True
-                            atif_info = compute_atif_tool_and_clues(raw)
-                except AppError as exc:
-                    if exc.code == "GENERATION_MISMATCH":
-                        raise
-                except (OSError, ValueError):
-                    pass
 
-            has_gw_file = False
-            gw_clue = None
-            if allow_gw and gw_ref is not None:
-                try:
-                    gp = self._resolve_evidence_path(bdir, gw_ref)
-                    if gp is not None:
-                        raw_gw, fstat = self._read_verified_evidence_json(
-                            gp,
-                            gw_ref.get("sha256"),
-                            generation_id=gw_ref.get("generation_id") or ep_gen,
-                        )
-                        tracked_stats.append(fstat)
-                        if isinstance(raw_gw, dict):
-                            has_gw_file = True
-                            gw_clue = compute_gateway_clue(raw_gw)
-                except AppError as exc:
-                    if exc.code == "GENERATION_MISMATCH":
-                        raise
-                except (OSError, ValueError):
-                    pass
-
-            clues = list(atif_info["clues"])
-            if gw_clue:
-                clues.append(gw_clue)
-            return (
-                {
-                    "trial_id": ep["trial_id"],
-                    "task_id": ep["task_id"],
-                    "status": ep["status"],
-                    "reward": ep["reward"],
-                    "input_tokens": ep["input_tokens"],
-                    "output_tokens": ep["output_tokens"],
-                    "duration_sec": ep["duration_sec"],
-                    "has_atif_file": has_atif_file,
-                    "has_tool_events": atif_info["has_tool_events"],
-                    "step_count": atif_info["step_count"],
-                    "tool_call_count": atif_info["tool_call_count"],
-                    "max_prompt_tokens": atif_info["max_prompt_tokens"],
-                    "tools": atif_info["tools"],
-                    "has_gw_file": has_gw_file,
-                    "clues": clues,
-                },
-                tracked_stats,
-            )
-
-        if eps and (allow_atif or allow_gw):
-            with ThreadPoolExecutor(max_workers=8) as pool:
-                paired = list(pool.map(_inspect_ep, eps))
-        else:
-            paired = [_inspect_ep(ep) for ep in eps]
-
-        ep_results = [p[0] for p in paired]
-        all_stats: list[tuple[str, int, int]] = []
-        for _, st_list in paired:
-            all_stats.extend(st_list)
-
-        summary = {"batch_id": batch_row["batch_id"], "trials": ep_results, "_file_stats": all_stats}
-        with self._tool_cache_lock:
-            self._batch_tool_cache[key] = summary
-        return summary
+        if allow_atif or allow_gw:
+            return list(self._evidence_workers.map(inspect_ep, eps))
+        return [inspect_ep(ep) for ep in eps]
 
     # 4. Tool Call Ecosystem Profile
     def get_tools_profile(
@@ -1146,11 +1197,11 @@ class DiagnosticsService:
                 excluded_harnesses[label] += rec
                 continue
 
-            scanned = self._scan_batch_trajectories(b)
+            trials = self._scan_batch_trajectories(b, include_gateway=False)
             h_name = str(b["harness"] or "unknown")
             h_label = f"{h_name}@{b['harness_version']}" if b["harness_version"] else h_name
             batch_has_tools = False
-            for tr in scanned["trials"]:
+            for tr in trials:
                 total_trials_in_scope += 1
                 if not tr["has_tool_events"]:
                     excluded_harnesses[h_label] += 1
@@ -1177,7 +1228,7 @@ class DiagnosticsService:
                         zero_step_counts.append(float(tr["step_count"]))
                         if tr["max_prompt_tokens"] is not None:
                             zero_max_prompt.append(float(tr["max_prompt_tokens"]))
-            if not batch_has_tools and not scanned["trials"]:
+            if not batch_has_tools and not trials:
                 excluded_harnesses[h_label] += int(b["recorded"] or 0)
 
         def _dist_stats(vals: list[float]) -> dict[str, Any]:
@@ -1271,8 +1322,33 @@ class DiagnosticsService:
             params,
         )
 
+        holdout_pairs = None if can_holdout else self._holdout_task_pairs()
+        if not can_holdout:
+            batches = [batch for batch in batches if not self._is_row_holdout(batch)]
+
+        def get_trials(batch: dict[str, Any]) -> list[dict[str, Any]]:
+            if batch["source_namespace"] == "harbor_runs":
+                return self._scan_batch_trajectories(batch, user=user, holdout_pairs=holdout_pairs)
+            rows = self.db.fetchall(
+                """
+                SELECT trial_id, task_id, status, reward, input_tokens, output_tokens
+                FROM episodes WHERE batch_id = ? AND generation_id = ? ORDER BY trial_id
+                """,
+                (batch["batch_id"], batch["generation_id"]),
+            )
+            rel = str(batch.get("dataset_release_id") or "")
+            return [
+                {**row, "atif_state": "absent", "gateway_state": "absent", "has_tool_events": False, "step_count": 0, "clues": []}
+                for row in rows
+                if holdout_pairs is None or (rel, str(row["task_id"])) not in holdout_pairs
+            ]
+
+        # Feed the shared file workers across batches so small batches don't serialize cold reads.
+        with ThreadPoolExecutor(max_workers=6) as pool:
+            trials_by_batch = list(pool.map(get_trials, batches))
+
+        coverage: dict[str, Counter[str]] = {"atif": Counter(), "gateway": Counter()}
         tool_denom = 0
-        gw_denom = 0
         step_or_tok_denom = 0
 
         cnt_repeat = cnt_consec_err = cnt_gw_drop = cnt_outlier = 0
@@ -1281,35 +1357,7 @@ class DiagnosticsService:
         hits_gw_drop: list[dict[str, Any]] = []
         hits_outlier: list[dict[str, Any]] = []
 
-        for b in batches:
-            is_hold = self._is_row_holdout(b)
-            if b["source_namespace"] == "harbor_runs":
-                scanned = self._scan_batch_trajectories(b)
-                trials = scanned["trials"]
-            else:
-                ep_rows = self.db.fetchall(
-                    "SELECT trial_id, task_id, status, reward, tool_call_count, input_tokens, output_tokens, duration_sec FROM episodes WHERE batch_id = ?",
-                    (b["batch_id"],),
-                )
-                trials = [
-                    {
-                        "trial_id": e["trial_id"],
-                        "task_id": e["task_id"],
-                        "status": e["status"],
-                        "reward": e["reward"],
-                        "input_tokens": e["input_tokens"],
-                        "output_tokens": e["output_tokens"],
-                        "duration_sec": e["duration_sec"],
-                        "has_atif_file": False,
-                        "has_tool_events": False,
-                        "step_count": 0,
-                        "tool_call_count": e["tool_call_count"] or 0,
-                        "has_gw_file": False,
-                        "clues": [],
-                    }
-                    for e in ep_rows
-                ]
-
+        for b, trials in zip(batches, trials_by_batch):
             batch_steps: list[float] = []
             batch_tokens: list[float] = []
             for tr in trials:
@@ -1336,8 +1384,8 @@ class DiagnosticsService:
                 }
                 if tr["has_tool_events"]:
                     tool_denom += 1
-                if tr["has_gw_file"]:
-                    gw_denom += 1
+                for kind, counts in coverage.items():
+                    counts[tr[f"{kind}_state"]] += 1
                 has_step_or_tok = tr["step_count"] > 0 or tr["input_tokens"] is not None or tr["output_tokens"] is not None
                 if has_step_or_tok:
                     step_or_tok_denom += 1
@@ -1345,16 +1393,13 @@ class DiagnosticsService:
                 for c in tr["clues"]:
                     if c["code"] == "repeated_identical_tool_call" and c.get("max_consecutive", 0) >= min_repeat:
                         cnt_repeat += 1
-                        if can_holdout or not is_hold:
-                            hits_repeat.append({**base_item, "evidence": c})
+                        hits_repeat.append({**base_item, "evidence": {**c, "threshold": min_repeat}})
                     elif c["code"] == "consecutive_tool_errors" and c.get("max_consecutive", 0) >= min_consec_errors:
                         cnt_consec_err += 1
-                        if can_holdout or not is_hold:
-                            hits_consec_err.append({**base_item, "evidence": c})
+                        hits_consec_err.append({**base_item, "evidence": {**c, "threshold": min_consec_errors}})
                     elif c["code"] == "gateway_discarded_or_msg_drop":
                         cnt_gw_drop += 1
-                        if can_holdout or not is_hold:
-                            hits_gw_drop.append({**base_item, "evidence": c})
+                        hits_gw_drop.append({**base_item, "evidence": c})
 
                 if tr["status"] == "scored" and finite(tr["reward"]) and float(tr["reward"]) == 0.0 and has_step_or_tok:
                     tot_tok = (
@@ -1366,21 +1411,21 @@ class DiagnosticsService:
                     tok_over = p_tok is not None and tot_tok is not None and tot_tok > p_tok and tot_tok > 0
                     if step_over or tok_over:
                         cnt_outlier += 1
-                        if can_holdout or not is_hold:
-                            hits_outlier.append(
-                                {
-                                    **base_item,
-                                    "evidence": {
-                                        "code": "step_or_token_outlier",
-                                        "step_count": tr["step_count"],
-                                        "batch_step_threshold": round(p_step, 1) if p_step is not None else None,
-                                        "total_tokens": int(tot_tok) if tot_tok is not None else None,
-                                        "batch_token_threshold": round(p_tok, 1) if p_tok is not None else None,
-                                        "percentile": outlier_pct,
-                                    },
-                                }
-                            )
+                        hits_outlier.append(
+                            {
+                                **base_item,
+                                "evidence": {
+                                    "code": "step_or_token_outlier",
+                                    "step_count": tr["step_count"],
+                                    "batch_step_threshold": round(p_step, 1) if p_step is not None else None,
+                                    "total_tokens": int(tot_tok) if tot_tok is not None else None,
+                                    "batch_token_threshold": round(p_tok, 1) if p_tok is not None else None,
+                                    "percentile": outlier_pct,
+                                },
+                            }
+                        )
 
+        gw_denom = coverage["gateway"]["verified"]
         cards = [
             {
                 "code": "repeated_identical_tool_call",
@@ -1433,5 +1478,13 @@ class DiagnosticsService:
             "banner": banner,
             "facets": self._filter_facets(user),
             "honest_clue_policy": "仅输出 4 项 100% 客观可统计轨迹线索与精确适用覆盖分母，绝不输出任何无分类器支撑的主观定性标签。",
+            "evidence_coverage": {
+                kind: {
+                    "verified_trials": counts["verified"],
+                    "pending_trials": counts["pending"],
+                    "unavailable_trials": counts["unavailable"],
+                }
+                for kind, counts in coverage.items()
+            },
             "clues": cards,
         }
