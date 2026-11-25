@@ -374,7 +374,7 @@ async function main() {
   await page.locator('#compare-task-diff tbody tr').first().click();
   await page.waitForSelector('[role="dialog"]:has-text("展开双栏 ATIF 轨迹 Diff")', { timeout: 8000 });
 
-  await page.locator('[role="dialog"] a:has-text("打开显微镜")').first().click();
+  await page.getByRole('dialog').getByRole('link', { name: '打开 Trial 显微镜' }).first().click();
   await page.waitForURL(/\/eval\/batches\/.*\/trials\//, { timeout: 10000 });
   await page.waitForSelector('text=总览 / 4阶段耗时 / 故障', { timeout: 10000 });
   await page.click('a:has-text("返回来源页")');

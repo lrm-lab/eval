@@ -216,18 +216,24 @@ export function DirectLabPage() {
         </p>
       </div>
 
-      {/* Explicit native_direct_v1 vs extended_adapter_pending Disclosure Banner */}
-      {capsQ.data && (
-        <div className="rounded-xl border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] p-3.5 text-xs flex items-start gap-2.5">
-          <Info className="w-4 h-4 text-[var(--sem-zero-fg)] shrink-0 mt-0.5" />
+      <div
+        aria-busy={capsQ.isPending}
+        className="flex min-h-[8.5rem] items-start gap-2.5 rounded-xl border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] p-3.5 text-xs sm:min-h-[5.5rem] lg:min-h-[4.5rem]"
+      >
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-[var(--sem-zero-fg)]" aria-hidden="true" />
+        {capsQ.data ? (
           <div>
             <div className="font-semibold text-[var(--text-primary)]">
               当前激活契约：<code>{capsQ.data.active_adapter_variant}</code> · 待适配扩展项：<code>{capsQ.data.extended_adapter_status.variant}</code>
             </div>
             <div className="mt-1 text-[var(--text-secondary)]">{capsQ.data.extended_adapter_status.disclosure}</div>
           </div>
-        </div>
-      )}
+        ) : (
+          <p className="m-0 text-[var(--text-secondary)]" role="status">
+            {capsQ.isError ? '适配器状态读取失败，可刷新页面重试。' : '正在读取 Direct 适配器状态…'}
+          </p>
+        )}
+      </div>
 
       {canWrite && (
         <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 space-y-3 text-xs">
