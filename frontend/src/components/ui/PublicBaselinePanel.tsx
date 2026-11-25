@@ -279,9 +279,9 @@ export function PublicBaselinePanel({
     <section aria-labelledby={headingId} className={`min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] ${compact ? 'px-3 py-2' : 'p-3.5'}`}>
       {compact && (
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_minmax(0,1fr)_auto]">
-          <h2 id={headingId} className="m-0 shrink-0 font-semibold text-[var(--text-secondary)]">公开榜单</h2>
+          <h2 id={headingId} className="col-start-1 row-start-1 m-0 font-semibold text-[var(--text-secondary)]">公开榜单</h2>
           {row && source ? (
-            <div className="col-span-2 row-start-2 flex min-w-0 items-center gap-x-2 gap-y-0.5 max-sm:flex-wrap sm:col-span-1 sm:row-start-1">
+            <div className="col-span-2 row-start-2 flex min-w-0 items-center gap-x-2 gap-y-0.5 max-sm:flex-wrap sm:col-span-1 sm:col-start-2 sm:row-start-1">
               <span className="font-semibold tabular-nums text-[var(--text-primary)]">
                 {fmtPct(row.score_pct)} {source.metric}
               </span>
@@ -295,7 +295,7 @@ export function PublicBaselinePanel({
               {source.status !== 'ready' && <span className="text-[var(--text-muted)]">{statusLabels[source.status]}</span>}
             </div>
           ) : (
-            <span className="col-span-2 row-start-2 min-w-0 text-[var(--text-muted)] sm:col-span-1 sm:row-start-1" role="status">
+            <span className="col-span-2 row-start-2 min-w-0 text-[var(--text-muted)] sm:col-span-1 sm:col-start-2 sm:row-start-1" role="status">
               {!selected ? '已停用' : catalog.isPending || automatic.isFetching ? '匹配中…' : catalog.isError ? '暂无法读取' : '可展开选择公开成绩'}
             </span>
           )}
