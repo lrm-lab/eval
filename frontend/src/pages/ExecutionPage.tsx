@@ -1604,6 +1604,7 @@ export function ExecutionPage() {
                         setSelectionMode('tasks');
                         setTasksInput('076c8171-9b3b-49b9-a477-244d2a532826');
                       } else {
+                        if (suiteId === 'gaia') setSelectionMode('all');
                         setTasksInput('');
                       }
                       setPlanResult(null);
@@ -1619,10 +1620,10 @@ export function ExecutionPage() {
                           <option key={s.suite_id} value={s.suite_id} disabled={!runnable}>
                             {s.display_name} ({s.suite_id}
                             {s.ready_task_count !== undefined
-                              ? ` · ${s.ready_task_count}/${s.task_count ?? 0} 题镜像就绪`
+                              ? ` · ${s.ready_task_count}/${s.task_count ?? 0} 题可执行`
                               : typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
                             {s.split ? ` · ${s.split}` : ''})
-                            {!runnable && ' · 暂不可运行'}
+                            {!runnable && ` · ${s.reason ?? '暂不可运行'}`}
                           </option>
                         );
                       })}
@@ -1714,7 +1715,7 @@ export function ExecutionPage() {
                   </p>
                   {taskImagesPending && (
                     <p className="text-[11px] text-[var(--text-secondary)]">
-                      {readyTaskCount}/{selectedSuite?.task_count ?? 0} 题镜像就绪，全部就绪后开放全量评测。
+                      {readyTaskCount}/{selectedSuite?.task_count ?? 0} 题可执行，全部就绪后开放全量评测。
                     </p>
                   )}
                 </div>

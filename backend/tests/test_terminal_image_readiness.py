@@ -33,6 +33,11 @@ def test_terminal_readiness_checks_original_tags(tmp_path, monkeypatch):
     assert terminal_images.terminal_selection_ready({"selection_mode": "tasks", "tasks": ["cached"]}, readiness)
     assert not terminal_images.terminal_selection_ready({"selection_mode": "all"}, readiness)
 
+    monkeypatch.setenv("LRM_TERMINAL_VERIFIED_TASKS", "")
+    assert terminal_images.terminal_image_readiness(settings) == {"task_count": 3, "ready_tasks": []}
+    monkeypatch.setenv("LRM_TERMINAL_VERIFIED_TASKS", "cached, missing")
+    assert terminal_images.terminal_image_readiness(settings) == readiness
+
     def unavailable(command, **kwargs):
         raise TimeoutExpired(command, kwargs["timeout"])
 

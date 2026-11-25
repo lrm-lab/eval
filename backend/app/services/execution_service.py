@@ -586,7 +586,7 @@ class ExecutionService:
                     "ready_task_count": len(tasks),
                     "ready_tasks": tasks,
                     "selectable": bool(tasks),
-                    "reason": None if tasks else "当前执行环境暂无镜像就绪的 Terminal-Bench 题目",
+                    "reason": None if tasks else "Terminal-Bench 的镜像或原生评分依赖尚未就绪",
                 }
             public_suites.append(
                 {

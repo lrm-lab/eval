@@ -47,10 +47,12 @@ def terminal_image_readiness(settings: Settings) -> TerminalImageReadiness | Non
         return None
 
     cached = {line.removeprefix("docker.io/") for line in result.stdout.splitlines()}
-    return {
-        "task_count": len(tasks),
-        "ready_tasks": [task for task, image in tasks.items() if image in cached],
-    }
+    ready = [task for task, image in tasks.items() if image in cached]
+    verified = os.environ.get("LRM_TERMINAL_VERIFIED_TASKS")
+    if verified is not None:
+        verified_tasks = {task.strip() for task in verified.split(",")}
+        ready = [task for task in ready if task in verified_tasks]
+    return {"task_count": len(tasks), "ready_tasks": ready}
 
 
 def terminal_selection_ready(spec: dict[str, Any], readiness: TerminalImageReadiness | None) -> bool:
