@@ -1,32 +1,16 @@
 import React, { useState } from 'react';
-import { Link, NavLink, useLocation, useNavigate } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
-  BarChart3,
   BookText,
   Boxes,
   CircleHelp,
-  Compass,
-  Cpu,
-  Database,
-  FileCheck2,
-  FileSpreadsheet,
-  FlaskConical,
-  GitCompareArrows,
-  Home,
-  Layers,
   LogOut,
   Moon,
   PanelLeftClose,
   PanelLeftOpen,
-  Play,
   Search,
-  Sliders,
   Sun,
-  TrendingUp,
-  Trophy,
-  Wrench,
-  Zap,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { useAppStore } from '../../lib/store';
@@ -34,26 +18,7 @@ import { FloatingCompareDock } from '../ui/FloatingCompareDock';
 import { ToastContainer } from '../ui/Skeletons';
 import { CommandPalette } from './CommandPalette';
 import { helpTopicForPath } from '../../pages/MethodologyPage';
-
-const NAV_ITEMS = [
-  { to: '/', label: '平台首页', icon: Home, end: true },
-  { to: '/leaderboard', label: '综合主榜 & 效率图', icon: Trophy },
-  { to: '/eval/compare', label: '动态自由对比', icon: GitCompareArrows },
-  { to: '/eval/diagnostics', label: '深度诊断与线索', icon: Activity },
-  { to: '/datasets', label: 'Datasets 能力树', icon: Database },
-  { to: '/eval/reports', label: '评测报告中心', icon: FileSpreadsheet },
-  { to: '/eval/execution', label: '受控评测执行', icon: Play },
-  { to: '/eval/direct-lab', label: 'Direct 原生验证台', icon: Zap },
-  { to: '/synth/datasets', label: '合成题库工坊', icon: FlaskConical },
-  { to: '/synth/selection', label: 'RL/SFT 四通道选题', icon: Layers },
-  { to: '/training/opd', label: '训练与 OPD 监控', icon: TrendingUp },
-  { to: '/models', label: '模型档案', icon: Cpu },
-  { to: '/harnesses', label: 'Harness 档案', icon: Wrench },
-  { to: '/benchmarks', label: 'Benchmark 档案', icon: BarChart3 },
-  { to: '/recommend', label: '约束选型推荐', icon: Compass },
-  { to: '/toolkit/verify', label: '离线校验与算分', icon: FileCheck2 },
-  { to: '/toolkit/params', label: '运行参数对照台账', icon: Sliders },
-];
+import { ApplicationNavigation, MobileNavigation } from './ApplicationNavigation';
 
 function ThemeToggleButton() {
   const theme = useAppStore((s) => s.theme);
@@ -99,14 +64,17 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <div className="min-h-screen flex flex-col bg-[var(--bg-canvas)] text-[var(--text-primary)]">
       {/* 56px Fixed Topbar */}
-      <header className="sticky top-0 z-30 h-14 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]/92 backdrop-blur-md px-4 flex items-center justify-between gap-4">
-        <div className="flex items-center gap-3 min-w-0">
+      <header className="sticky top-0 z-30 h-14 border-b border-[var(--border-subtle)] bg-[var(--bg-surface)]/92 backdrop-blur-md px-2.5 flex items-center justify-between gap-2 sm:gap-4 sm:px-4">
+        <div className="flex items-center gap-1.5 min-w-0 sm:gap-3">
+          <MobileNavigation pathname={location.pathname} />
           {!isHome && (
             <button
               type="button"
               onClick={() => setCollapsed(!collapsed)}
               aria-label={collapsed ? '展开侧边栏' : '折叠侧边栏'}
-              className="rounded-lg p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] cursor-pointer"
+              aria-controls="desktop-navigation"
+              aria-expanded={!collapsed}
+              className="hidden rounded-lg p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] cursor-pointer md:inline-flex"
             >
               {collapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
             </button>
@@ -143,15 +111,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           )}
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex shrink-0 items-center gap-1.5 sm:gap-2">
           <button
             type="button"
             onClick={() => setCmdOpen(true)}
+            aria-label="检索模型、批次和基准"
             className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] hover:border-[var(--border-strong)] hover:text-[var(--text-primary)] cursor-pointer"
           >
             <Search className="w-3.5 h-3.5" />
             <span className="hidden sm:inline">检索模型 / 批次 / 基准...</span>
-            <kbd className="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--text-muted)]">
+            <kbd className="hidden rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10px] font-mono text-[var(--text-muted)] sm:inline">
               ⌘K
             </kbd>
           </button>
@@ -232,34 +201,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <div className="flex-1 flex min-h-0">
         {!isHome && (
           <aside
-            className={`shrink-0 border-r border-[var(--border-subtle)] bg-[var(--bg-surface)] transition-[width] duration-200 hidden md:flex flex-col py-3 ${
-              collapsed ? 'w-16 px-2' : 'w-56 px-3'
+            id="desktop-navigation"
+            className={`sticky top-14 hidden h-[calc(100dvh-3.5rem)] shrink-0 self-start overflow-x-hidden overflow-y-auto overscroll-contain border-r border-[var(--border-subtle)] bg-[var(--bg-surface)] transition-[width] duration-200 motion-reduce:transition-none md:block ${
+              collapsed ? 'w-16' : 'w-[232px]'
             }`}
           >
-            <nav className="space-y-1 flex-1">
-              {NAV_ITEMS.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <NavLink
-                    key={item.to}
-                    to={item.to}
-                    end={item.end}
-                    title={collapsed ? item.label : undefined}
-                    className={({ isActive }) =>
-                      `flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-xs font-medium no-underline transition-colors ${
-                        isActive
-                          ? 'bg-[var(--brand-tint)] text-[var(--brand-primary)] font-semibold'
-                          : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]'
-                      }`
-                    }
-                  >
-                    <Icon className="w-4 h-4 shrink-0" />
-                    {!collapsed && <span className="truncate">{item.label}</span>}
-                  </NavLink>
-                );
-              })}
-
-            </nav>
+            <ApplicationNavigation collapsed={collapsed} />
           </aside>
         )}
 
