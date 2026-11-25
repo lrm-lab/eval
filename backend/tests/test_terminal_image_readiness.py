@@ -45,6 +45,7 @@ def test_runner_refuses_terminal_tasks_without_images(isolated_settings, monkeyp
     monkeypatch.setattr(manager, "health", lambda: {
         "ok": True,
         "docker_available": True,
+        "harbor_gateway_runtime_ready": True,
         "terminal_image_readiness": {"task_count": 2, "ready_tasks": ["cached"]},
     })
     for kind in ("harbor", "harbor_gateway"):
