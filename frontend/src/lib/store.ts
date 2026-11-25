@@ -67,7 +67,7 @@ export const useAppStore = create<AppStoreState>()(
       user: null,
       setUser: (user) => set({ user }),
 
-      theme: 'light',
+      theme: 'dark',
       setTheme: (theme) => {
         document.documentElement.setAttribute('data-theme', theme);
         set({ theme });

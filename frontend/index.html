@@ -1,8 +1,28 @@
 <!doctype html>
-<html lang="zh-CN" data-theme="light">
+<html lang="zh-CN" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <script>
+      try {
+        const prefs = JSON.parse(localStorage.getItem('lrm-eval-prefs-v1') || 'null');
+        if (prefs?.state?.theme === 'light') {
+          document.documentElement.dataset.theme = 'light';
+        }
+      } catch {
+        // Keep the default when local storage is unavailable or malformed.
+      }
+    </script>
+    <style>
+      html {
+        color-scheme: dark;
+        background-color: var(--bg-canvas, #09090b);
+      }
+      html[data-theme="light"] {
+        color-scheme: light;
+        background-color: var(--bg-canvas, #f6f8fa);
+      }
+    </style>
     <title>LRM Eval · 天禧大模型与 Agent 统一评测与分析平台</title>
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
