@@ -66,7 +66,8 @@ export const useAppStore = create<AppStoreState>()(
   persist(
     (set, get) => ({
       user: null,
-      setUser: (user) => set({ user }),
+      setUser: (user) =>
+        set((state) => state.user?.user_id === user?.user_id ? { user } : { user, toasts: [] }),
 
       theme: 'dark',
       setTheme: (theme) => {

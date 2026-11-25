@@ -7,7 +7,7 @@ from typing import Any, AsyncIterator
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from app.api.deps import enforce_csrf, get_current_user, require_researcher
+from app.api.deps import enforce_csrf, get_current_user
 from app.security.auth import AuthUser
 from app.services.execution_service import TERMINAL_STATUSES
 from app.services.telemetry_service import execution_telemetry_overview, job_telemetry, normalize_cgroup_telemetry
@@ -39,7 +39,7 @@ def execution_telemetry(
 def execution_plan(
     payload: dict[str, Any],
     request: Request,
-    user: AuthUser = Depends(require_researcher),
+    user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     return request.app.state.ctx.execution.plan_job(user, payload)
 
@@ -48,7 +48,7 @@ def execution_plan(
 def execution_submit_job(
     payload: dict[str, Any],
     request: Request,
-    user: AuthUser = Depends(require_researcher),
+    user: AuthUser = Depends(get_current_user),
 ) -> JSONResponse:
     res = request.app.state.ctx.execution.submit_job(user, payload)
     return JSONResponse(status_code=202, content=res)
@@ -88,7 +88,7 @@ def execution_get_job(
 def execution_cancel_job(
     job_id: str,
     request: Request,
-    user: AuthUser = Depends(require_researcher),
+    user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     return request.app.state.ctx.execution.cancel_job(user, job_id)
 
@@ -98,7 +98,7 @@ def execution_resume_job(
     job_id: str,
     request: Request,
     payload: dict[str, Any] | None = None,
-    user: AuthUser = Depends(require_researcher),
+    user: AuthUser = Depends(get_current_user),
 ) -> JSONResponse:
     res = request.app.state.ctx.execution.resume_job(user, job_id, payload or {})
     return JSONResponse(status_code=202, content=res)

@@ -33,7 +33,8 @@ from app.logging_setup import (
 )
 from app.main import create_app
 from app.runner.cli_contract import build_managed_run_py_command, materialize_managed_run_config
-from app.security.authz import ALL_SCOPES
+from app.security.auth import SESSION_COOKIE_NAME
+from app.security.authz import ALL_SCOPES, personal_project_id
 from app.security.managed_exec import resolve_verified_managed_script
 from scripts.backup_db import create_single_compressed_backup
 from tests.conftest import create_user, login_client
@@ -271,6 +272,145 @@ def _p95_ms(samples_ms: list[float]) -> float:
     ordered = sorted(samples_ms)
     idx = max(0, min(len(ordered) - 1, math.ceil(0.95 * len(ordered)) - 1))
     return ordered[idx]
+
+
+def test_viewer_can_run_and_manage_owned_evaluations(tmp_path: Path, isolated_settings: Settings) -> None:
+    gateway_key = "sk-test-isolated-gateway-key-0001"
+    gateway_waiting = threading.Event()
+    release_gateway = threading.Event()
+
+    def answer(_path: str, headers: Any, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        assert headers.get("Authorization") == f"Bearer {gateway_key}"
+        arithmetic = "2 + 2" in str(body["messages"][0]["content"])
+        if not arithmetic and not gateway_waiting.is_set():
+            gateway_waiting.set()
+            release_gateway.wait(timeout=15)
+        return 200, {
+            "choices": [{"message": {"content": "4" if arithmetic else "READY"}}],
+            "usage": {"prompt_tokens": 12, "completion_tokens": 4, "total_tokens": 16},
+        }
+
+    with _MockChatGatewayServer(answer) as gateway:
+        isolated_settings.tianxi_root = tmp_path / "tianxi"
+        isolated_settings.config_dir = tmp_path / "config"
+        _copy_harbor_toml(isolated_settings.tianxi_root)
+        _write_test_config(isolated_settings.config_dir, approval_entries=[], gateway_base_url=gateway.base_url)
+
+        with _start_external_runner_daemon(isolated_settings) as daemon:
+            app = create_app(isolated_settings, run_startup_scan=False)
+            ctx = app.state.ctx
+            owner = create_user(
+                ctx.db, username="viewer_owner", password="ViewerOwner!2026", role="viewer",
+                projects=["default", "team_eval"],
+            )
+            private_project = personal_project_id(owner)
+            create_user(
+                ctx.db, username="viewer_peer", password="ViewerPeer!2026", role="viewer",
+                projects=["default", "team_eval", private_project],
+            )
+            client = TestClient(app)
+            peer = TestClient(app)
+            headers = {"X-CSRF-Token": login_client(client, "viewer_owner", "ViewerOwner!2026")}
+            peer_headers = {"X-CSRF-Token": login_client(peer, "viewer_peer", "ViewerPeer!2026")}
+            prefix = "/api/v1/execution"
+            spec = {
+                "kind": "direct", "suite_id": "direct-smoke-v1", "selection_mode": "tasks",
+                "tasks": ["smoke-arith-001"], "batch_name": "member-personal-evaluation",
+            }
+            caps = client.get(f"{prefix}/capabilities")
+            assert caps.status_code == 200
+            assert caps.json()["runner_environment"]["runner_pid"] == daemon.pid
+            assert daemon.pid != os.getpid()
+            assert gateway_key not in caps.text and gateway.base_url not in caps.text
+
+            for endpoint in ("plan", "jobs"):
+                url = f"{prefix}/{endpoint}"
+                denied = client.post(url, json=spec)
+                assert denied.status_code == 403
+                assert denied.json()["error"]["code"] == "CSRF_INVALID"
+                forged_project = peer.post(url, headers=peer_headers, json={**spec, "project_id": private_project})
+                assert forged_project.status_code == 403
+                assert forged_project.json()["error"]["code"] == "PROJECT_FORBIDDEN"
+                holdout = client.post(
+                    url, headers=headers, json={**spec, "kind": "harbor", "suite_id": "tianxi-synth-v1-holdout"},
+                )
+                assert holdout.status_code == 403
+                assert holdout.json()["error"]["detail"]["missing_scope"] == "dataset:holdout_read"
+                unregistered = client.post(
+                    url, headers=headers, json={**spec, "kind": "harbor", "suite_id": "mmlu-pro-raw"},
+                )
+                assert unregistered.status_code == 422
+                inline_secret = client.post(url, headers=headers, json={**spec, "api_key": gateway_key})
+                assert inline_secret.status_code == 422
+                assert gateway_key not in inline_secret.text
+                shared_publish = client.post(url, headers=headers, json={**spec, "publish_to_harbor_runs": True})
+                assert shared_publish.status_code == 403
+                webhook = client.post(url, headers=headers, json={**spec, "notify": {"webhook_profile_id": "ops-alert"}})
+                assert webhook.status_code == 403
+
+            anonymous = TestClient(app, cookies=dict(client.cookies))
+            anonymous.cookies.delete(SESSION_COOKIE_NAME)
+            assert anonymous.post(f"{prefix}/plan", headers=headers, json=spec).status_code == 401
+
+            plan = client.post(f"{prefix}/plan", headers=headers, json=spec)
+            assert plan.status_code == 200, plan.text
+            assert plan.json()["plan"]["project_id"] == private_project
+            assert gateway_key not in plan.text and gateway.base_url not in plan.text
+            submitted = client.post(f"{prefix}/jobs", headers=headers, json=spec)
+            assert submitted.status_code == 202, submitted.text
+            assert gateway_key not in submitted.text and gateway.base_url not in submitted.text
+            job_id = submitted.json()["job_id"]
+            detail = _wait_job_terminal(client, job_id)
+            assert detail["status"] == "finished"
+            assert (detail["project_id"], detail["owner_id"]) == (private_project, owner)
+            assert detail["shared_snapshot"]["reconciled"]
+            assert detail["live_channel"]["trials"][0]["reward"] == 1.0
+            assert gateway_key not in json.dumps(detail)
+            assert (isolated_settings.runner_work_dir / job_id).stat().st_mode & 0o777 == 0o700
+            assert (isolated_settings.evidence_store_dir / job_id).stat().st_mode & 0o777 == 0o700
+            stream = client.get(f"{prefix}/jobs/{job_id}/stream?once=true", headers={"Last-Event-ID": "1"})
+            assert stream.status_code == 200 and _parse_sse_stream(stream.text)
+            assert gateway_key not in stream.text
+            assert peer.get(f"{prefix}/jobs/{job_id}").status_code == 403
+            assert peer.get(f"{prefix}/jobs/{job_id}/stream?once=true").status_code == 403
+            assert not peer.get(f"{prefix}/jobs").json()["items"]
+            trial_id = detail["live_channel"]["trials"][0]["trial_id"]
+            assert client.get(f"{prefix}/jobs/{job_id}/evidence/{trial_id}").status_code == 403
+
+            team_job = client.post(f"{prefix}/jobs", headers=headers, json={
+                **spec, "project_id": "team_eval", "batch_name": "member-team-evaluation",
+                "tasks": ["smoke-echo-002"],
+            })
+            assert team_job.status_code == 202, team_job.text
+            team_job_id = team_job.json()["job_id"]
+            team_url = f"{prefix}/jobs/{team_job_id}"
+            resume = {"resume_mode": "derived_task_subset"}
+            try:
+                assert gateway_waiting.wait(timeout=10)
+                assert peer.get(team_url).status_code == 200
+                assert peer.post(f"{team_url}/cancel", headers=peer_headers).status_code == 403
+                assert peer.post(f"{team_url}/resume", headers=peer_headers, json=resume).status_code == 403
+                with ctx.db.transaction() as conn:
+                    conn.execute("UPDATE users SET projects_json = '[]' WHERE user_id = ?", (owner,))
+                assert client.get(team_url).status_code == 403
+                assert client.post(f"{team_url}/cancel", headers=headers).status_code == 403
+                assert client.post(f"{team_url}/resume", headers=headers, json=resume).status_code == 403
+                with ctx.db.transaction() as conn:
+                    conn.execute("UPDATE users SET projects_json = ? WHERE user_id = ?", ('["team_eval"]', owner))
+                assert client.post(f"{team_url}/cancel").json()["error"]["code"] == "CSRF_INVALID"
+                cancel = client.post(f"{team_url}/cancel", headers=headers)
+                assert cancel.status_code == 200, cancel.text
+                assert _wait_job_terminal(client, team_job_id)["status"] == "interrupted"
+            finally:
+                release_gateway.set()
+
+            assert client.post(f"{team_url}/resume", json=resume).json()["error"]["code"] == "CSRF_INVALID"
+            resumed = client.post(f"{team_url}/resume", headers=headers, json=resume)
+            assert resumed.status_code == 202, resumed.text
+            resumed_detail = _wait_job_terminal(client, resumed.json()["job_id"])
+            assert resumed_detail["status"] == "finished"
+            assert (resumed_detail["project_id"], resumed_detail["owner_id"]) == ("team_eval", owner)
+            assert resumed_detail["parent_job_id"] == team_job_id
 
 
 def test_m3_i05_real_external_runner_direct_spoof_immunity_sse_replay_and_default_reconcile(

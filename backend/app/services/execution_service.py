@@ -42,7 +42,8 @@ from app.security.auth import AuthUser
 from app.security.authz import (
     authorize,
     has_scope,
-    require_project_access,
+    personal_project_id,
+    require_role,
     sql_project_filter,
 )
 from app.security.gateways import GatewayProfileRegistry
@@ -644,11 +645,14 @@ class ExecutionService:
             ],
             "suites": public_suites,
             "unintegrated_suites": list(RAW_VISIBLE_UNINTEGRATED_SUITES),
-            "gateway_profiles": self.gateway_profiles.list_public_profiles(),
+            "gateway_profiles": [
+                {key: value for key, value in profile.items() if key != "base_url"}
+                for profile in self.gateway_profiles.list_public_profiles()
+            ],
             "webhook_profiles": [
                 {"profile_id": "eval-channel", "display_name": "#eval 频道通知 (站内 + Webhook)"},
                 {"profile_id": "ops-alert", "display_name": "运维告警通道 (熔断/失败)"},
-            ],
+            ] if user.role != "viewer" else [],
             "runner_environment": runner_env,
         }
 
@@ -657,6 +661,13 @@ class ExecutionService:
     # ------------------------------------------------------------------
     def _validate_and_normalize_spec(self, user: AuthUser, payload: dict[str, Any]) -> dict[str, Any]:
         _reject_forbidden_secret_fields(payload)
+        default_project = personal_project_id(user.user_id) if user.role == "viewer" else "default"
+        project_id = str(payload.get("project_id") or "").strip() or default_project
+        validate_safe_id(project_id.replace(":", "_"), "project_id")
+        authorize(user, project_id=project_id)
+        if payload.get("publish_to_harbor_runs"):
+            require_role(user, "researcher")
+
         kind = str(payload.get("kind") or "").strip().lower()
         if kind not in ALLOWED_RUNNER_KINDS:
             raise AppError(
@@ -754,7 +765,7 @@ class ExecutionService:
             raise AppError(422, "SCHEMA_VALIDATION_FAILED", "model_route 格式非法", {"field": "model_route"})
 
         gateway_profile_id = str(payload.get("gateway_profile_id") or "qwen197-vllm").strip()
-        gw_pub = self.gateway_profiles.get_public_profile(gateway_profile_id)
+        self.gateway_profiles.get_public_profile(gateway_profile_id)
         judge_profile_id = payload.get("judge_profile_id")
         if judge_profile_id:
             judge_profile_id = str(judge_profile_id).strip()
@@ -796,10 +807,6 @@ class ExecutionService:
                 "batch_name 仅允许字母/数字/._-，长度 2–96 且禁止路径穿越",
                 {"field": "batch_name"},
             )
-
-        project_id = str(payload.get("project_id") or "default").strip()
-        validate_safe_id(project_id.replace(":", "_"), "project_id")
-        require_project_access(user, project_id)
 
         # VLMEvalKit VLMEVALKIT.md:44 hard constraint (S-04):
         suite_default_vlm_mode = str(suite.get("default_vlm_mode") or "all").strip().lower()
@@ -888,9 +895,12 @@ class ExecutionService:
         notify = payload.get("notify") or {}
         if not isinstance(notify, dict):
             notify = {}
+        webhook_profile_id = str(notify.get("webhook_profile_id") or "").strip() or None
+        if webhook_profile_id:
+            require_role(user, "researcher")
         notify_clean = {
             "in_app": bool(notify.get("in_app", True)),
-            "webhook_profile_id": str(notify.get("webhook_profile_id") or "").strip() or None,
+            "webhook_profile_id": webhook_profile_id,
             "on_events": [
                 str(e)
                 for e in (notify.get("on_events") or ["finished", "failed", "paused_by_guard"])
@@ -910,7 +920,6 @@ class ExecutionService:
             "effective_official_status": effective_official_status,
             "model_route": model_route,
             "gateway_profile_id": gateway_profile_id,
-            "gateway_base_url": gw_pub["base_url"],
             "judge_profile_id": judge_profile_id,
             "agent": agent,
             "harness_version": harness_version,
@@ -936,7 +945,6 @@ class ExecutionService:
         }
 
     def plan_job(self, user: AuthUser, payload: dict[str, Any]) -> dict[str, Any]:
-        authorize(user, project_id=str(payload.get("project_id") or "default"), min_role="researcher")
         spec = self._validate_and_normalize_spec(user, payload)
         public_spec = {k: v for k, v in spec.items() if not k.startswith("_")}
         # Limit public preview task array to 100 items while exposing exact planned_task_count
@@ -2034,13 +2042,19 @@ class ExecutionService:
         finally:
             self.db.close_thread_connection()
 
+    def _authorize_job_control(self, user: AuthUser, row: dict[str, Any]) -> None:
+        authorize(user, project_id=row["project_id"], owner_id=row["owner_id"])
+        self._require_holdout_if_needed(user, row)
+        if user.role == "viewer" and row["owner_id"] != user.user_id:
+            raise AppError(403, "SCOPE_FORBIDDEN", "普通成员仅可管理自己的评测作业")
+
     def cancel_job(self, user: AuthUser, job_id: str) -> dict[str, Any]:
         validate_safe_id(job_id, "job_id")
         self.write_guard()
         row = self.db.fetchone("SELECT * FROM exec_jobs WHERE job_id = ?", (job_id,))
         if row is None:
             raise AppError(404, "RESOURCE_NOT_FOUND", f"执行作业不存在: {job_id}")
-        authorize(user, project_id=row["project_id"], owner_id=row["owner_id"], min_role="researcher")
+        self._authorize_job_control(user, row)
 
         if row["status"] in TERMINAL_STATUSES:
             return {"job_id": job_id, "status": row["status"], "note": "作业已处于终态"}
@@ -2071,7 +2085,8 @@ class ExecutionService:
         row = self.db.fetchone("SELECT * FROM exec_jobs WHERE job_id = ?", (job_id,))
         if row is None:
             raise AppError(404, "RESOURCE_NOT_FOUND", f"执行作业不存在: {job_id}")
-        authorize(user, project_id=row["project_id"], owner_id=row["owner_id"], min_role="researcher")
+        self._authorize_job_control(user, row)
+        _reject_forbidden_secret_fields(body)
 
         kind = str(row["kind"])
         resume_mode = str(body.get("resume_mode") or "native").strip().lower()
