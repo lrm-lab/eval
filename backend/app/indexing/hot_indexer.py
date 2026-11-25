@@ -870,15 +870,8 @@ class HotIndexer:
         self,
         batch_name: str,
         default_batch_id: str,
-        source_locator: str,
     ) -> tuple[str, str, str] | None:
-        """Resolve authoritative `(project_id, owner_id, evidence_approval)` for a Runner-published
-        batch (`source_namespace='runner_published'`) strictly from trusted control-plane records (S-02):
-        1. SQLite `exec_jobs` row for this exact published batch;
-        2. Private `0700 <state_dir>/runner-submissions/<batch_name>.json` (`0600`, symlink-rejected)
-           for fresh-DB restart recovery;
-        3. Existing committed `batches` row for `source_locator`.
-        Returns None for unknown/untracked directories."""
+        """Recover Runner ownership from the control-plane submission or its private recovery record."""
         job_row = self.db.fetchone(
             """
             SELECT project_id, owner_id
@@ -892,39 +885,58 @@ class HotIndexer:
         if job_row is not None and job_row.get("project_id") and job_row.get("owner_id"):
             return (str(job_row["project_id"]), str(job_row["owner_id"]), "approved_restricted")
 
-        if self.settings.state_dir is not None:
-            try:
-                name = _submission_filename(batch_name)
-                with _submission_dir(self.settings.state_dir) as directory:
-                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-                    with os.fdopen(fd, "rb") as stream:
-                        _check_submission_file(os.fstat(fd))
-                        doc = json.load(stream)
-            except FileNotFoundError:
-                pass  # Older installations may only have the committed database record.
-            else:
-                if (
-                    not isinstance(doc, dict)
-                    or doc.get("batch_name") != batch_name
-                    or doc.get("batch_id") != default_batch_id
-                    or doc.get("source_namespace") != "runner_published"
-                    or doc.get("evidence_approval") not in ("approved_restricted", "pending", "revoked")
-                    or not all(isinstance(doc.get(k), str) and doc[k].strip() for k in ("project_id", "owner_id"))
-                ):
-                    raise ValueError("Invalid runner submission record")
-                return doc["project_id"], doc["owner_id"], doc["evidence_approval"]
+        if self.settings.state_dir is None:
+            return None
+        try:
+            name = _submission_filename(batch_name)
+            with _submission_dir(self.settings.state_dir) as directory:
+                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                with os.fdopen(fd, "rb") as stream:
+                    _check_submission_file(os.fstat(fd))
+                    doc = json.load(stream)
+        except (AppError, OSError, ValueError):
+            return None
+        if (
+            not isinstance(doc, dict)
+            or doc.get("batch_name") != batch_name
+            or doc.get("batch_id") != default_batch_id
+            or doc.get("source_namespace") != "runner_published"
+            or doc.get("evidence_approval") not in ("approved_restricted", "pending", "revoked")
+            or not all(isinstance(doc.get(k), str) and doc[k].strip() for k in ("project_id", "owner_id"))
+        ):
+            return None
+        return doc["project_id"], doc["owner_id"], doc["evidence_approval"]
 
-        existing = self.db.fetchone(
-            "SELECT project_id, owner_id, evidence_approval FROM batches WHERE source_locator = ? AND is_running_placeholder = 0",
-            (source_locator,),
-        )
-        if existing is not None and existing.get("project_id") and existing.get("owner_id"):
-            return (
-                str(existing["project_id"]),
-                str(existing["owner_id"]),
-                str(existing.get("evidence_approval") or "approved_restricted"),
+    def _reject_unowned_runner_batch(self, batch_dir: Path, source_locator: str) -> str:
+        """Remove stale derived rows while leaving the publish artifacts available for recovery."""
+        target_path = redact_path(str(batch_dir)) or batch_dir.name
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                DELETE FROM search_fts WHERE entity_type = 'batch' AND entity_id IN (
+                    SELECT batch_id FROM batches WHERE source_locator = ? AND source_namespace = 'runner_published'
+                )
+                """,
+                (source_locator,),
             )
-        return None
+            conn.execute(
+                "DELETE FROM batches WHERE source_locator = ? AND source_namespace = 'runner_published'",
+                (source_locator,),
+            )
+            warning = conn.execute(
+                "SELECT 1 FROM index_warnings WHERE tier = 'hot' AND code = 'RUNNER_OWNERSHIP_MISSING' AND target_path = ?",
+                (target_path,),
+            ).fetchone()
+            if warning is None:
+                self._record_warning(
+                    conn,
+                    tier="hot",
+                    severity="error",
+                    code="RUNNER_OWNERSHIP_MISSING",
+                    target_path=str(batch_dir),
+                    message="缺少可信 Runner 提交归属，批次已从查询索引隔离。恢复提交记录后可重新索引。",
+                )
+        return "rejected"
 
     def scan_single_harbor_batch(
         self,
@@ -1001,6 +1013,11 @@ class HotIndexer:
         source_locator = f"{ns}:{batch_name}"
         default_batch_id = make_batch_id(source_locator)
         now = utcnow_iso()
+        runner_ownership = None
+        if ns == "runner_published":
+            runner_ownership = self._resolve_runner_published_ownership(batch_name, default_batch_id)
+            if runner_ownership is None:
+                return self._reject_unowned_runner_batch(batch_dir, source_locator)
 
         if precomputed_digest is not None:
             digest = precomputed_digest
@@ -1037,14 +1054,8 @@ class HotIndexer:
                     )
                 return "error"
 
-        trusted = None
-        if ns == "runner_published":
-            trusted = self._resolve_runner_published_ownership(batch_name, default_batch_id, source_locator)
-            if trusted is None:
-                raise ValueError("Cannot establish ownership of runner publication")
-
         if not force:
-            if existing_digests is not None and trusted is None:
+            if existing_digests is not None and runner_ownership is None:
                 if existing_digests.get(source_locator) == digest:
                     return "skipped_unchanged"
             else:
@@ -1057,10 +1068,12 @@ class HotIndexer:
                     (source_locator,),
                 )
                 if (
-                    existing is not None and existing["content_digest"] == digest
-                    and (trusted is None or trusted == (
-                        existing["project_id"], existing["owner_id"], existing["evidence_approval"]
-                    ))
+                    existing is not None
+                    and existing["content_digest"] == digest
+                    and (
+                        runner_ownership is None
+                        or runner_ownership == (existing["project_id"], existing["owner_id"], existing["evidence_approval"])
+                    )
                 ):
                     tr_rows = self.db.fetchall(
                         """
@@ -1079,8 +1092,8 @@ class HotIndexer:
                     ):
                         return "skipped_unchanged"
 
-        if trusted is not None:
-            project_id, owner_id, reg_approval = trusted
+        if runner_ownership is not None:
+            project_id, owner_id, reg_approval = runner_ownership
         else:
             reg_proj, reg_owner, reg_approval, _ = self.approval_registry.lookup_full(batch_dir)
             project_id = project_override or reg_proj
@@ -1755,11 +1768,17 @@ class HotIndexer:
                         or (ep_kind.get("storage_tier") if ep_kind else None)
                         or "shared_cifs"
                     )
+                    gateway_identity = None
+                    defer_gateway_digest = False
                     if sha_val is None and not using_manifest and storage_tier != "evidence_store_0700" and kind in ("training", "gateway"):
+                        defer_gateway_digest = kind == "gateway" and not (force or deep_trial_enrich)
                         try:
                             art_fp = resolve_within_root(batch_dir, rel_val)
                             if art_fp.is_file() and not art_fp.is_symlink():
-                                sha_val, _ = _sha256_file(art_fp)
+                                if defer_gateway_digest:
+                                    gateway_identity = _stat_tuple(art_fp)
+                                else:
+                                    sha_val, _ = _sha256_file(art_fp)
                         except (AppError, OSError):
                             sha_val = None
                     ref_obj: dict[str, Any] = {
@@ -1768,6 +1787,8 @@ class HotIndexer:
                         "sha256": sha_val,
                         "storage_tier": storage_tier,
                     }
+                    if defer_gateway_digest:
+                        ref_obj["pending_file_identity"] = gateway_identity
                     ev_id = (td_kind.get("evidence_id") if td_kind else None) or (ep_kind.get("evidence_id") if ep_kind else None)
                     if ev_id:
                         ref_obj["evidence_id"] = ev_id
@@ -2588,7 +2609,7 @@ class HotIndexer:
         return indexed
 
     def enrich_harbor_trials(self, *, batch_ids: list[str] | None = None) -> dict[str, int]:
-        """Parallel trial-level enrichment (result.json, ATIF trajectory reasoning/cached/tools, media SHA-256)
+        """Parallel trial-level enrichment (result, trajectory, media, and deferred Gateway digests)
         for legacy harbor-runs batches (without publish-manifest.json).
         Manifest-v2 batches (trial_digests_sha256 IS NOT NULL) are already enriched from verified in-memory bytes
         during atomic ingest and are strictly skipped here to eliminate any second unverified disk read."""
@@ -2638,12 +2659,29 @@ class HotIndexer:
                             t_info = _extract_atif_metrics(tp, rel_traj)
                     except AppError:
                         t_info = None
+                gateway = ev.get("gateway")
+                if isinstance(gateway, dict) and gateway.get("pending_file_identity"):
+                    try:
+                        gateway_path = resolve_within_root(bdir, gateway["rel_path"])
+                        expected_identity = tuple(gateway["pending_file_identity"])
+                        if _stat_tuple(gateway_path) == expected_identity:
+                            gateway_digest, _ = _sha256_file(gateway_path)
+                            if _stat_tuple(gateway_path) == expected_identity:
+                                gateway["sha256"] = gateway_digest
+                                del gateway["pending_file_identity"]
+                    except (AppError, OSError):
+                        pass
                 return tid, {"ep": ep_row, "ev": ev, "res": r_info, "traj": t_info}
 
             with ThreadPoolExecutor(max_workers=12) as pool:
                 results = list(pool.map(_enrich_one, eps))
 
             with self.db.transaction() as conn:
+                if conn.execute(
+                    "SELECT 1 FROM batches WHERE batch_id = ? AND content_digest = ?",
+                    (b["batch_id"], b["content_digest"]),
+                ).fetchone() is None:
+                    continue
                 for tid, bundle in results:
                     ep_row = bundle["ep"]
                     ev = bundle["ev"]

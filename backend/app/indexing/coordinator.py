@@ -24,6 +24,7 @@ class IndexCoordinator:
         self._stop_event = threading.Event()
         self._hot_thread: threading.Thread | None = None
         self._cold_thread: threading.Thread | None = None
+        self._enrich_thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
         self.last_hot_sync_at: str | None = None
@@ -94,6 +95,10 @@ class IndexCoordinator:
             target=self._cold_worker, name="lrm-eval-cold-indexer", daemon=True
         )
         self._cold_thread.start()
+        self._enrich_thread = threading.Thread(
+            target=self._enrich_worker, name="lrm-eval-trial-enrichment", daemon=True
+        )
+        self._enrich_thread.start()
         self._hot_thread = threading.Thread(
             target=self._hot_poll_loop, name="lrm-eval-hot-poller", daemon=True
         )
@@ -104,18 +109,19 @@ class IndexCoordinator:
         if self._hot_thread and self._hot_thread.is_alive():
             self._hot_thread.join(timeout=2.0)
 
+    def _enrich_worker(self) -> None:
+        interval = max(2, int(self.settings.poll_interval_seconds))
+        while not self._stop_event.is_set():
+            try:
+                self.db.check_write_guard()
+                self.hot.enrich_harbor_trials()
+            except Exception:
+                pass
+            finally:
+                self.db.close_thread_connection()
+            self._stop_event.wait(interval)
+
     def _cold_worker(self) -> None:
-        try:
-            self.db.check_write_guard()
-            self.hot.enrich_harbor_trials()
-        except AppError as exc:
-            if exc.code == "LOCAL_DISK_LOW":
-                with self._lock:
-                    self.write_protected = True
-                    self.write_block_reason = exc.message
-                return
-        except Exception:
-            pass
         try:
             self.run_cold_now(force=False, include_large_zst=True)
         except AppError as exc:

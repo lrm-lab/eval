@@ -57,6 +57,7 @@ from app.runner.cli_contract import (
     build_managed_run_py_command,
     materialize_managed_run_config,
 )
+from app.runner.vlmevalkit_results import read_vlmevalkit_results
 from app.security.gateways import GatewayProfileRegistry
 from app.security.managed_exec import (
     build_sanitized_subprocess_env,
@@ -655,13 +656,14 @@ class IsolatedRunnerManager:
         # Watch ONLY 0700 `<effective_work_dir>/jobs/<batch>/*/result.json` files (NEVER parse stdout!)
         jobs_batch_dir = effective_work_dir / "jobs" / str(spec["batch_name"])
         reward_key = str(spec.get("reward_key") or "reward")
+        uses_vlm_scorer = is_vlm and spec.get("vlmevalkit_mode") == "all"
         seen_trials: set[str] = set()
         trial_outcomes: list[dict[str, Any]] = []
         completed = 0
         scored = 0
         errors = 0
 
-        def _harvest_results() -> None:
+        def _harvest_results(*, final: bool = False) -> None:
             nonlocal completed, scored, errors
             if not jobs_batch_dir.is_dir():
                 return
@@ -675,11 +677,14 @@ class IsolatedRunnerManager:
                     continue
                 if not isinstance(doc, dict) or not doc.get("finished_at"):
                     continue
-                seen_trials.add(tid)
                 vr = (doc.get("verifier_result") or {}).get("rewards") or {}
                 rw = vr.get(reward_key) if reward_key in vr else vr.get("reward")
                 exc_info = doc.get("exception_info")
                 exc_type = exc_info.get("exception_type") if isinstance(exc_info, dict) else None
+                # Mode=all writes inference receipts first, then the scorer adds per-trial rewards.
+                if uses_vlm_scorer and not final and not exc_type:
+                    continue
+                seen_trials.add(tid)
                 if is_vlm and spec.get("vlmevalkit_mode") == "infer":
                     st = "unscored" if not exc_type else "failed"
                     rw = None
@@ -761,7 +766,7 @@ class IsolatedRunnerManager:
                 time.sleep(0.05)
 
             rc = proc.wait(timeout=30)
-            _harvest_results()
+            _harvest_results(final=True)
         finally:
             drain_thread.join(timeout=10)
 
@@ -808,6 +813,9 @@ class IsolatedRunnerManager:
             )
             return
 
+        scoring_results = {}
+        if uses_vlm_scorer:
+            scoring_results = read_vlmevalkit_results(raw_output_root / spec["batch_name"])
         state.emit(
             "runner_completed",
             {
@@ -815,6 +823,7 @@ class IsolatedRunnerManager:
                 "exit_code": 0,
                 "trial_outcomes": trial_outcomes,
                 "completed_task_ids": done_tasks,
+                "vlmevalkit_scoring_results": scoring_results,
             },
             new_status="finalizing",
             exit_code=0,

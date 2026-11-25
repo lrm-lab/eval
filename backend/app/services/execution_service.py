@@ -36,6 +36,7 @@ from app.logging_setup import (
 )
 from app.runner.cli_contract import build_managed_run_py_command
 from app.runner.client import RunnerIPCClient
+from app.runner.vlmevalkit_results import OFFICIAL_RESULT_FILE, VLM_SCORING_FILES, encode_vlmevalkit_results
 from app.security.auth import AuthUser
 from app.security.authz import (
     authorize,
@@ -975,6 +976,7 @@ class ExecutionService:
         channel_path: Path,
         channel_secret: str,
         publish_to_harbor_runs: bool = False,
+        vlmevalkit_scoring_results: Any = None,
     ) -> dict[str, Any]:
         """Common Finalizer:
         1. Binds `generation_id` into every real `0700`/`0600` `evidence.json` produced by the isolated Runner
@@ -987,6 +989,9 @@ class ExecutionService:
         3. Validates the published public DTO using managed `report.py` AND triggers `HotIndexer.scan_single_harbor_batch`.
         4. STRICTLY VERIFIES `scan_status in ('indexed', 'skipped_unchanged')` AND SQLite `batches` holds the exact
            `(batch_id, generation_id)` BEFORE emitting `reconciled` (eliminates 404 reconciled links completely!)."""
+        scoring_files = {}
+        if spec["kind"] == "vlmevalkit" and spec.get("vlmevalkit_mode") == "all":
+            scoring_files = encode_vlmevalkit_results(vlmevalkit_scoring_results)
         batch_name = spec["batch_name"]
         gen_id = f"gen_{uuid.uuid4().hex[:12]}"
         if publish_to_harbor_runs and self.settings.harbor_runs_dir.is_dir():
@@ -1257,6 +1262,7 @@ class ExecutionService:
             "batch-report.json": (json.dumps(batch_report_obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             "run-config.json": (json.dumps(run_config_obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             "trial-digests.jsonl": "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in digest_rows).encode("utf-8"),
+            **scoring_files,
         }
 
         def _atomic_pub_write(dest: Path, data: bytes) -> None:
@@ -1274,7 +1280,9 @@ class ExecutionService:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
             top_level_meta: dict[str, Any] = {}
             for fn, raw in top_files_bytes.items():
-                _atomic_pub_write(out_dir / fn, raw)
+                path = out_dir / fn
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_pub_write(path, raw)
                 entry: dict[str, Any] = {"sha256": _sha256_bytes(raw), "size": len(raw)}
                 if fn == "episodes.jsonl":
                     entry["lines"] = len(ep_rows)
@@ -1282,7 +1290,7 @@ class ExecutionService:
                     entry["entries"] = len(digest_rows)
                 top_level_meta[fn] = entry
 
-            absent_opt = ["official-result.json", "vlmevalkit/metrics.json", "selection.json"]
+            absent_opt = [fn for fn in (*VLM_SCORING_FILES, "selection.json") if fn not in top_level_meta]
             pub_manifest = {
                 "schema_version": 2,
                 "batch": batch_name,
@@ -1335,13 +1343,25 @@ class ExecutionService:
             raise RuntimeError(f"HotIndexer 拒绝或未能索引已发布批次 (status={scan_status})，拒绝发出 reconciled")
 
         indexed_row = self.db.fetchone(
-            "SELECT batch_id, generation_id FROM batches WHERE batch_id = ?",
+            """
+            SELECT b.batch_id, b.generation_id, b.official_status, o.score, o.denominator
+            FROM batches b LEFT JOIN official_results o ON o.batch_id = b.batch_id
+            WHERE b.batch_id = ?
+            """,
             (reconciled_batch_id,),
         )
         if indexed_row is None or str(indexed_row["generation_id"] or "") != gen_id:
             raise RuntimeError(
                 f"SQLite 对账校验失败: 期望 ({reconciled_batch_id}, {gen_id})，实际 {indexed_row}"
             )
+        if OFFICIAL_RESULT_FILE in scoring_files:
+            official = vlmevalkit_scoring_results[OFFICIAL_RESULT_FILE]
+            if (
+                indexed_row["official_status"] != "official_verified"
+                or indexed_row["score"] != official["score"]
+                or indexed_row["denominator"] != official["denominator"]
+            ):
+                raise RuntimeError("SQLite 正式评分及分母对账失败")
 
         self._emit_trusted_event(
             job_id,
@@ -1760,6 +1780,7 @@ class ExecutionService:
                             channel_path=channel_path,
                             channel_secret=channel_secret,
                             publish_to_harbor_runs=want_harbor_publish,
+                            vlmevalkit_scoring_results=payload.get("vlmevalkit_scoring_results"),
                         )
                         self._dispatch_terminal_notification(job_id, "finished", rec_info)
                         return
