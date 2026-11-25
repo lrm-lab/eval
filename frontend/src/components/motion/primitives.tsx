@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { LazyMotion, MotionConfig, domAnimation, m } from 'motion/react';
+import { LazyMotion, MotionConfig, domMax, m, useReducedMotion } from 'motion/react';
 import { useAppStore } from '../../lib/store';
 
 export const EASE_OUT_EXPO: [number, number, number, number] = [0.16, 1, 0.3, 1];
@@ -12,7 +12,7 @@ export function ReducedMotionProvider({ children }: { children: React.ReactNode 
   }, [reducedMotion]);
 
   return (
-    <LazyMotion features={domAnimation} strict>
+    <LazyMotion features={domMax} strict>
       <MotionConfig reducedMotion={reducedMotion ? 'always' : 'user'}>{children}</MotionConfig>
     </LazyMotion>
   );
@@ -204,11 +204,14 @@ export function SlidingTabs({
   size?: 'sm' | 'md';
   className?: string;
 }) {
-  const reduced = useAppStore((s) => s.reducedMotion);
+  const reducedByPreference = useAppStore((s) => s.reducedMotion);
+  const reducedBySystem = useReducedMotion();
+  const reduced = reducedByPreference || reducedBySystem;
+  const highlightClass = 'pointer-events-none absolute inset-0 rounded-md bg-[color-mix(in_srgb,var(--brand-primary)_80%,black)] shadow-[0_1px_4px_color-mix(in_srgb,var(--brand-primary)_35%,transparent)] motion-reduce:transform-none!';
   return (
     <div
       role="tablist"
-      className={`inline-flex items-center gap-0.5 rounded-lg p-1 border border-[var(--border-subtle)] bg-[var(--bg-elevated)] ${className}`}
+      className={`isolate inline-flex items-center gap-0.5 rounded-lg border border-[color-mix(in_srgb,var(--border-strong)_82%,var(--brand-primary))] bg-[var(--bg-elevated)] p-1 ${className}`}
     >
       {options.map((opt) => {
         const active = opt.id === value;
@@ -219,31 +222,41 @@ export function SlidingTabs({
             role="tab"
             aria-selected={active}
             onClick={() => onChange(opt.id)}
-            className={`relative z-10 inline-flex items-center gap-1.5 rounded-md font-medium transition-colors cursor-pointer ${
+            className={`group/tab relative inline-flex items-center rounded-md font-medium cursor-pointer motion-safe:transition-colors ${
               size === 'sm' ? 'px-2.5 py-1 text-xs' : 'px-3 py-1.5 text-sm'
-            } ${active ? 'text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:text-[var(--text-primary)]'}`}
+            } ${active ? 'text-white' : 'text-[var(--text-secondary)] hover:bg-[var(--brand-tint)] hover:text-[var(--text-primary)]'}`}
           >
             {active &&
               (reduced ? (
-                <span
-                  className="absolute inset-0 -z-10 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)]"
-                  style={{ boxShadow: 'var(--shadow-card)' }}
-                />
+                <span aria-hidden="true" data-tab-indicator className={highlightClass} />
               ) : (
                 <m.span
+                  aria-hidden="true"
+                  data-tab-indicator
                   layoutId={layoutId}
-                  transition={SPRING_SNAPPY}
-                  className="absolute inset-0 -z-10 rounded-md bg-[var(--bg-surface)] border border-[var(--border-subtle)]"
-                  style={{ boxShadow: 'var(--shadow-card)' }}
+                  initial={false}
+                  transition={{ layout: SPRING_SNAPPY }}
+                  className={highlightClass}
                 />
               ))}
-            {opt.icon}
-            <span>{opt.label}</span>
-            {opt.badge !== undefined && (
-              <span className="ml-0.5 rounded px-1.5 py-0.2 text-[11px] tabular-nums bg-[var(--bg-elevated)] text-[var(--text-secondary)]">
-                {opt.badge}
-              </span>
-            )}
+            <m.span
+              initial={false}
+              animate={{ opacity: active && !reduced ? [0.84, 1] : 1 }}
+              transition={{ duration: reduced ? 0 : 0.16, ease: 'easeOut' }}
+              className={`relative z-10 inline-flex items-center gap-1.5 motion-reduce:opacity-100! ${
+                !active && !reduced ? 'motion-safe:transition-transform motion-safe:group-hover/tab:-translate-y-px' : ''
+              }`}
+            >
+              {opt.icon}
+              <span>{opt.label}</span>
+              {opt.badge !== undefined && (
+                <span className={`ml-0.5 rounded px-1.5 py-0.2 text-[11px] tabular-nums ${
+                  active ? 'bg-white/15 text-white' : 'bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
+                }`}>
+                  {opt.badge}
+                </span>
+              )}
+            </m.span>
           </button>
         );
       })}
