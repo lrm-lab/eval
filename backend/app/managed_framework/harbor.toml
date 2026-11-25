@@ -21,6 +21,9 @@ name = "deepswe-1.1"
 path_root = "bundle"
 path = "datasets/deepswe/tasks"
 
+[datasets.deepswe.agents]
+pi = "cached_pi:CachedPi"
+
 [datasets.gaia]
 name = "gaia-validation-20261124"
 path_root = "bundle"

@@ -57,6 +57,7 @@ REQUIRED_SCRIPT_DEPENDENCIES: dict[str, tuple[str, ...]] = {
     "direct.py": ("direct.py",),
     "run.py": (
         "run.py",
+        "wildclaw-optional-vars.txt",
         "publish_v2.py",
         "direct.py",
         "vlmevalkit.py",
