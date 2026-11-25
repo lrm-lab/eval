@@ -1,0 +1,24 @@
+# Server-side Allowlisted Scorers for Direct Native Validation Lab (v2.2.1 · 02-6 §2 & S-04)
+# Arbitrary user script uploads or dynamic code execution are STRICTLY FORBIDDEN.
+version: "v1"
+scorers:
+  - scorer_id: exact_match
+    display_name: "Native Exact Match (direct.py:58-59)"
+    description: "原生 direct.py 精确字符串比对：float(prediction.strip() == str(case['answer']).strip())"
+    requires_answer: true
+    builtin_rule: exact_match
+  - scorer_id: case_insensitive_exact
+    display_name: "Normalized Case-Insensitive Exact Match"
+    description: "忽略首尾空白与大小写差异的精确匹配（服务端内置白名单评分器）"
+    requires_answer: true
+    builtin_rule: case_insensitive_exact
+  - scorer_id: numeric_tolerance_1e3
+    display_name: "Numeric Match (tol = 1e-3)"
+    description: "解析预测与标准答案的有限数值，误差 <= 1e-3 得 1.0（服务端内置白名单评分器）"
+    requires_answer: true
+    builtin_rule: numeric_tolerance_1e3
+  - scorer_id: substring_contains
+    display_name: "Exact Substring Contains"
+    description: "判断标准化后的 prediction 是否包含 case['answer']（服务端内置白名单评分器）"
+    requires_answer: true
+    builtin_rule: substring_contains

@@ -1,0 +1,746 @@
+version: "2026.11.24"
+methodology_version: "v2026.11.24"
+
+tracks:
+  - track_slug: "agentic"
+    display_name: "Agentic"
+    zh_name: "Agentic 提分主线"
+    goal_type: "optimize_gain"
+    order: 1
+    default_visible: true
+  - track_slug: "llm-text"
+    display_name: "LLM — Text"
+    zh_name: "LLM 文本防退化护栏"
+    goal_type: "non_regression_guardrail"
+    order: 2
+    default_visible: true
+  - track_slug: "vision-image"
+    display_name: "Vision — Image"
+    zh_name: "Vision 图文防退化护栏"
+    goal_type: "non_regression_guardrail"
+    order: 3
+    default_visible: true
+  - track_slug: "synthetic"
+    display_name: "Synthetic"
+    zh_name: "合成与进化闭环"
+    goal_type: "synthesis_loop"
+    order: 4
+    default_visible: true
+  - track_slug: "extended"
+    display_name: "Extended"
+    zh_name: "历史扩展基线"
+    goal_type: "extended_baseline"
+    order: 5
+    default_visible: false
+  - track_slug: "custom"
+    display_name: "Custom"
+    zh_name: "未分类 / 自定义"
+    goal_type: "extended_baseline"
+    order: 6
+    default_visible: false
+
+benchmarks:
+  # === Track 1: Agentic (4 core optimize_gain benchmarks) ===
+  - benchmark_slug: "deepswe"
+    display_name: "DeepSWE 1.1"
+    track_slug: "agentic"
+    capability: "软件工程与代码修复 (SWE & Coding)"
+    modality: "agent"
+    language: "en"
+    status: "integrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "deepswe__1.1__default"
+        dataset_version: "1.1"
+        split: "default"
+        runner: "harbor"
+        known_task_count: 113
+        metric_name: "reward"
+        default_protocol: "deepswe-f2p-p2p"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "deepswe-1.1"
+            inferred_run_scope: null
+          - raw_dataset_name: "DeepSWE"
+            inferred_run_scope: null
+          - raw_dataset_name: "DeepSWE 1.1"
+            inferred_run_scope: null
+
+  - benchmark_slug: "terminal-bench"
+    display_name: "Terminal 2.1"
+    track_slug: "agentic"
+    capability: "终端运维与系统工程 (Terminal & SysOps)"
+    modality: "agent"
+    language: "en"
+    status: "integrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "terminal-bench__2.1__default"
+        dataset_version: "2.1"
+        split: "default"
+        runner: "harbor"
+        known_task_count: 89
+        metric_name: "reward"
+        default_protocol: "harbor-native-reward-valid-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "terminal-bench-2.1"
+            inferred_run_scope: null
+          - raw_dataset_name: "terminal-bench2.1"
+            inferred_run_scope: "full_split"
+          - raw_dataset_name: "Terminal-Bench 2.1"
+            inferred_run_scope: null
+
+  - benchmark_slug: "gaia"
+    display_name: "GAIA"
+    track_slug: "agentic"
+    capability: "开放检索与多步推理 (Web & Tool QA)"
+    modality: "agent"
+    language: "en"
+    status: "integrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "gaia__2026-11-20__val"
+        dataset_version: "2026-11-20"
+        split: "val"
+        runner: "harbor"
+        known_task_count: 165
+        metric_name: "accuracy"
+        default_protocol: "gaia-official-scorer"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "GAIA"
+            inferred_run_scope: "full_split"
+          - raw_dataset_name: "GAIA validation"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "gaia__2026-11-24__val"
+        dataset_version: "2026-11-24"
+        split: "val"
+        runner: "harbor"
+        known_task_count: 165
+        metric_name: "reward"
+        default_protocol: "lrm-eval-report-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "gaia-validation-20261124"
+            inferred_run_scope: null
+
+  - benchmark_slug: "wildclawbench"
+    display_name: "WildClawBench"
+    track_slug: "agentic"
+    capability: "综合办公与多约束任务 (Real-World Office Agent)"
+    modality: "agent"
+    language: "en"
+    status: "integrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "wildclawbench__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "harbor"
+        known_task_count: 60
+        metric_name: "overall_score"
+        default_protocol: "wildclaw-overall-score-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "wildclawbench-harbor"
+            inferred_run_scope: null
+          - raw_dataset_name: "wildclawbench"
+            inferred_run_scope: "full_split"
+          - raw_dataset_name: "WildClawBench"
+            inferred_run_scope: null
+
+  # === Track 2: LLM — Text (7 core non_regression_guardrail benchmarks) ===
+  - benchmark_slug: "hle"
+    display_name: "HLE"
+    track_slug: "llm-text"
+    capability: "深度知识与科学推理 (Multi-disciplinary Reasoning)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: true
+    releases:
+      - dataset_release_id: "hle__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "hle_llmjudge"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "ifbench"
+    display_name: "IFBench"
+    track_slug: "llm-text"
+    capability: "指令遵循与约束满足 (Instruction Following)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: true
+    releases:
+      - dataset_release_id: "ifbench__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        known_task_count: null
+        metric_name: "score"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "IFBench"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "multi-lcb"
+    display_name: "Multi-LCB"
+    track_slug: "llm-text"
+    capability: "代码生成与算法编程 (Code Generation)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: true
+    releases:
+      - dataset_release_id: "multi-lcb__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        known_task_count: null
+        metric_name: "pass@1"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "Multi-LCB"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "aa-lcr"
+    display_name: "AA-LCR v1.1"
+    track_slug: "llm-text"
+    capability: "长上下文推理 (Long-context Reasoning)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: true
+    releases:
+      - dataset_release_id: "aa-lcr__1.1__default"
+        dataset_version: "1.1"
+        split: "default"
+        runner: "legacy"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "AA-LCR-v1.1"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "mmlu-pro"
+    display_name: "MMLU-Pro"
+    track_slug: "llm-text"
+    capability: "通用学科知识 (General Knowledge)"
+    modality: "text"
+    language: "en"
+    status: "raw_visible_unintegrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "mmlu-pro__raw__unintegrated"
+        dataset_version: "raw"
+        split: "unintegrated"
+        runner: "none"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "pending"
+        scale_type: "pct_0_100"
+        source_approval: "pending"
+        aliases: []
+
+  - benchmark_slug: "bfcl-v4"
+    display_name: "BFCL-v4 (tool call)"
+    track_slug: "llm-text"
+    capability: "工具调用能力 (Tool Calling)"
+    modality: "text"
+    language: "en"
+    status: "raw_visible_unintegrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "bfcl-v4__raw__unintegrated"
+        dataset_version: "raw"
+        split: "unintegrated"
+        runner: "none"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "pending"
+        scale_type: "pct_0_100"
+        source_approval: "pending"
+        aliases: []
+
+  - benchmark_slug: "global-mmlu-lite"
+    display_name: "Global-MMLU-Lite"
+    track_slug: "llm-text"
+    capability: "多语种文化知识审计 (Multilingual Cultural Knowledge)"
+    modality: "text"
+    language: "multi"
+    status: "pending_version_pin"
+    core_14: true
+    releases:
+      - dataset_release_id: "global-mmlu-lite__pending__default"
+        dataset_version: "pending"
+        split: "default"
+        runner: "none"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "pending"
+        scale_type: "pct_0_100"
+        source_approval: "pending"
+        aliases: []
+
+  # === Track 3: Vision — Image (3 core non_regression_guardrail benchmarks) ===
+  - benchmark_slug: "cmmmu"
+    display_name: "CMMMU"
+    track_slug: "vision-image"
+    capability: "中文多学科视觉知识 (Multi-disciplinary Knowledge ZH)"
+    modality: "vision"
+    language: "zh"
+    status: "integrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "cmmmu__2026-11-20__val"
+        dataset_version: "2026-11-20"
+        split: "val"
+        runner: "legacy"
+        known_task_count: null
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        media_rule_ver: "cmmmu_rule_v1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "CMMMU"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "cmmmu__2026-11-24__val"
+        dataset_version: "2026-11-24"
+        split: "val"
+        runner: "vlmevalkit"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "vlmevalkit-native-v1"
+        scale_type: "ratio_0_1"
+        media_rule_ver: "runner_inline_media"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "CMMMU validation smoke (6 items)"
+            inferred_run_scope: "smoke"
+
+  - benchmark_slug: "mmmu-pro-10c"
+    display_name: "MMMU-Pro (10c)"
+    track_slug: "vision-image"
+    capability: "英文多学科视觉知识 (Multi-disciplinary Knowledge EN)"
+    modality: "vision"
+    language: "en"
+    status: "integrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "mmmu-pro-10c__2026-11-20__test"
+        dataset_version: "2026-11-20"
+        split: "test"
+        runner: "legacy"
+        known_task_count: null
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        media_rule_ver: "mmmu_pro_rule_v1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "MMMU_Pro_10c"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "mmmu-pro-10c__2026-11-24__test"
+        dataset_version: "2026-11-24"
+        split: "test"
+        runner: "vlmevalkit"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "vlmevalkit-native-v1"
+        scale_type: "ratio_0_1"
+        media_rule_ver: "runner_inline_media"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "MMMU-Pro (10c) smoke (2 items)"
+            inferred_run_scope: "smoke"
+
+  - benchmark_slug: "mm-ifeval"
+    display_name: "MM-IFEval"
+    track_slug: "vision-image"
+    capability: "多模态指令遵循 (Multimodal Instruction Following)"
+    modality: "vision"
+    language: "en"
+    status: "integrated"
+    core_14: true
+    releases:
+      - dataset_release_id: "mm-ifeval__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        known_task_count: null
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        media_rule_ver: "mm_ifeval_rule_v1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "MM-IFEval"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "mm-ifeval__2026-11-24__default"
+        dataset_version: "2026-11-24"
+        split: "default"
+        runner: "vlmevalkit"
+        known_task_count: null
+        metric_name: "accuracy"
+        default_protocol: "vlmevalkit-native-v1"
+        scale_type: "ratio_0_1"
+        media_rule_ver: "runner_inline_media"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "MM-IFEval smoke (inference)"
+            inferred_run_scope: "smoke"
+
+  # === Track 4: Synthetic ===
+  - benchmark_slug: "tianxi-synth-v1"
+    display_name: "tianxi-synth-v1"
+    track_slug: "synthetic"
+    capability: "离线文件与数据对账 (Offline Files & Reconciliation)"
+    modality: "agent"
+    language: "en"
+    status: "integrated"
+    core_14: false
+    releases:
+      - dataset_release_id: "tianxi-synth-v1__1.0__train"
+        dataset_version: "1.0"
+        split: "train"
+        runner: "harbor"
+        known_task_count: 40
+        metric_name: "reward"
+        default_protocol: "lrm-eval-report-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "tianxi-synth-v1-train"
+            inferred_run_scope: null
+      - dataset_release_id: "tianxi-synth-v1__1.0__holdout"
+        dataset_version: "1.0"
+        split: "holdout"
+        runner: "harbor"
+        known_task_count: 12
+        metric_name: "reward"
+        default_protocol: "lrm-eval-report-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_restricted"
+        aliases:
+          - raw_dataset_name: "tianxi-synth-v1-holdout"
+            inferred_run_scope: null
+
+  # === Track 5: Extended Historical Baselines (2026-11-20) ===
+  - benchmark_slug: "gpqa-diamond"
+    display_name: "GPQA_diamond"
+    track_slug: "extended"
+    capability: "深度知识与科学推理 (Knowledge & Science)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "gpqa-diamond__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "GPQA_diamond"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "ifeval"
+    display_name: "IFEval"
+    track_slug: "extended"
+    capability: "指令遵循与约束满足 (Instruction Following)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "ifeval__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "Prompt-level-strict-accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "IFEval"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "apex-shortlist"
+    display_name: "Apex-shortlist"
+    track_slug: "extended"
+    capability: "代码与工具调用 (Coding & Tool Use)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "apex-shortlist__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "Apex-shortlist"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "multi-challenge"
+    display_name: "Multi-Challenge"
+    track_slug: "extended"
+    capability: "指令遵循与约束满足 (Instruction Following)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "multi-challenge__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "overall-score"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "Multi-Challenge"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "longmemeval"
+    display_name: "LongMemEval"
+    track_slug: "extended"
+    capability: "长上下文与记忆 (Long Context & Memory)"
+    modality: "text"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "longmemeval__2026-11-20__oracle-direct"
+        dataset_version: "2026-11-20"
+        split: "oracle_direct"
+        runner: "legacy"
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "LongMemEval_oracle_direct"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "longmemeval__2026-11-20__oracle-con"
+        dataset_version: "2026-11-20"
+        split: "oracle_CoN"
+        runner: "legacy"
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "LongMemEval_oracle_CoN"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "longmemeval__2026-11-20__s-direct"
+        dataset_version: "2026-11-20"
+        split: "S_direct"
+        runner: "legacy"
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "LongMemEval_S_direct"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "longmemeval__2026-11-20__s-con"
+        dataset_version: "2026-11-20"
+        split: "S_CoN"
+        runner: "legacy"
+        metric_name: "accuracy"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "LongMemEval_S_CoN"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "ai2d-test"
+    display_name: "AI2D_TEST"
+    track_slug: "extended"
+    capability: "视觉问答与科学图表 (Visual Reasoning)"
+    modality: "vision"
+    language: "en"
+    status: "integrated"
+    core_14: false
+    releases:
+      - dataset_release_id: "ai2d-test__2026-11-20__test"
+        dataset_version: "2026-11-20"
+        split: "test"
+        runner: "legacy"
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "AI2D_TEST"
+            inferred_run_scope: "full_split"
+      - dataset_release_id: "ai2d-test__2026-11-24__test"
+        dataset_version: "2026-11-24"
+        split: "test"
+        runner: "vlmevalkit"
+        metric_name: "accuracy"
+        default_protocol: "vlmevalkit-native-v1"
+        scale_type: "ratio_0_1"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "AI2D test smoke (2 items)"
+            inferred_run_scope: "smoke"
+
+  - benchmark_slug: "mmbench-v1-1-cn"
+    display_name: "MMBench_v1_1_CN"
+    track_slug: "extended"
+    capability: "多模态综合知识 (Multimodal Knowledge ZH)"
+    modality: "vision"
+    language: "zh"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "mmbench-v1-1-cn__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "MMBench_v1_1_CN"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "realworldqa"
+    display_name: "RealWorldQA"
+    track_slug: "extended"
+    capability: "视觉问答与科学图表 (Visual Reasoning)"
+    modality: "vision"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "realworldqa__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "RealWorldQA"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "mathvista"
+    display_name: "MathVista"
+    track_slug: "extended"
+    capability: "视觉问答与科学图表 (Visual Reasoning)"
+    modality: "vision"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "mathvista__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "MathVista"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "charxiv-reasoning"
+    display_name: "CharXiv_reasoning"
+    track_slug: "extended"
+    capability: "视觉问答与科学图表 (Visual Reasoning)"
+    modality: "vision"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "charxiv-reasoning__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "CharXiv_reasoning"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "hallusionbench"
+    display_name: "HallusionBench"
+    track_slug: "extended"
+    capability: "视觉问答与科学图表 (Visual Reasoning)"
+    modality: "vision"
+    language: "en"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "hallusionbench__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "avg_acc"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "pct_0_100"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "HallusionBench"
+            inferred_run_scope: "full_split"
+
+  - benchmark_slug: "ocrbench"
+    display_name: "OCRBench"
+    track_slug: "extended"
+    capability: "OCR 与文档识别 (OCR)"
+    modality: "vision"
+    language: "multi"
+    status: "legacy_only"
+    core_14: false
+    releases:
+      - dataset_release_id: "ocrbench__2026-11-20__default"
+        dataset_version: "2026-11-20"
+        split: "default"
+        runner: "legacy"
+        metric_name: "score_of_1000"
+        default_protocol: "legacy-20261120-csv"
+        scale_type: "score_0_1000"
+        source_approval: "approved_public"
+        aliases:
+          - raw_dataset_name: "OCRBench"
+            inferred_run_scope: "full_split"

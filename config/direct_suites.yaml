@@ -1,0 +1,9 @@
+version: "v1"
+suites:
+  - suite_id: direct-smoke-v1
+    display_name: "Direct Native Smoke Suite (Harmless Exact-Match)"
+    cases_path: "direct_suites/direct-smoke-v1/cases.jsonl"
+    scorer_id: "exact_match"
+    split: "smoke"
+    reward_key: "reward"
+    notes: "无害原生 direct.py 单题/双题冒烟套件（严格对齐 framework/direct.py:33-37 契约）"

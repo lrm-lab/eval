@@ -1,0 +1,370 @@
+@import "tailwindcss";
+
+/* ============================================================================
+ * LRM Eval Design System Tokens (v2.2.1 · 01-1 & 01-2)
+ * Light & Dark Dual Native Themes + 100% GPU Motion + Reduced Motion Guardrail
+ * ============================================================================ */
+
+:root,
+[data-theme="light"] {
+  --bg-canvas: #f6f8fa;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f8fafc;
+  --bg-glass: rgba(255, 255, 255, 0.84);
+  --border-subtle: #e5e7eb;
+  --border-strong: #cbd5e1;
+  --text-primary: #0f172a;
+  --text-secondary: #475569;
+  --text-muted: #94a3b8;
+  --brand-primary: #0068b5;
+  --brand-hover: #005494;
+  --brand-tint: #eff6ff;
+  --rank-gold: #b45309;
+  --best-cell: #d97706;
+  --best-cell-bg: #fffbeb;
+  --rank-silver: #64748b;
+  --rank-bronze: #9a3412;
+
+  /* Semantic Status Colors (strict distinction: Pass vs Valid Zero vs Error vs Unscored) */
+  --sem-pass-fg: #15803d;
+  --sem-pass-bg: #ecfdf5;
+  --sem-pass-border: #bbf7d0;
+  --sem-zero-fg: #b45309;
+  --sem-zero-bg: #fffbeb;
+  --sem-zero-border: #fde68a;
+  --sem-err-fg: #b91c1c;
+  --sem-err-bg: #fef2f2;
+  --sem-err-border: #fecaca;
+  --sem-unscored-fg: #475569;
+  --sem-unscored-bg: #f1f5f9;
+  --sem-unscored-border: #cbd5e1;
+  --sem-running-fg: #0284c7;
+  --sem-running-bg: #f0f9ff;
+  --sem-running-border: #bae6fd;
+  --sem-legacy-fg: #6d28d9;
+  --sem-legacy-bg: #f5f3ff;
+  --sem-legacy-border: #ddd6fe;
+  --sem-smoke-fg: #0369a1;
+  --sem-smoke-bg: #f0f9ff;
+
+  /* Motion Timing Tokens */
+  --dur-instant: 90ms;
+  --dur-fast: 160ms;
+  --dur-normal: 240ms;
+  --dur-showcase: 420ms;
+  --dur-chart: 520ms;
+  --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-chart: cubic-bezier(0.22, 1, 0.36, 1);
+
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04), 0 4px 12px rgba(15, 23, 42, 0.03);
+  --shadow-elevated: 0 10px 30px rgba(15, 23, 42, 0.10), 0 2px 6px rgba(15, 23, 42, 0.05);
+  --hero-glow-1: rgba(0, 104, 181, 0.13);
+  --hero-glow-2: rgba(16, 185, 129, 0.10);
+  --hero-grid: rgba(15, 23, 42, 0.05);
+  --shimmer-base: #eef2f6;
+  --shimmer-hi: #f8fafc;
+}
+
+[data-theme="dark"] {
+  --bg-canvas: #09090b;
+  --bg-surface: #111114;
+  --bg-elevated: #18181b;
+  --bg-glass: rgba(17, 17, 20, 0.84);
+  --border-subtle: #27272a;
+  --border-strong: #3f3f46;
+  --text-primary: #f4f4f5;
+  --text-secondary: #a1a1aa;
+  --text-muted: #71717a;
+  --brand-primary: #3b82f6;
+  --brand-hover: #60a5fa;
+  --brand-tint: #172554;
+  --rank-gold: #f59e0b;
+  --best-cell: #fbbf24;
+  --best-cell-bg: #451a03;
+  --rank-silver: #cbd5e1;
+  --rank-bronze: #ea580c;
+
+  --sem-pass-fg: #4ade80;
+  --sem-pass-bg: #052e16;
+  --sem-pass-border: #14532d;
+  --sem-zero-fg: #fbbf24;
+  --sem-zero-bg: #451a03;
+  --sem-zero-border: #78350f;
+  --sem-err-fg: #f87171;
+  --sem-err-bg: #450a0a;
+  --sem-err-border: #7f1d1d;
+  --sem-unscored-fg: #94a3b8;
+  --sem-unscored-bg: #1e293b;
+  --sem-unscored-border: #334155;
+  --sem-running-fg: #38bdf8;
+  --sem-running-bg: #082f49;
+  --sem-running-border: #0c4a6e;
+  --sem-legacy-fg: #a78bfa;
+  --sem-legacy-bg: #2e1065;
+  --sem-legacy-border: #4c1d95;
+  --sem-smoke-fg: #38bdf8;
+  --sem-smoke-bg: #082f49;
+
+  --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.35), 0 4px 16px rgba(0, 0, 0, 0.25);
+  --shadow-elevated: 0 14px 40px rgba(0, 0, 0, 0.55), 0 4px 12px rgba(0, 0, 0, 0.35);
+  --hero-glow-1: rgba(59, 130, 246, 0.18);
+  --hero-glow-2: rgba(16, 185, 129, 0.12);
+  --hero-grid: rgba(244, 244, 245, 0.055);
+  --shimmer-base: #18181b;
+  --shimmer-hi: #27272a;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  background-color: var(--bg-canvas);
+  color: var(--text-primary);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+code,
+pre,
+.font-mono {
+  font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Focus-visible universal accessibility ring */
+:focus-visible {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 2px;
+}
+
+/* Low-power GPU Hero Aura & Geometric Grid (18s smooth transform drift, <1% CPU) */
+@keyframes lrm-hero-drift {
+  0% {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+  50% {
+    transform: translate3d(2%, 2%, 0) scale(1.04);
+  }
+  100% {
+    transform: translate3d(-2%, -1%, 0) scale(1);
+  }
+}
+
+.lrm-hero-bg {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--bg-surface);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.lrm-hero-bg::before {
+  content: "";
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(600px circle at 20% 25%, var(--hero-glow-1), transparent 65%),
+    radial-gradient(520px circle at 82% 30%, var(--hero-glow-2), transparent 60%);
+  animation: lrm-hero-drift 18s ease-in-out infinite;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.lrm-hero-ambient {
+  position: absolute;
+  inset: -20%;
+  background:
+    radial-gradient(620px circle at 18% 24%, var(--hero-glow-1), transparent 65%),
+    radial-gradient(540px circle at 84% 28%, var(--hero-glow-2), transparent 60%);
+  animation: lrm-hero-drift 18s ease-in-out infinite;
+  pointer-events: none;
+  will-change: transform;
+}
+
+.lrm-hero-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(to right, var(--hero-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--hero-grid) 1px, transparent 1px);
+  background-size: 36px 36px;
+  mask-image: radial-gradient(ellipse 80% 70% at 50% 30%, black 40%, transparent 100%);
+  pointer-events: none;
+}
+
+/* Calm 2.2s running-placeholder indicator pulse (01-2 §2.5) */
+@keyframes lrm-calm-ping {
+  0% {
+    transform: scale(1);
+    opacity: 0.75;
+  }
+  75%,
+  100% {
+    transform: scale(2.1);
+    opacity: 0;
+  }
+}
+
+.lrm-calm-ping,
+.lrm-calm-pulse {
+  animation: lrm-calm-ping 2.2s cubic-bezier(0, 0, 0.2, 1) infinite;
+}
+
+/* Zero-CLS Shimmer Skeleton (transform-only GPU sweep) */
+@keyframes lrm-shimmer {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(100%);
+  }
+}
+
+.lrm-skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--shimmer-base);
+  border-radius: 6px;
+}
+
+.lrm-skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, transparent, var(--shimmer-hi), transparent);
+  animation: lrm-shimmer 1.4s ease-in-out infinite;
+  will-change: transform;
+}
+
+/* Step highlight flash (1.0s brand-tint pulse on mini-map jump) */
+@keyframes lrm-step-flash {
+  0% {
+    box-shadow: 0 0 0 2px var(--brand-primary);
+  }
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+}
+
+.lrm-step-flash {
+  animation: lrm-step-flash 1s var(--ease-out-expo);
+}
+
+/* InlineScoreBar left-origin scaleX reveal */
+@keyframes lrm-bar-grow {
+  from {
+    transform: scaleX(0);
+  }
+  to {
+    transform: scaleX(1);
+  }
+}
+
+.lrm-bar-grow {
+  transform-origin: left center;
+  animation: lrm-bar-grow var(--dur-showcase) var(--ease-out-expo) both;
+}
+
+/* Collapsible grid-template-rows smooth transition (skipped instantly when data-instant="true") */
+.lrm-collapse-grid {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows var(--dur-fast) var(--ease-out-expo);
+}
+.lrm-collapse-grid[data-open="true"] {
+  grid-template-rows: 1fr;
+}
+.lrm-collapse-grid[data-instant="true"] {
+  transition: none !important;
+}
+.lrm-collapse-grid > div {
+  overflow: hidden;
+}
+
+/* Interactive press micro-feedback (90ms) */
+.lrm-press {
+  transition:
+    transform var(--dur-instant) ease-out,
+    background-color var(--dur-fast) ease,
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+.lrm-press:active {
+  transform: scale(0.98);
+}
+
+/* Spotlight Hover Card border */
+.lrm-spotlight {
+  position: relative;
+  background: var(--bg-surface);
+  border: 1px solid var(--border-subtle);
+  box-shadow: var(--shadow-card);
+  transition:
+    transform var(--dur-fast) var(--ease-out-expo),
+    border-color var(--dur-fast) ease,
+    box-shadow var(--dur-fast) ease;
+}
+.lrm-spotlight:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-elevated);
+}
+
+/* Glassmorphism panels (Tooltip / FloatingCompareDock / CommandPalette) */
+.lrm-glass {
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-strong);
+  box-shadow: var(--shadow-elevated);
+}
+
+/* Sticky column right shadow revealed smoothly when scrollLeft > 0 */
+.lrm-sticky-shadow {
+  position: sticky;
+  left: 0;
+  z-index: 10;
+  background: var(--bg-surface);
+}
+.lrm-sticky-shadow::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  right: -10px;
+  bottom: 0;
+  width: 10px;
+  pointer-events: none;
+  background: linear-gradient(to right, rgba(15, 23, 42, 0.08), transparent);
+  opacity: 0;
+  transition: opacity var(--dur-fast) ease;
+}
+[data-scrolled="true"] .lrm-sticky-shadow::after {
+  opacity: 1;
+}
+
+/* Strict Reduced Motion support (system media query OR user menu toggle [data-reduced-motion="true"]) */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+[data-reduced-motion="true"] *,
+[data-reduced-motion="true"] *::before,
+[data-reduced-motion="true"] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}

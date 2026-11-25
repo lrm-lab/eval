@@ -1,0 +1,41 @@
+version: "v1"
+rules:
+  CMMMU:
+    rule_version: "cmmmu_rule_v1"
+    source_key: "CMMMU"
+    root_dir: "/home/share-data/dataset/CMMMU/images"
+    strategy: "unique_basename"
+    regex_patterns:
+      - '<img="([^"]+)">'
+      - '<img=\\"([^"\\]+)\\">'
+    fallback_on_multi_hit: "ambiguous_multi_hit"
+    fallback_on_missing: "missing"
+
+  MMMU_Pro_10c:
+    rule_version: "mmmu_pro_rule_v1"
+    source_key: "MMMU-Pro-10c"
+    root_dir: "/home/share-data/dataset/MMMU-Pro-10c/images"
+    strategy: "context_then_unique_basename"
+    context_fields: ["subject", "subdomain", "split"]
+    image_fields: ["image", "image_1", "image_2", "image_3", "image_4", "image_5", "image_6", "image_7"]
+    regex_patterns:
+      - '<img="([^"]+)">'
+      - '([A-Za-z0-9._-]+\.(?:png|jpg|jpeg|webp|gif))'
+    fallback_on_multi_hit: "ambiguous_multi_hit"
+    fallback_on_missing: "missing"
+
+  MM-IFEval:
+    rule_version: "mm_ifeval_rule_v1"
+    source_key: "MM-IFEval"
+    root_dir: "/home/share-data/dataset/MM-IFEval"
+    tsv_file: "/home/share-data/dataset/MM-IFEval/MM-IFEval.tsv"
+    strategy: "tsv_id_or_index_lookup"
+    id_columns: ["id", "index"]
+    image_columns: ["image", "image_path"]
+    fallback_on_multi_hit: "ambiguous_multi_hit"
+    fallback_on_missing: "missing"
+
+allowed_media_sources:
+  CMMMU: "/home/share-data/dataset/CMMMU"
+  MMMU-Pro-10c: "/home/share-data/dataset/MMMU-Pro-10c"
+  MM-IFEval: "/home/share-data/dataset/MM-IFEval"

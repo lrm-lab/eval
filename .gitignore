@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.cache/
+.pytest_cache/
+*.db
+*.db-wal
+*.db-shm
+secrets.env
+gateways.env
+frontend/node_modules/
+frontend/dist/
+.venv/
+
+snapshots/

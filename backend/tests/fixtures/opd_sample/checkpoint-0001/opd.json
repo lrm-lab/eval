@@ -1,0 +1,54 @@
+{
+  "step": 1,
+  "rollout_checkpoint": "checkpoint-0000",
+  "rollouts": [
+    {
+      "dataset": "tianxi-synth-v1-train",
+      "task": "log-rollup-train-001",
+      "expert": "expert-files",
+      "reward": 0.5,
+      "tokens": 1840,
+      "sampled_reverse_kl": 0.582
+    },
+    {
+      "dataset": "tianxi-synth-v1-train",
+      "task": "order-reconcile-train-001",
+      "expert": "expert-files",
+      "reward": 0.0,
+      "tokens": 2120,
+      "sampled_reverse_kl": 0.618
+    },
+    {
+      "dataset": "tianxi-synth-v1-train",
+      "task": "toolspace-train-001",
+      "expert": "expert-reasoning",
+      "reward": 0.0,
+      "tokens": 2940,
+      "sampled_reverse_kl": 0.715
+    },
+    {
+      "dataset": "tianxi-synth-v1-train",
+      "task": "multi-hop-train-001",
+      "expert": "expert-reasoning",
+      "reward": 0.5,
+      "tokens": 2680,
+      "sampled_reverse_kl": 0.665
+    },
+    {
+      "dataset": "tianxi-synth-v1-train",
+      "task": "cli-patch-train-001",
+      "expert": "expert-coding",
+      "reward": 0.5,
+      "tokens": 2310,
+      "sampled_reverse_kl": 0.642
+    },
+    {
+      "dataset": "tianxi-synth-v1-train",
+      "task": "repo-fix-train-001",
+      "expert": "expert-coding",
+      "reward": 0.0,
+      "tokens": 2560,
+      "sampled_reverse_kl": 0.678
+    }
+  ]
+}

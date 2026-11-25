@@ -1,0 +1,46 @@
+version: "v1"
+# Source-level inclusion semantics registry for 4-segment TokenBreakdownBar.
+# Only sources explicitly verified AND passing per-row assertion
+# (cached <= input, reasoning <= output) are marked mutually_exclusive_verified.
+sources:
+  - runner: "direct"
+    harness: "direct"
+    harness_version: "*"
+    cached_in_input: true
+    reasoning_in_output: true
+    verified: true
+
+  - runner: "harbor"
+    harness: "opencode"
+    harness_version: "*"
+    cached_in_input: true
+    reasoning_in_output: true
+    verified: false
+
+  - runner: "harbor"
+    harness: "pi"
+    harness_version: "*"
+    cached_in_input: true
+    reasoning_in_output: true
+    verified: false
+
+  - runner: "harbor"
+    harness: "openclaw"
+    harness_version: "*"
+    cached_in_input: true
+    reasoning_in_output: true
+    verified: false
+
+  - runner: "harbor"
+    harness: "codex"
+    harness_version: "*"
+    cached_in_input: true
+    reasoning_in_output: true
+    verified: false
+
+  - runner: "harbor"
+    harness: "claude-code"
+    harness_version: "*"
+    cached_in_input: true
+    reasoning_in_output: true
+    verified: false

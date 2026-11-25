@@ -1,0 +1,98 @@
+[
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "log-rollup-train-001",
+    "environment": "offline-files",
+    "source": "log-rollup",
+    "expert": "expert-files",
+    "model": "deepseek-v4.1-flash"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "log-rollup-train-002",
+    "environment": "offline-files",
+    "source": "log-rollup",
+    "expert": "expert-files",
+    "model": "deepseek-v4.1-flash"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "order-reconcile-train-001",
+    "environment": "offline-files",
+    "source": "order-reconcile",
+    "expert": "expert-files",
+    "model": "deepseek-v4.1-flash"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "order-reconcile-train-002",
+    "environment": "offline-files",
+    "source": "order-reconcile",
+    "expert": "expert-files",
+    "model": "deepseek-v4.1-flash"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "toolspace-train-001",
+    "environment": "tianxi-synth-v1-train",
+    "source": "toolspace",
+    "expert": "expert-reasoning",
+    "model": "Qwen3-235B-Thinking"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "toolspace-train-002",
+    "environment": "tianxi-synth-v1-train",
+    "source": "toolspace",
+    "expert": "expert-reasoning",
+    "model": "Qwen3-235B-Thinking"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "multi-hop-train-001",
+    "environment": "tianxi-synth-v1-train",
+    "source": "multi-hop",
+    "expert": "expert-reasoning",
+    "model": "Qwen3-235B-Thinking"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "self-questioning-train-001",
+    "environment": "tianxi-synth-v1-train",
+    "source": "self-questioning",
+    "expert": "expert-reasoning",
+    "model": "Qwen3-235B-Thinking"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "cli-patch-train-001",
+    "environment": "code-sandbox",
+    "source": "cli-patch",
+    "expert": "expert-coding",
+    "model": "Qwen3-Coder-480B"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "cli-patch-train-002",
+    "environment": "code-sandbox",
+    "source": "cli-patch",
+    "expert": "expert-coding",
+    "model": "Qwen3-Coder-480B"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "repo-fix-train-001",
+    "environment": "code-sandbox",
+    "source": "repo-fix",
+    "expert": "expert-coding",
+    "model": "Qwen3-Coder-480B"
+  },
+  {
+    "dataset": "tianxi-synth-v1-train",
+    "task": "repo-fix-train-002",
+    "environment": "code-sandbox",
+    "source": "repo-fix",
+    "expert": "expert-coding",
+    "model": "Qwen3-Coder-480B"
+  }
+]

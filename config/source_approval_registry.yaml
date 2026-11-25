@@ -1,0 +1,342 @@
+version: "v1"
+# Explicit granular approval registry for shared CIFS roots (transitional 0666 governance, v2.2.1 06-1 §3).
+# Any source directory NOT matching an explicit approved entry defaults to:
+#   approval_status: "pending", approved_evidence_classes: []
+# (status/scores/denominators remain visible; all restricted text/media bodies are masked).
+default_project_id: "default"
+default_owner_id: "system"
+
+sources:
+  # Existing 197 harbor-runs (explicit approved sub-families / prefixes; new M3 runner evidence writes to 0700 Evidence Store)
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/cmmmu-vlmkit-atif-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/cmmmu-vlmkit-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/mmmu-pro-10c-smoke-vlmkit-atif-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/mmmu-pro-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/ai2d-test-smoke-vlmkit-atif-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/ai2d-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/mm-ifeval-smoke-vlmkit-atif-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "atif_trajectory"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/mm-ifeval-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/direct-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa", "gateway_capture"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/gateway-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "gateway_capture", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/synth-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/tianxi-synth-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/gaia-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/terminal-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/tb21-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/wildclaw-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/harbor-runs/existingdata-"
+    match_mode: "prefix"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  # Historical 2026-11-20 subdirectories (explicit per-benchmark registration — NO catch-all root!)
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/terminal-bench2.1"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/DeepSWE"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/GAIA"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "atif_trajectory", "verifier_log"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/wildclawbench"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "verifier_log"]
+
+  # Historical 2026-11-20 text benchmark subdirectories (explicit list)
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/IFEval"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/IFBench"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/GPQA_diamond"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/hle_llmjudge"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/AA-LCR-v1.1"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/Multi-LCB"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/Apex-shortlist"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/Multi-Challenge"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/LongMemEval_oracle_CoN"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/LongMemEval_oracle_direct"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/LongMemEval_S_CoN"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/LongMemEval_S_direct"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  # Historical 2026-11-20 multimodal benchmark subdirectories (explicit list)
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/CMMMU"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/MMMU_Pro_10c"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/MM-IFEval"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/AI2D_TEST"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/RealWorldQA"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/CharXiv_reasoning"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/HallusionBench"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/MathVista"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/MMBench_v1_1_CN"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  - source_root: "/home/share-data/tianxi_benches/2026-11-20/OCRBench"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
+
+  # Registered dataset roots & multimodal media roots
+  - source_root: "/home/share-data/tianxi_benches/datasets/tianxi-synth-v1"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_restricted"
+    approved_evidence_classes: ["public_task_metadata", "holdout_task_body", "reference_solution"]
+
+  - source_root: "/home/share-data/dataset/CMMMU"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["multimodal_media"]
+
+  - source_root: "/home/share-data/dataset/MMMU-Pro-10c"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["multimodal_media"]
+
+  - source_root: "/home/share-data/dataset/MM-IFEval"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["multimodal_media"]

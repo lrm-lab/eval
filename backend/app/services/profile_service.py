@@ -1,0 +1,1052 @@
+from __future__ import annotations
+
+import json
+import math
+from collections import defaultdict
+from typing import Any
+
+from app.api.errors import AppError
+from app.config import Settings
+from app.db.database import Database
+from app.indexing.hot_indexer import SourceApprovalRegistry
+from app.security.auth import AuthUser
+from app.security.authz import (
+    authorized_projects_for_user,
+    can_access_project,
+    has_scope,
+    sql_task_holdout_exclude_clause,
+)
+from app.security.storage_probe import validate_safe_id
+from app.services.methodology import METHODOLOGY_VERSION, finite, normalize_score_to_100
+from app.services.query_service import _project_filter_sql, _sanitize_batch_row
+
+
+# Known harness recording boundaries (factual Harbor/lrm-eval metadata only — zero fabricated commercial claims)
+_HARNESS_BOUNDARY_NOTES: dict[str, str] = {
+    "pi": "完整记录 ATIF 轨迹、工具调用与部分网关抓包；支持多轮 Agent 执行。",
+    "pi-v5": "历史 2026-11-20 DeepSWE / TB2.1 Pi v5 适配器，含逐题 f2p/p2p 与原生验证日志。",
+    "jhpPiV5": "原生 Harbor TB2.1 Pi v5 适配器，保留 4 阶段耗时与 verifier/test-stdout.txt。",
+    "openclaw": "OpenClaw 2026.11.5 仅导出会话级消息摘要（no_tool_calls_recorded），不记录逐条工具调用事件。",
+    "opencode": "记录完整 ATIF 步骤、工具调用与 reasoning_tokens；支持多尝试评测与网关捕获。",
+    "codex": "原生 Harbor / Agentic 适配器，保留步骤与验证器结果。",
+    "claude-code": "原生 Harbor / Agentic 适配器，保留步骤、Token 与验证器结果。",
+    "vlmevalkit": "VLMEvalKit 多模态运行器（trajectory_status=model_request_response），支持官方汇总、学科分项与内联图像。",
+    "direct": "Direct 轻量单轮问答运行器（direct_result），支持白名单评分器与网关抓包。",
+    "oracle": "参考解（Reference / Oracle），仅用于校验题目可解性，严禁混入正式主榜。",
+    "nop": "空操作基线（Reference / NOP），用于校验环境零通过基线。",
+}
+
+
+class ProfileService:
+    """Entity Profiles (Models, Harnesses, Benchmarks, Hardest Tasks) & Constraint Recommender (M1).
+    Strictly anchored to real evaluated Harbor / lrm-eval / 2026-11-20 fields with auth-before-dedup."""
+
+    def __init__(
+        self,
+        settings: Settings,
+        db: Database,
+        approval_registry: SourceApprovalRegistry | None = None,
+    ) -> None:
+        self.settings = settings
+        self.db = db
+        self.approval_registry = approval_registry or SourceApprovalRegistry(settings.source_approval_file)
+
+    def _can_see_legacy(self, user: AuthUser) -> bool:
+        proj_id, owner_id, _, _ = self.approval_registry.lookup_full(self.settings.legacy_root_dir / "leaderboard.csv")
+        return can_access_project(user, proj_id, owner_id=owner_id)
+
+    # --- 1. Models ---
+
+    def list_models(self, user: AuthUser) -> dict[str, Any]:
+        proj_sql, params = _project_filter_sql(user, "project_id")
+        rows = self.db.fetchall(
+            f"""
+            SELECT model_canonical, model_route, checkpoint, thinking_mode,
+                   harness, runner, benchmark_slug, dataset_release_id, valid_mean, run_scope
+            FROM batches
+            WHERE {proj_sql} AND model_canonical IS NOT NULL AND is_running_placeholder = 0
+            """,
+            params,
+        )
+        models: dict[str, dict[str, Any]] = {}
+
+        def _ensure(mc: str) -> dict[str, Any]:
+            if mc not in models:
+                models[mc] = {
+                    "model_canonical": mc,
+                    "model_routes": set(),
+                    "checkpoints": set(),
+                    "thinking_modes": set(),
+                    "harnesses": set(),
+                    "runners": set(),
+                    "benchmarks": set(),
+                    "batch_count": 0,
+                    "legacy_bench_count": 0,
+                }
+            return models[mc]
+
+        for r in rows:
+            m = _ensure(str(r["model_canonical"]))
+            m["batch_count"] += 1
+            if r.get("model_route"):
+                m["model_routes"].add(str(r["model_route"]))
+            if r.get("checkpoint"):
+                m["checkpoints"].add(str(r["checkpoint"]))
+            if r.get("thinking_mode"):
+                m["thinking_modes"].add(str(r["thinking_mode"]))
+            if r.get("harness"):
+                m["harnesses"].add(str(r["harness"]))
+            if r.get("runner"):
+                m["runners"].add(str(r["runner"]))
+            if r.get("benchmark_slug"):
+                m["benchmarks"].add(str(r["benchmark_slug"]))
+
+        if self._can_see_legacy(user):
+            leg_rows = self.db.fetchall(
+                "SELECT model_canonical, model_col, checkpoint, thinking_mode, harness, benchmark_slug FROM legacy_leaderboard_rows"
+            )
+            for lr in leg_rows:
+                mc = str(lr["model_canonical"])
+                m = _ensure(mc)
+                m["legacy_bench_count"] += 1
+                if lr.get("model_col"):
+                    m["model_routes"].add(str(lr["model_col"]))
+                if lr.get("checkpoint"):
+                    m["checkpoints"].add(str(lr["checkpoint"]))
+                if lr.get("thinking_mode"):
+                    m["thinking_modes"].add(str(lr["thinking_mode"]))
+                if lr.get("harness"):
+                    m["harnesses"].add(str(lr["harness"]))
+                m["runners"].add("legacy")
+                if lr.get("benchmark_slug"):
+                    m["benchmarks"].add(str(lr["benchmark_slug"]))
+
+        items = []
+        for mc, data in sorted(models.items(), key=lambda kv: (-kv[1]["batch_count"] - kv[1]["legacy_bench_count"], kv[0])):
+            items.append(
+                {
+                    "model_canonical": mc,
+                    "model_routes": sorted(data["model_routes"]),
+                    "checkpoints": sorted(data["checkpoints"]),
+                    "thinking_modes": sorted(data["thinking_modes"]),
+                    "harnesses": sorted(data["harnesses"]),
+                    "runners": sorted(data["runners"]),
+                    "benchmark_count": len(data["benchmarks"]),
+                    "batch_count": data["batch_count"],
+                    "legacy_bench_count": data["legacy_bench_count"],
+                }
+            )
+        return {"items": items, "total": len(items), "methodology_version": METHODOLOGY_VERSION}
+
+    def get_model_profile(self, user: AuthUser, model_canonical: str) -> dict[str, Any]:
+        if not model_canonical or ".." in model_canonical or "\x00" in model_canonical:
+            raise AppError(400, "INVALID_PATH_OR_ID", "非法模型标识")
+        proj_sql, params = _project_filter_sql(user, "b.project_id")
+        batch_rows = self.db.fetchall(
+            f"""
+            SELECT b.*, o.metric AS official_metric, o.score AS official_score,
+                   o.denominator AS official_denominator, o.source AS official_source,
+                   bm.display_name AS bm_display_name, bm.track_slug, bm.track_display_name,
+                   bm.goal_type, bm.capability, r.scale_type
+            FROM batches b
+            LEFT JOIN official_results o ON o.batch_id = b.batch_id
+            LEFT JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
+            LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+            WHERE {proj_sql} AND b.model_canonical = ? AND b.is_running_placeholder = 0
+            ORDER BY COALESCE(b.finished_at, b.indexed_at) DESC
+            """,
+            [*params, model_canonical],
+        )
+        leg_rows: list[dict[str, Any]] = []
+        if self._can_see_legacy(user):
+            leg_rows = self.db.fetchall(
+                """
+                SELECT lr.*, bm.display_name AS bm_display_name, bm.track_slug,
+                       bm.track_display_name, bm.goal_type, bm.capability
+                FROM legacy_leaderboard_rows lr
+                LEFT JOIN benchmarks bm ON bm.benchmark_slug = lr.benchmark_slug
+                WHERE lr.model_canonical = ?
+                ORDER BY bm.track_slug, lr.benchmark
+                """,
+                (model_canonical,),
+            )
+
+        if not batch_rows and not leg_rows:
+            raise AppError(404, "RESOURCE_NOT_FOUND", f"模型不存在或无授权批次: {model_canonical}")
+
+        model_routes: set[str] = set()
+        checkpoints: set[str] = set()
+        harnesses: set[str] = set()
+        runners: set[str] = set()
+        thinking_modes: set[str] = set()
+
+        # Auth-before-dedup trial scores for this model
+        dedup_scores = self.db.fetchall(
+            f"""
+            WITH auth_tps AS (
+                SELECT t.canonical_trial_key, t.scoring_protocol, t.batch_id, t.reward, t.reward_valid,
+                       b.benchmark_slug, b.dataset_release_id, b.harness, b.harness_version, b.runner,
+                       b.run_scope, b.checkpoint, b.thinking_mode,
+                       bm.display_name AS bm_display_name, bm.track_slug, bm.track_display_name,
+                       bm.goal_type, bm.capability, r.scale_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.canonical_trial_key, t.scoring_protocol
+                           ORDER BY t.source_priority_rank ASC, t.batch_id ASC
+                       ) AS rn
+                FROM trial_protocol_scores t
+                JOIN batches b ON b.batch_id = t.batch_id
+                LEFT JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
+                LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                WHERE {proj_sql} AND b.model_canonical = ? AND b.is_running_placeholder = 0
+            )
+            SELECT benchmark_slug, dataset_release_id, bm_display_name, track_slug, track_display_name,
+                   goal_type, capability, scale_type, harness, harness_version, runner, run_scope,
+                   scoring_protocol, checkpoint, thinking_mode,
+                   MIN(batch_id) AS sample_batch_id,
+                   COUNT(*) AS recorded,
+                   SUM(CASE WHEN reward_valid = 1 THEN 1 ELSE 0 END) AS scored,
+                   AVG(CASE WHEN reward_valid = 1 THEN reward END) AS valid_mean
+            FROM auth_tps
+            WHERE rn = 1
+            GROUP BY benchmark_slug, dataset_release_id, harness, harness_version, runner, run_scope,
+                     scoring_protocol, checkpoint, thinking_mode
+            """,
+            [*params, model_canonical],
+        )
+
+        track_scores: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        harness_matrix: list[dict[str, Any]] = []
+        checkpoint_series_map: dict[tuple[str, str, str, str], list[dict[str, Any]]] = defaultdict(list)
+
+        for d in dedup_scores:
+            raw_v = float(d["valid_mean"]) if d["valid_mean"] is not None else None
+            norm_v = round(normalize_score_to_100(raw_v, d["scale_type"] or "ratio_0_1"), 2) if raw_v is not None else None
+            entry = {
+                "benchmark_slug": d["benchmark_slug"],
+                "dataset_release_id": d["dataset_release_id"],
+                "display_name": d["bm_display_name"] or d["benchmark_slug"] or "Unmapped",
+                "track_slug": d["track_slug"] or "custom",
+                "track_display_name": d["track_display_name"] or "Custom",
+                "goal_type": d["goal_type"] or "extended_baseline",
+                "capability": d["capability"] or "Custom",
+                "harness": d["harness"],
+                "harness_version": d["harness_version"],
+                "runner": d["runner"],
+                "run_scope": d["run_scope"],
+                "scoring_protocol": d["scoring_protocol"],
+                "checkpoint": d["checkpoint"],
+                "thinking_mode": d["thinking_mode"],
+                "score": norm_v,
+                "scored": int(d["scored"] or 0),
+                "recorded": int(d["recorded"] or 0),
+                "batch_id": d["sample_batch_id"],
+                "source": "harbor_dedup",
+            }
+            track_scores[entry["track_slug"]].append(entry)
+            harness_matrix.append(entry)
+            if d.get("checkpoint") and d.get("dataset_release_id") and norm_v is not None:
+                checkpoint_series_map[
+                    (d["dataset_release_id"], d["scoring_protocol"], d["harness"] or "", d.get("thinking_mode") or "default")
+                ].append(
+                    {
+                        "checkpoint": d["checkpoint"],
+                        "score": norm_v,
+                        "scored": int(d["scored"] or 0),
+                        "batch_id": d["sample_batch_id"],
+                    }
+                )
+
+        # Include legacy 2026-11-20 CSV scores (with verified base -> ck checkpoint pairs!)
+        leg_by_col: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for lr in leg_rows:
+            if lr.get("model_col"):
+                model_routes.add(str(lr["model_col"]))
+            if lr.get("checkpoint"):
+                checkpoints.add(str(lr["checkpoint"]))
+            if lr.get("thinking_mode"):
+                thinking_modes.add(str(lr["thinking_mode"]))
+            if lr.get("harness"):
+                harnesses.add(str(lr["harness"]))
+            runners.add("legacy")
+            leg_by_col[str(lr["model_col"])].append(lr)
+            entry = {
+                "benchmark_slug": lr["benchmark_slug"],
+                "dataset_release_id": lr["dataset_release_id"],
+                "display_name": lr["bm_display_name"] or lr["benchmark"],
+                "track_slug": lr["track_slug"] or "extended",
+                "track_display_name": lr["track_display_name"] or "Extended",
+                "goal_type": lr["goal_type"] or "extended_baseline",
+                "capability": lr["capability"] or "Legacy",
+                "harness": lr["harness"],
+                "harness_version": None,
+                "runner": "legacy",
+                "run_scope": "full_split",
+                "scoring_protocol": "legacy-20261120-csv",
+                "checkpoint": lr.get("checkpoint") or "base",
+                "thinking_mode": lr.get("thinking_mode"),
+                "model_col": lr["model_col"],
+                "score": round(float(lr["norm_score_100"]), 2),
+                "scored": None,
+                "recorded": None,
+                "batch_id": None,
+                "source": "legacy_20261120_csv",
+            }
+            track_scores[entry["track_slug"]].append(entry)
+            if lr.get("dataset_release_id"):
+                checkpoint_series_map[
+                    (lr["dataset_release_id"], "legacy-20261120-csv", lr["harness"] or "direct", lr.get("thinking_mode") or "default")
+                ].append(
+                    {
+                        "checkpoint": lr.get("checkpoint") or "base",
+                        "score": round(float(lr["norm_score_100"]), 2),
+                        "model_col": lr["model_col"],
+                        "batch_id": None,
+                    }
+                )
+
+        sanitized_batches = []
+        for b in batch_rows:
+            if b.get("model_route"):
+                model_routes.add(str(b["model_route"]))
+            if b.get("checkpoint"):
+                checkpoints.add(str(b["checkpoint"]))
+            if b.get("harness"):
+                harnesses.add(str(b["harness"]))
+            if b.get("runner"):
+                runners.add(str(b["runner"]))
+            if b.get("thinking_mode"):
+                thinking_modes.add(str(b["thinking_mode"]))
+            off = None
+            if b.get("official_score") is not None:
+                off = {
+                    "metric": b["official_metric"],
+                    "score": b["official_score"],
+                    "denominator": b["official_denominator"],
+                    "source": b["official_source"],
+                }
+            b_copy = dict(b)
+            for k in (
+                "official_metric",
+                "official_score",
+                "official_denominator",
+                "official_source",
+                "bm_display_name",
+                "track_slug",
+                "track_display_name",
+                "goal_type",
+                "capability",
+                "scale_type",
+            ):
+                b_copy.pop(k, None)
+            dto = _sanitize_batch_row(b_copy)
+            dto["official_result"] = off
+            sanitized_batches.append(dto)
+
+        # Only emit checkpoint_trend series that have >= 2 verified distinct checkpoints on SAME (release, protocol, harness, thinking_mode)!
+        checkpoint_trends = []
+        for (rel_id, proto, har, th_mode), pts in sorted(checkpoint_series_map.items()):
+            distinct_cks = {p["checkpoint"] for p in pts}
+            if len(distinct_cks) >= 2:
+                # Deterministic order: base first, then sorted ck*
+                pts_sorted = sorted(pts, key=lambda x: (x["checkpoint"] != "base", x["checkpoint"]))
+                checkpoint_trends.append(
+                    {
+                        "dataset_release_id": rel_id,
+                        "scoring_protocol": proto,
+                        "harness": f"{har} ({th_mode})" if th_mode and th_mode != "default" else har,
+                        "thinking_mode": th_mode,
+                        "points": pts_sorted,
+                    }
+                )
+
+        # Suggest 1-click Gain vs Guardrail compare pair if base & trained checkpoint exist in legacy CSV
+        verdict_suggestion = None
+        cols = sorted(leg_by_col.keys())
+        base_col = next((c for c in cols if "_Trained_" not in c and not c.endswith(("_Pi", "_OpenClaw"))), None)
+        trained_col = next((c for c in cols if "_Trained_" in c and ("_think" in c) == ("_think" in (base_col or ""))), None)
+        if base_col and trained_col:
+            verdict_suggestion = {
+                "kind": "legacy_model",
+                "baseline_col": base_col,
+                "candidate_col": trained_col,
+                "label": f"{base_col} vs {trained_col}",
+            }
+
+        return {
+            "methodology_version": METHODOLOGY_VERSION,
+            "header": {
+                "model_canonical": model_canonical,
+                "model_routes": sorted(model_routes),
+                "checkpoints": sorted(checkpoints),
+                "harnesses": sorted(harnesses),
+                "runners": sorted(runners),
+                "thinking_modes": sorted(thinking_modes),
+                "batch_count": len(sanitized_batches),
+                "legacy_score_count": len(leg_rows),
+            },
+            "verdict_suggestion": verdict_suggestion,
+            "track_scores": dict(track_scores),
+            "harness_matrix": harness_matrix,
+            "checkpoint_trends": checkpoint_trends,
+            "batches": sanitized_batches,
+        }
+
+    # --- 2. Harnesses ---
+
+    def list_harnesses(self, user: AuthUser) -> dict[str, Any]:
+        proj_sql, params = _project_filter_sql(user, "b.project_id")
+        rows = self.db.fetchall(
+            f"""
+            SELECT COALESCE(b.harness, b.runner) AS harness_name,
+                   b.runner,
+                   COUNT(*) AS batch_count,
+                   SUM(b.recorded) AS total_recorded,
+                   SUM(b.scored) AS total_scored,
+                   GROUP_CONCAT(DISTINCT b.harness_version) AS versions_csv,
+                   SUM(b.has_gateway) AS gateway_batches
+            FROM batches b
+            WHERE {proj_sql} AND b.is_running_placeholder = 0
+            GROUP BY COALESCE(b.harness, b.runner), b.runner
+            ORDER BY batch_count DESC, harness_name ASC
+            """,
+            params,
+        )
+        # Count tool-call availability per harness
+        tc_rows = self.db.fetchall(
+            f"""
+            SELECT COALESCE(b.harness, b.runner) AS harness_name,
+                   COUNT(e.tool_call_count) AS tool_observed_trials,
+                   AVG(e.tool_call_count) AS avg_tool_calls
+            FROM episodes e
+            JOIN batches b ON b.batch_id = e.batch_id
+            WHERE {proj_sql} AND b.is_running_placeholder = 0
+            GROUP BY COALESCE(b.harness, b.runner)
+            """,
+            params,
+        )
+        tc_map = {r["harness_name"]: r for r in tc_rows}
+
+        items = []
+        for r in rows:
+            hname = str(r["harness_name"] or "unknown")
+            tc = tc_map.get(hname) or {}
+            versions = sorted({v for v in (r.get("versions_csv") or "").split(",") if v})
+            items.append(
+                {
+                    "harness": hname,
+                    "runner": r["runner"],
+                    "versions": versions,
+                    "batch_count": int(r["batch_count"] or 0),
+                    "total_recorded": int(r["total_recorded"] or 0),
+                    "total_scored": int(r["total_scored"] or 0),
+                    "gateway_batches": int(r["gateway_batches"] or 0),
+                    "tool_observed_trials": int(tc.get("tool_observed_trials") or 0),
+                    "avg_tool_calls": round(float(tc["avg_tool_calls"]), 2) if tc.get("avg_tool_calls") is not None else None,
+                    "recording_boundary": _HARNESS_BOUNDARY_NOTES.get(
+                        hname,
+                        f"前向兼容适配器 ({r['runner']})，按批次实际产物展示可用字段。",
+                    ),
+                }
+            )
+        return {"items": items, "total": len(items), "methodology_version": METHODOLOGY_VERSION}
+
+    def get_harness_profile(self, user: AuthUser, harness_name: str) -> dict[str, Any]:
+        if not harness_name or ".." in harness_name or "\x00" in harness_name:
+            raise AppError(400, "INVALID_PATH_OR_ID", "非法 Harness 标识")
+        proj_sql, params = _project_filter_sql(user, "b.project_id")
+        batches = self.db.fetchall(
+            f"""
+            SELECT b.*, o.metric AS official_metric, o.score AS official_score,
+                   o.denominator AS official_denominator, o.source AS official_source
+            FROM batches b
+            LEFT JOIN official_results o ON o.batch_id = b.batch_id
+            WHERE {proj_sql} AND COALESCE(b.harness, b.runner) = ? AND b.is_running_placeholder = 0
+            ORDER BY COALESCE(b.finished_at, b.indexed_at) DESC
+            """,
+            [*params, harness_name],
+        )
+        if not batches:
+            raise AppError(404, "RESOURCE_NOT_FOUND", f"Harness 不存在或无授权批次: {harness_name}")
+
+        versions = sorted({str(b["harness_version"]) for b in batches if b.get("harness_version")})
+        runners = sorted({str(b["runner"]) for b in batches if b.get("runner")})
+
+        tool_stats = self.db.fetchone(
+            f"""
+            SELECT COUNT(*) AS total_trials,
+                   COUNT(e.tool_call_count) AS tool_observed_trials,
+                   AVG(e.tool_call_count) AS avg_tool_calls,
+                   MAX(e.tool_call_count) AS max_tool_calls,
+                   AVG(e.duration_sec) AS avg_duration_sec,
+                   COUNT(e.reasoning_tokens) AS reasoning_observed_trials
+            FROM episodes e
+            JOIN batches b ON b.batch_id = e.batch_id
+            WHERE {proj_sql} AND COALESCE(b.harness, b.runner) = ? AND b.is_running_placeholder = 0
+            """,
+            [*params, harness_name],
+        ) or {}
+
+        # Auth-before-dedup cross-benchmark score matrix
+        score_matrix = self.db.fetchall(
+            f"""
+            WITH auth_tps AS (
+                SELECT t.canonical_trial_key, t.scoring_protocol, t.batch_id, t.reward, t.reward_valid,
+                       b.model_canonical, b.benchmark_slug, b.dataset_release_id, b.run_scope,
+                       bm.display_name AS bm_display_name, r.scale_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.canonical_trial_key, t.scoring_protocol
+                           ORDER BY t.source_priority_rank ASC, t.batch_id ASC
+                       ) AS rn
+                FROM trial_protocol_scores t
+                JOIN batches b ON b.batch_id = t.batch_id
+                LEFT JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
+                LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                WHERE {proj_sql} AND COALESCE(b.harness, b.runner) = ? AND b.is_running_placeholder = 0
+            )
+            SELECT model_canonical, benchmark_slug, dataset_release_id, bm_display_name,
+                   run_scope, scoring_protocol, scale_type,
+                   MIN(batch_id) AS sample_batch_id,
+                   COUNT(*) AS recorded,
+                   SUM(CASE WHEN reward_valid = 1 THEN 1 ELSE 0 END) AS scored,
+                   AVG(CASE WHEN reward_valid = 1 THEN reward END) AS valid_mean
+            FROM auth_tps
+            WHERE rn = 1
+            GROUP BY model_canonical, benchmark_slug, dataset_release_id, run_scope, scoring_protocol
+            ORDER BY benchmark_slug ASC, model_canonical ASC
+            """,
+            [*params, harness_name],
+        )
+        matrix_out = []
+        for s in score_matrix:
+            raw_v = float(s["valid_mean"]) if s["valid_mean"] is not None else None
+            matrix_out.append(
+                {
+                    "model_canonical": s["model_canonical"],
+                    "benchmark_slug": s["benchmark_slug"],
+                    "dataset_release_id": s["dataset_release_id"],
+                    "display_name": s["bm_display_name"] or s["benchmark_slug"] or "Unmapped",
+                    "run_scope": s["run_scope"],
+                    "scoring_protocol": s["scoring_protocol"],
+                    "score": round(normalize_score_to_100(raw_v, s["scale_type"] or "ratio_0_1"), 2) if raw_v is not None else None,
+                    "scored": int(s["scored"] or 0),
+                    "recorded": int(s["recorded"] or 0),
+                    "batch_id": s["sample_batch_id"],
+                }
+            )
+
+        sanitized_batches = []
+        for b in batches:
+            off = None
+            if b.get("official_score") is not None:
+                off = {
+                    "metric": b["official_metric"],
+                    "score": b["official_score"],
+                    "denominator": b["official_denominator"],
+                    "source": b["official_source"],
+                }
+            bc = dict(b)
+            for k in ("official_metric", "official_score", "official_denominator", "official_source"):
+                bc.pop(k, None)
+            dto = _sanitize_batch_row(bc)
+            dto["official_result"] = off
+            sanitized_batches.append(dto)
+
+        return {
+            "methodology_version": METHODOLOGY_VERSION,
+            "harness": harness_name,
+            "runners": runners,
+            "versions": versions,
+            "recording_boundary": _HARNESS_BOUNDARY_NOTES.get(
+                harness_name,
+                f"前向兼容适配器 ({', '.join(runners)})，按批次实际产物展示可用字段。",
+            ),
+            "tool_profile": {
+                "has_tool_events": int(tool_stats.get("tool_observed_trials") or 0) > 0,
+                "total_trials": int(tool_stats.get("total_trials") or 0),
+                "tool_observed_trials": int(tool_stats.get("tool_observed_trials") or 0),
+                "avg_tool_calls": round(float(tool_stats["avg_tool_calls"]), 2)
+                if tool_stats.get("avg_tool_calls") is not None
+                else None,
+                "max_tool_calls": int(tool_stats["max_tool_calls"]) if tool_stats.get("max_tool_calls") is not None else None,
+                "avg_duration_sec": round(float(tool_stats["avg_duration_sec"]), 2)
+                if tool_stats.get("avg_duration_sec") is not None
+                else None,
+                "reasoning_observed_trials": int(tool_stats.get("reasoning_observed_trials") or 0),
+            },
+            "score_matrix": matrix_out,
+            "batches": sanitized_batches,
+        }
+
+    # --- 3. Benchmarks & Hardest Tasks ---
+
+    def list_benchmarks(self, user: AuthUser) -> dict[str, Any]:
+        proj_sql, params = _project_filter_sql(user, "project_id")
+        bms = self.db.fetchall("SELECT * FROM benchmarks ORDER BY track_slug, display_name")
+        rels = self.db.fetchall("SELECT * FROM dataset_releases ORDER BY dataset_release_id")
+        cnts = self.db.fetchall(
+            f"""
+            SELECT benchmark_slug, COUNT(*) AS batch_count, SUM(recorded) AS recorded_trials
+            FROM batches
+            WHERE {proj_sql} AND benchmark_slug IS NOT NULL AND is_running_placeholder = 0
+            GROUP BY benchmark_slug
+            """,
+            params,
+        )
+        cnt_map = {r["benchmark_slug"]: r for r in cnts}
+        rels_by_bm: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for rel in rels:
+            rels_by_bm[rel["benchmark_slug"]].append(rel)
+
+        items = []
+        for bm in bms:
+            slug = bm["benchmark_slug"]
+            meta = json.loads(bm.get("metadata_json") or "{}")
+            c = cnt_map.get(slug) or {}
+            items.append(
+                {
+                    "benchmark_slug": slug,
+                    "display_name": bm["display_name"],
+                    "track_slug": bm["track_slug"],
+                    "track_display_name": bm["track_display_name"],
+                    "goal_type": bm["goal_type"],
+                    "capability": bm["capability"],
+                    "modality": bm["modality"],
+                    "language": bm["language"],
+                    "status": bm["status"],
+                    "core_14": bool(meta.get("core_14")),
+                    "batch_count": int(c.get("batch_count") or 0),
+                    "recorded_trials": int(c.get("recorded_trials") or 0),
+                    "releases": rels_by_bm.get(slug, []),
+                }
+            )
+        return {"items": items, "total": len(items), "methodology_version": METHODOLOGY_VERSION}
+
+    def get_benchmark_profile(self, user: AuthUser, benchmark_slug: str) -> dict[str, Any]:
+        validate_safe_id(benchmark_slug, "benchmark_slug")
+        bm = self.db.fetchone("SELECT * FROM benchmarks WHERE benchmark_slug = ?", (benchmark_slug,))
+        if bm is None:
+            raise AppError(404, "RESOURCE_NOT_FOUND", f"基准不存在: {benchmark_slug}")
+        bm_out = dict(bm)
+        bm_out["metadata"] = json.loads(bm_out.pop("metadata_json") or "{}")
+
+        rels = self.db.fetchall(
+            "SELECT * FROM dataset_releases WHERE benchmark_slug = ? ORDER BY dataset_release_id",
+            (benchmark_slug,),
+        )
+        proj_sql, params = _project_filter_sql(user, "b.project_id")
+        batch_rows = self.db.fetchall(
+            f"""
+            SELECT b.*, o.metric AS official_metric, o.score AS official_score,
+                   o.denominator AS official_denominator, o.source AS official_source
+            FROM batches b
+            LEFT JOIN official_results o ON o.batch_id = b.batch_id
+            WHERE {proj_sql} AND b.benchmark_slug = ?
+            ORDER BY b.is_running_placeholder DESC, COALESCE(b.finished_at, b.indexed_at) DESC
+            """,
+            [*params, benchmark_slug],
+        )
+        sanitized_batches = []
+        scatter_configs: list[dict[str, Any]] = []
+        seen_sc: set[tuple[str, str]] = set()
+        for b in batch_rows:
+            if not b["is_running_placeholder"] and b.get("dataset_release_id") and b.get("scoring_protocol"):
+                sc_key = (b["dataset_release_id"], b["scoring_protocol"])
+                if sc_key not in seen_sc:
+                    seen_sc.add(sc_key)
+                    scatter_configs.append(
+                        {"dataset_release_id": b["dataset_release_id"], "scoring_protocol": b["scoring_protocol"]}
+                    )
+            off = None
+            if b.get("official_score") is not None:
+                off = {
+                    "metric": b["official_metric"],
+                    "score": b["official_score"],
+                    "denominator": b["official_denominator"],
+                    "source": b["official_source"],
+                }
+            bc = dict(b)
+            for k in ("official_metric", "official_score", "official_denominator", "official_source"):
+                bc.pop(k, None)
+            dto = _sanitize_batch_row(bc)
+            dto["official_result"] = off
+            sanitized_batches.append(dto)
+
+        # Mini leaderboard (auth-before-dedup) + legacy CSV rows for this benchmark
+        mini_lb: list[dict[str, Any]] = []
+        dedup = self.db.fetchall(
+            f"""
+            WITH auth_tps AS (
+                SELECT t.canonical_trial_key, t.scoring_protocol, t.batch_id, t.reward, t.reward_valid,
+                       b.model_canonical, b.harness, b.harness_version, b.runner, b.run_scope,
+                       b.dataset_release_id, r.scale_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.canonical_trial_key, t.scoring_protocol
+                           ORDER BY t.source_priority_rank ASC, t.batch_id ASC
+                       ) AS rn
+                FROM trial_protocol_scores t
+                JOIN batches b ON b.batch_id = t.batch_id
+                LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                WHERE {proj_sql} AND b.benchmark_slug = ? AND b.is_running_placeholder = 0
+            )
+            SELECT model_canonical, harness, harness_version, runner, run_scope,
+                   dataset_release_id, scoring_protocol, scale_type,
+                   MIN(batch_id) AS batch_id,
+                   COUNT(*) AS recorded,
+                   SUM(CASE WHEN reward_valid = 1 THEN 1 ELSE 0 END) AS scored,
+                   AVG(CASE WHEN reward_valid = 1 THEN reward END) AS valid_mean
+            FROM auth_tps
+            WHERE rn = 1
+            GROUP BY model_canonical, harness, harness_version, runner, run_scope, dataset_release_id, scoring_protocol
+            ORDER BY valid_mean DESC
+            """,
+            [*params, benchmark_slug],
+        )
+        for d in dedup:
+            rv = float(d["valid_mean"]) if d["valid_mean"] is not None else None
+            mini_lb.append(
+                {
+                    "model_canonical": d["model_canonical"],
+                    "harness": d["harness"],
+                    "harness_version": d["harness_version"],
+                    "runner": d["runner"],
+                    "run_scope": d["run_scope"],
+                    "dataset_release_id": d["dataset_release_id"],
+                    "scoring_protocol": d["scoring_protocol"],
+                    "score": round(normalize_score_to_100(rv, d["scale_type"] or "ratio_0_1"), 2) if rv is not None else None,
+                    "scored": int(d["scored"] or 0),
+                    "recorded": int(d["recorded"] or 0),
+                    "batch_id": d["batch_id"],
+                }
+            )
+        if self._can_see_legacy(user):
+            leg = self.db.fetchall(
+                "SELECT * FROM legacy_leaderboard_rows WHERE benchmark_slug = ? ORDER BY norm_score_100 DESC",
+                (benchmark_slug,),
+            )
+            for lr in leg:
+                mini_lb.append(
+                    {
+                        "model_canonical": lr["model_col"],
+                        "harness": lr["harness"],
+                        "harness_version": None,
+                        "runner": "legacy",
+                        "run_scope": "full_split",
+                        "dataset_release_id": lr["dataset_release_id"],
+                        "scoring_protocol": "legacy-20261120-csv",
+                        "score": round(float(lr["norm_score_100"]), 2),
+                        "scored": None,
+                        "recorded": None,
+                        "batch_id": None,
+                    }
+                )
+        mini_lb.sort(key=lambda x: (x["score"] is not None, x["score"] if x["score"] is not None else -1.0), reverse=True)
+
+        # Task metadata breakdown (category & difficulty counts across non-holdout releases, or all if holdout_read)
+        rel_ids = [
+            r["dataset_release_id"]
+            for r in rels
+            if (
+                str(r.get("split") or "").lower() != "holdout"
+                and "holdout" not in str(r.get("dataset_release_id") or "").lower()
+            )
+            or has_scope(user, "dataset:holdout_read")
+        ]
+        domain_breakdown: list[dict[str, Any]] = []
+        difficulty_breakdown: list[dict[str, Any]] = []
+        task_total = 0
+        if rel_ids:
+            ph = ",".join("?" for _ in rel_ids)
+            task_total = int(
+                self.db.fetchone(f"SELECT COUNT(*) AS c FROM task_definitions WHERE dataset_release_id IN ({ph})", rel_ids)["c"]  # type: ignore[index]
+            )
+            domain_breakdown = self.db.fetchall(
+                f"""
+                SELECT COALESCE(category, 'unspecified') AS category, COUNT(*) AS count
+                FROM task_definitions
+                WHERE dataset_release_id IN ({ph})
+                GROUP BY COALESCE(category, 'unspecified')
+                ORDER BY count DESC
+                LIMIT 20
+                """,
+                rel_ids,
+            )
+            difficulty_breakdown = self.db.fetchall(
+                f"""
+                SELECT COALESCE(difficulty, 'unspecified') AS difficulty, COUNT(*) AS count
+                FROM task_definitions
+                WHERE dataset_release_id IN ({ph})
+                GROUP BY COALESCE(difficulty, 'unspecified')
+                ORDER BY count DESC
+                """,
+                rel_ids,
+            )
+
+        return {
+            "methodology_version": METHODOLOGY_VERSION,
+            "benchmark": bm_out,
+            "releases": rels,
+            "scatter_configs": scatter_configs,
+            "mini_leaderboard": mini_lb,
+            "task_summary": {
+                "indexed_tasks": task_total,
+                "by_category": domain_breakdown,
+                "by_difficulty": difficulty_breakdown,
+            },
+            "batches": sanitized_batches,
+        }
+
+    def get_benchmark_hardest_tasks(
+        self,
+        user: AuthUser,
+        benchmark_slug: str,
+        *,
+        limit: int = 30,
+    ) -> dict[str, Any]:
+        validate_safe_id(benchmark_slug, "benchmark_slug")
+        bm = self.db.fetchone("SELECT * FROM benchmarks WHERE benchmark_slug = ?", (benchmark_slug,))
+        if bm is None:
+            raise AppError(404, "RESOURCE_NOT_FOUND", f"基准不存在: {benchmark_slug}")
+
+        proj_sql, params = _project_filter_sql(user, "b.project_id")
+        holdout_clause = ""
+        if not has_scope(user, "dataset:holdout_read"):
+            holdout_clause = (
+                "AND LOWER(COALESCE(r.split, '')) != 'holdout' "
+                "AND LOWER(COALESCE(t.dataset_release_id, b.dataset_release_id, '')) NOT LIKE '%holdout%' "
+                "AND LOWER(COALESCE(b.raw_dataset_name, '')) NOT LIKE '%holdout%' "
+                "AND LOWER(COALESCE(b.batch_name, '')) NOT LIKE '%holdout%' "
+                f"AND {sql_task_holdout_exclude_clause('COALESCE(t.dataset_release_id, b.dataset_release_id)', 't.task_id')}"
+            )
+
+        # Auth-before-dedup on primary batch protocol + paired (batch_id, trial_id) from the exact same episode row!
+        rows = self.db.fetchall(
+            f"""
+            WITH auth_dedup AS (
+                SELECT t.task_id, t.batch_id, t.trial_id, t.reward, t.reward_valid,
+                       e.duration_sec,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.canonical_trial_key, t.scoring_protocol
+                           ORDER BY t.source_priority_rank ASC, t.batch_id ASC
+                       ) AS rn
+                FROM trial_protocol_scores t
+                JOIN batches b ON b.batch_id = t.batch_id
+                JOIN episodes e ON e.batch_id = t.batch_id AND e.trial_id = t.trial_id
+                LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                WHERE {proj_sql}
+                  AND b.benchmark_slug = ?
+                  AND b.is_running_placeholder = 0
+                  AND t.scoring_protocol = b.scoring_protocol
+                  {holdout_clause}
+            )
+            SELECT task_id,
+                   COUNT(*) AS total_attempts,
+                   SUM(CASE WHEN reward_valid = 1 THEN 1 ELSE 0 END) AS valid_attempts,
+                   SUM(CASE WHEN reward_valid = 1 AND reward >= 1.0 THEN 1 ELSE 0 END) AS passed_attempts,
+                   SUM(CASE WHEN reward_valid = 0 THEN 1 ELSE 0 END) AS fault_attempts,
+                   AVG(CASE WHEN reward_valid = 1 THEN reward END) AS mean_reward,
+                   AVG(duration_sec) AS avg_duration_sec,
+                   MIN(batch_id || '|' || trial_id) AS sample_pair
+            FROM auth_dedup
+            WHERE rn = 1
+            GROUP BY task_id
+            HAVING valid_attempts > 0
+            ORDER BY mean_reward ASC, fault_attempts DESC, total_attempts DESC
+            LIMIT ?
+            """,
+            [*params, benchmark_slug, limit],
+        )
+        items = []
+        for r in rows:
+            valid_n = int(r["valid_attempts"] or 0)
+            pass_n = int(r["passed_attempts"] or 0)
+            mr = float(r["mean_reward"]) if r["mean_reward"] is not None else None
+            pair_raw = str(r.get("sample_pair") or "")
+            s_bid, _, s_tid = pair_raw.partition("|")
+            items.append(
+                {
+                    "task_id": r["task_id"],
+                    "total_attempts": int(r["total_attempts"] or 0),
+                    "valid_attempts": valid_n,
+                    "passed_attempts": pass_n,
+                    "fault_attempts": int(r["fault_attempts"] or 0),
+                    "pass_rate_pct": round((pass_n / valid_n) * 100.0, 2) if valid_n > 0 else None,
+                    "mean_reward": round(mr, 4) if mr is not None else None,
+                    "avg_duration_sec": round(float(r["avg_duration_sec"]), 2)
+                    if r.get("avg_duration_sec") is not None
+                    else None,
+                    "sample_batch_id": s_bid,
+                    "sample_trial_id": s_tid,
+                }
+            )
+        return {
+            "benchmark_slug": benchmark_slug,
+            "items": items,
+            "total": len(items),
+            "methodology_version": METHODOLOGY_VERSION,
+        }
+
+    # --- 4. Constraint-Based Recommender (100% real Harbor/historical fields only) ---
+
+    def recommend(self, user: AuthUser, payload: dict[str, Any]) -> dict[str, Any]:
+        track_weights: dict[str, float] = payload.get("track_weights") or {
+            "agentic": 0.5,
+            "llm-text": 0.3,
+            "vision-image": 0.2,
+        }
+        min_score = payload.get("min_score_pct")
+        max_duration = payload.get("max_avg_duration_sec")
+        max_tokens = payload.get("max_avg_tokens")
+        allowed_harnesses = set(payload.get("allowed_harnesses") or [])
+        allowed_runners = set(payload.get("allowed_runners") or [])
+        formal_only = bool(payload.get("formal_only", False))
+
+        proj_sql, params = _project_filter_sql(user, "b.project_id")
+        where = [proj_sql, "b.is_running_placeholder = 0", "b.dataset_release_id IS NOT NULL", "t.scoring_protocol = b.scoring_protocol"]
+        eff_where = [proj_sql, "b.is_running_placeholder = 0"]
+        if formal_only:
+            where.append("b.run_scope = 'full_split'")
+            eff_where.append("b.run_scope = 'full_split'")
+
+        rows = self.db.fetchall(
+            f"""
+            WITH auth_tps AS (
+                SELECT t.canonical_trial_key, t.scoring_protocol, t.batch_id, t.reward, t.reward_valid,
+                       b.model_canonical, b.harness, b.runner, b.run_scope, b.dataset_release_id,
+                       bm.track_slug, r.scale_type,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY t.canonical_trial_key, t.scoring_protocol
+                           ORDER BY t.source_priority_rank ASC, t.batch_id ASC
+                       ) AS rn
+                FROM trial_protocol_scores t
+                JOIN batches b ON b.batch_id = t.batch_id
+                JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
+                JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                WHERE {' AND '.join(where)}
+            )
+            SELECT model_canonical, harness, runner, track_slug, dataset_release_id, scoring_protocol, scale_type,
+                   MIN(batch_id) AS sample_batch_id,
+                   SUM(CASE WHEN reward_valid = 1 THEN 1 ELSE 0 END) AS scored,
+                   AVG(CASE WHEN reward_valid = 1 THEN reward END) AS valid_mean
+            FROM auth_tps
+            WHERE rn = 1
+            GROUP BY model_canonical, harness, runner, track_slug, dataset_release_id, scoring_protocol
+            """,
+            params,
+        )
+
+        # Gather per (model_canonical, harness, runner) real efficiency metrics (aligned with formal_only scope!)
+        eff_rows = self.db.fetchall(
+            f"""
+            SELECT b.model_canonical, COALESCE(b.harness, b.runner) AS harness, b.runner,
+                   AVG(e.duration_sec) AS avg_duration_sec,
+                   AVG(CASE WHEN e.input_tokens IS NOT NULL AND e.output_tokens IS NOT NULL
+                            THEN e.input_tokens + e.output_tokens END) AS avg_total_tokens
+            FROM episodes e
+            JOIN batches b ON b.batch_id = e.batch_id
+            WHERE {' AND '.join(eff_where)}
+            GROUP BY b.model_canonical, COALESCE(b.harness, b.runner), b.runner
+            """,
+            params,
+        )
+        eff_map = {(r["model_canonical"], r["harness"], r["runner"]): r for r in eff_rows}
+
+        candidates: dict[tuple[str, str, str], dict[str, Any]] = {}
+        for r in rows:
+            mc = str(r.get("model_canonical") or "unknown")
+            har = str(r.get("harness") or r.get("runner") or "unknown")
+            run = str(r.get("runner") or "harbor")
+            if allowed_harnesses and har not in allowed_harnesses:
+                continue
+            if allowed_runners and run not in allowed_runners:
+                continue
+            if r["valid_mean"] is None:
+                continue
+            key = (mc, har, run)
+            if key not in candidates:
+                eff = eff_map.get(key) or {}
+                candidates[key] = {
+                    "model_canonical": mc,
+                    "harness": har,
+                    "runner": run,
+                    "track_buckets": defaultdict(list),
+                    "batch_ids": set(),
+                    "avg_duration_sec": round(float(eff["avg_duration_sec"]), 2)
+                    if eff.get("avg_duration_sec") is not None
+                    else None,
+                    "avg_total_tokens": round(float(eff["avg_total_tokens"]), 1)
+                    if eff.get("avg_total_tokens") is not None
+                    else None,
+                }
+            score100 = normalize_score_to_100(float(r["valid_mean"]), r["scale_type"])
+            candidates[key]["track_buckets"][r["track_slug"]].append(score100)
+            candidates[key]["batch_ids"].add(r["sample_batch_id"])
+
+        ranked: list[dict[str, Any]] = []
+        for c in candidates.values():
+            w_num = 0.0
+            w_den = 0.0
+            track_avgs: dict[str, float] = {}
+            for ts, vals in c["track_buckets"].items():
+                avg_t = math.fsum(vals) / len(vals)
+                track_avgs[ts] = round(avg_t, 2)
+                w = float(track_weights.get(ts, 0.1))
+                if w > 0:
+                    w_num += w * avg_t
+                    w_den += w
+            if w_den <= 0:
+                continue
+            weighted_score = round(w_num / w_den, 2)
+
+            if finite(min_score) and weighted_score < float(min_score):
+                continue
+            if finite(max_duration) and (c["avg_duration_sec"] is None or c["avg_duration_sec"] > float(max_duration)):
+                continue
+            if finite(max_tokens) and (c["avg_total_tokens"] is None or c["avg_total_tokens"] > float(max_tokens)):
+                continue
+
+            notes = []
+            if c["avg_duration_sec"] is not None:
+                notes.append(f"平均耗时 {c['avg_duration_sec']:.1f}s")
+            else:
+                notes.append("耗时缺测")
+            if c["avg_total_tokens"] is not None:
+                notes.append(f"均总 Token {c['avg_total_tokens']:.0f}")
+            ranked.append(
+                {
+                    "subject_id": f"model:{c['model_canonical']}|harness:{c['harness']}",
+                    "model_canonical": c["model_canonical"],
+                    "harness": c["harness"],
+                    "runner": c["runner"],
+                    "weighted_score": weighted_score,
+                    "track_scores": track_avgs,
+                    "covered_tracks": len(track_avgs),
+                    "avg_duration_sec": c["avg_duration_sec"],
+                    "avg_total_tokens": c["avg_total_tokens"],
+                    "sample_batch_ids": sorted(c["batch_ids"]),
+                    "pareto_optimal": False,
+                    "tradeoff_note": " · ".join(notes),
+                }
+            )
+
+        ranked.sort(key=lambda x: (-x["weighted_score"], x["avg_duration_sec"] if x["avg_duration_sec"] is not None else 1e9))
+        # Mark Pareto frontier over (weighted_score↑, avg_duration_sec↓) for candidates with valid duration
+        with_dur = [r for r in ranked if r["avg_duration_sec"] is not None]
+        with_dur.sort(key=lambda x: (x["avg_duration_sec"], -x["weighted_score"]))
+        best_s = -1e9
+        for r in with_dur:
+            if r["weighted_score"] > best_s:
+                r["pareto_optimal"] = True
+                best_s = r["weighted_score"]
+
+        return {
+            "methodology_version": METHODOLOGY_VERSION,
+            "constraints": {
+                "track_weights": track_weights,
+                "min_score_pct": min_score,
+                "max_avg_duration_sec": max_duration,
+                "max_avg_tokens": max_tokens,
+                "formal_only": formal_only,
+            },
+            "items": ranked,
+            "total": len(ranked),
+        }

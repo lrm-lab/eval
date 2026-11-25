@@ -1,0 +1,2 @@
+{"id": "smoke-arith-001", "prompt": "Compute 2 + 2 and reply with only the integer.", "answer": "4"}
+{"id": "smoke-echo-002", "prompt": "Reply with the exact uppercase token: READY", "answer": "READY"}

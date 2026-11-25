@@ -1,0 +1,504 @@
+--- a/framework/run.py	2026-11-25 03:20:55.186689300 +0000
++++ b/framework/run.py	2026-11-25 04:00:33.550145451 +0000
+@@ -24,6 +24,7 @@
+ import report as batch_report
+ import vlmevalkit
+ from training_capture import load_training_capture
++import publish_v2
+ 
+ SHARED = Path(__file__).resolve().parent.parent
+ DEFAULT_CONFIG = Path(__file__).resolve().with_name("harbor.toml")
+@@ -83,25 +84,47 @@
+         path.chmod(0o755)
+ 
+ 
+-def publish_vlmevalkit_trajectory(trial, result, model):
++def publish_vlmevalkit_trajectory(evidence_store, batch_name, generation_id, trial_id, result, model):
+     trajectory, media = vlmevalkit.atif_trajectory(result, model)
+-    for relative, data in media.items():
+-        path = trial / relative
+-        publication_dir(path.parent)
+-        atomic_write(path, data)
+-    atomic_write(trial / "trajectory.json", (json.dumps(trajectory, ensure_ascii=False) + "\n").encode())
++    media_refs = []
++    for idx, (relative, data) in enumerate(sorted(media.items())):
++        m_ref = publish_v2.publish_restricted_bytes(
++            evidence_store_dir=evidence_store,
++            batch_name=batch_name,
++            generation_id=generation_id,
++            trial_id=trial_id,
++            filename=str(relative),
++            data=data,
++        )
++        m_ref["source"] = "trial_media_dir"
++        m_ref["inline_ordinal"] = idx
++        media_refs.append(m_ref)
++    traj_ref = publish_v2.publish_restricted_bytes(
++        evidence_store_dir=evidence_store,
++        batch_name=batch_name,
++        generation_id=generation_id,
++        trial_id=trial_id,
++        filename="trajectory.json",
++        data=(json.dumps(trajectory, ensure_ascii=False) + "\n").encode(),
++    )
++    return traj_ref, media_refs
+ 
+ 
+-def publish(job, output, metadata, training_dir=None, source_host=None, *, resumed=False, reward_key="reward"):
+-    """Publish only finished trial receipts; preserve valid zero rewards."""
++def publish(job, output, metadata, training_dir=None, source_host=None, *, resumed=False, reward_key="reward", evidence_store_dir=None):
++    """Publish only finished trial receipts into immutable generations/<generation_id>/ with 0700/0600 restricted evidence."""
+     publication_dir(output)
+-    with (output / ".publish.lock").open("a") as lock:
+-        fcntl.flock(lock, fcntl.LOCK_EX)
++    with publish_v2.publish_lock(output):
++        generation_id = publish_v2.new_generation_id()
++        evidence_store = publish_v2.ensure_private_evidence_store(evidence_store_dir, job_dir=job)
++        staged_digests = []
++        eff_host = source_host or batch_guard.source_host()
++        pub_origin = publish_v2.public_source_locator(eff_host, job, output.name)
++        legacy_origin = {"host": eff_host, "path": str(job.resolve())}
+         batch_status = output / "batch-status.json"
+         if batch_status.is_file():
+-            origin = {"host": source_host or batch_guard.source_host(), "path": str(job.resolve())}
+-            if read_json(batch_status).get("source") != origin:
++            if read_json(batch_status).get("source") not in (pub_origin, legacy_origin):
+                 raise ValueError(f"Batch already belongs to a different job: {output}")
++        publish_v2.record_private_source_locator(evidence_store, output.name, eff_host, job)
+         manifest = output / "manifest.json"
+         if manifest.exists() and read_json(manifest) != metadata:
+             raise ValueError(f"Batch already belongs to a different job: {output}")
+@@ -120,9 +143,10 @@
+             if str(UUID(trial_id)) != trial_id or trial_id in identifiers:
+                 raise ValueError(f"Invalid or duplicate Harbor trial ID: {trial_id}")
+             identifiers.add(trial_id)
+-            relative = Path("trials") / trial_id
++            relative = Path("generations") / generation_id / "trials" / trial_id
+             trial = output / relative
+             publication_dir(trial)
++            trial_ev_refs = {}
+             agent_info = result.get("agent_info") or {}
+             rewards = (result.get("verifier_result") or {}).get("rewards") or {}
+             receipt_reward_key = reward_key if reward_key in rewards else "reward"
+@@ -149,8 +173,16 @@
+                     steps = None
+                 if isinstance(steps, list) and all(isinstance(step, dict) for step in steps):
+                     trace_status = "has_tool_calls" if any(step.get("tool_calls") for step in steps) else "no_tool_calls_recorded"
+-                    trace_path = str(relative / "trajectory.json")
+-                    atomic_write(trial / "trajectory.json", data)
++                    t_ref = publish_v2.publish_restricted_bytes(
++                        evidence_store_dir=evidence_store,
++                        batch_name=output.name,
++                        generation_id=generation_id,
++                        trial_id=trial_id,
++                        filename="trajectory.json",
++                        data=data,
++                    )
++                    trial_ev_refs["trajectory"] = t_ref
++                    trace_path = None
+                 else:
+                     trace_status = "invalid"
+             gateway_path = None
+@@ -163,8 +195,16 @@
+                     gateway_status = "invalid"
+                 else:
+                     gateway_status = ("captured" if capture["validated"] else "unvalidated") if capture["turns"] else "empty"
+-                    gateway_path = str(relative / gateway_capture.TRACE_NAME)
+-                    atomic_write(trial / gateway_capture.TRACE_NAME, data)
++                    g_ref = publish_v2.publish_restricted_bytes(
++                        evidence_store_dir=evidence_store,
++                        batch_name=output.name,
++                        generation_id=generation_id,
++                        trial_id=trial_id,
++                        filename=gateway_capture.TRACE_NAME,
++                        data=data,
++                    )
++                    trial_ev_refs["gateway"] = g_ref
++                    gateway_path = None
+             evidence = {
+                 "id": trial_id, "task_name": result["task_name"], "task_checksum": result.get("task_checksum"),
+                 "agent_info": agent_info, "verifier_rewards": rewards, "reward_key": receipt_reward_key,
+@@ -176,12 +216,29 @@
+             if usage:
+                 evidence["usage"] = usage
+             if "direct_result" in result:
+-                evidence["direct_result"] = result["direct_result"]
++                dr = result["direct_result"] if isinstance(result["direct_result"], dict) else {}
++                dqa_ref = publish_v2.publish_restricted_bytes(
++                    evidence_store_dir=evidence_store,
++                    batch_name=output.name,
++                    generation_id=generation_id,
++                    trial_id=trial_id,
++                    filename="direct-qa.json",
++                    data=(json.dumps(dr, ensure_ascii=False) + "\n").encode(),
++                )
++                trial_ev_refs["direct_qa"] = dqa_ref
++                evidence["direct_result"] = {
++                    k: (publish_v2.redact_public_text(v) if isinstance(v, str) else v)
++                    for k, v in dr.items()
++                    if k not in ("prompt", "prediction", "answer", "expected", "reference_answer", "messages")
++                }
++                evidence["direct_result"]["qa_stored_in_evidence_store"] = True
+                 trace_status = "direct_response"
+             if "vlmeval_result" in result:
+                 vlm = result["vlmeval_result"]
+                 evidence["vlmeval_result"] = {
+-                    key: value for key, value in vlm.items() if key not in ("request_messages", "prediction")
++                    key: (publish_v2.redact_public_text(value) if isinstance(value, str) else value)
++                    for key, value in vlm.items()
++                    if key not in ("request_messages", "prediction")
+                 }
+                 http_status = vlm.get("http_status")
+                 if error and isinstance(http_status, int) and 200 <= http_status < 300:
+@@ -190,14 +247,49 @@
+                     diagnostic.update(kind="model_gateway_http_error", summary=f"模型网关返回 HTTP {http_status}。")
+                 elif not error and vlm.get("request_messages") and vlm.get("prediction"):
+                     try:
+-                        publish_vlmevalkit_trajectory(trial, result, metadata["model"])
++                        v_traj_ref, v_media_refs = publish_vlmevalkit_trajectory(
++                            evidence_store, output.name, generation_id, trial_id, result, metadata["model"]
++                        )
+                     except (KeyError, TypeError, ValueError) as exc:
+                         print(f"Could not convert VLMEvalKit trace {trial_id}: {type(exc).__name__}",
+                               file=sys.stderr)
+                         trace_status = "invalid"
+                     else:
++                        trial_ev_refs["trajectory"] = v_traj_ref
++                        if v_media_refs:
++                            trial_ev_refs["media"] = v_media_refs
+                         trace_status = "no_tool_calls_recorded"
+-                        trace_path = str(relative / "trajectory.json")
++                        trace_path = None
++            phase_timings = publish_v2.extract_phase_timings(result)
++            if phase_timings:
++                evidence["phase_timings"] = phase_timings
++            tool_call_count = publish_v2.count_atif_tool_calls(trajectory if trajectory.is_file() else None)
++            if tool_call_count is not None:
++                evidence["tool_call_count"] = tool_call_count
++            vo_ref = publish_v2.publish_verifier_output(
++                receipt.parent,
++                evidence_store_dir=evidence_store,
++                batch_name=output.name,
++                generation_id=generation_id,
++                trial_id=trial_id,
++            )
++            if vo_ref is not None:
++                trial_ev_refs["verifier_output"] = vo_ref
++            public_diagnostic = None
++            if diagnostic is not None:
++                fail_ref = publish_v2.publish_restricted_bytes(
++                    evidence_store_dir=evidence_store,
++                    batch_name=output.name,
++                    generation_id=generation_id,
++                    trial_id=trial_id,
++                    filename="failure-locator.json",
++                    data=(json.dumps(diagnostic, ensure_ascii=False) + "\n").encode(),
++                )
++                trial_ev_refs["failure_locator"] = fail_ref
++                public_diagnostic = publish_v2.sanitize_public_failure(
++                    diagnostic, job_dir=job, batch_name=output.name
++                )
++            evidence["failure"] = public_diagnostic
+             atomic_write(trial / "result.json", (json.dumps(evidence, ensure_ascii=False) + "\n").encode())
+             training_path = None
+             training_status = "not_captured"
+@@ -205,10 +297,26 @@
+             if training_dir and (training_dir / trial_id).exists():
+                 capture, trace_bytes = load_training_capture(training_dir, trial_id)
+                 checkpoint = capture["checkpoint"]
+-                training_path = str(relative / "training_trace.json")
++                tr_ref = publish_v2.publish_restricted_bytes(
++                    evidence_store_dir=evidence_store,
++                    batch_name=output.name,
++                    generation_id=generation_id,
++                    trial_id=trial_id,
++                    filename="training_trace.json",
++                    data=trace_bytes,
++                )
++                cap_ref = publish_v2.publish_restricted_bytes(
++                    evidence_store_dir=evidence_store,
++                    batch_name=output.name,
++                    generation_id=generation_id,
++                    trial_id=trial_id,
++                    filename="capture.json",
++                    data=(json.dumps(capture, ensure_ascii=False) + "\n").encode(),
++                )
++                trial_ev_refs["training"] = tr_ref
++                trial_ev_refs["training_capture"] = cap_ref
++                training_path = None
+                 training_status = "validated" if status == "scored" and reward is not None else "unscored"
+-                atomic_write(trial / "training_trace.json", trace_bytes)
+-                atomic_write(trial / "capture.json", (json.dumps(capture, ensure_ascii=False) + "\n").encode())
+             records.append({
+                 "schema_version": 1, "trial_id": trial_id, "dataset": metadata["dataset"],
+                 "task_id": result["task_name"], "task_checksum": result.get("task_checksum"),
+@@ -216,12 +324,17 @@
+                 "runner": metadata.get("runner", "harbor"),
+                 "model_route": metadata["model"], "checkpoint": checkpoint,
+                 "status": status, "reward": reward, "verifier_rewards": rewards, "exception_type": error,
+-                "failure": diagnostic,
++                "failure": public_diagnostic,
+                 "usage": usage,
+                 "result": str(relative / "result.json"), "trajectory": trace_path,
+                 "trajectory_status": trace_status, "training_trace": training_path, "training_status": training_status,
+                 "gateway_trace": gateway_path, "gateway_status": gateway_status,
++                "started_at": result.get("started_at"), "finished_at": result.get("finished_at"),
++                "phase_timings": phase_timings, "tool_call_count": tool_call_count,
++                "reward_valid": bool(status == "scored" and reward is not None),
++                "evidence_refs": trial_ev_refs,
+             })
++            staged_digests.append({"trial_id": trial_id, **trial_ev_refs})
+         index = output / "episodes.jsonl"
+         if records or (resumed and index.is_file()):
+             merged = {}
+@@ -239,6 +352,12 @@
+                 merged[row["trial_id"]] = row
+             atomic_write(index, "".join(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n"
+                                          for row in merged.values()).encode())
++        publish_v2.stage_pending_generation(
++            output,
++            generation_id=generation_id,
++            evidence_store_dir=evidence_store,
++            trial_records=staged_digests,
++        )
+         return len(records)
+ 
+ 
+@@ -267,16 +386,31 @@
+     return metrics
+ 
+ 
+-def write_batch_report(output, planned=None):
+-    try:
+-        _, rows, metadata, status = batch_report.read_batch(output)
+-        official = output / "official-result.json"
+-        result = batch_report.summarize(rows, metadata, status, planned=planned,
+-                                        official=official if official.is_file() else None)
+-        batch_report.write_report(output / "batch-report.json",
+-                                  json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
+-    except (OSError, ValueError, TypeError, KeyError) as error:
+-        print(f"Could not write batch report: {error}", file=sys.stderr)
++def write_batch_report(output, planned=None, *, evidence_store_dir=None):
++    with publish_v2.publish_lock(output):
++        if not (output / "episodes.jsonl").is_file():
++            print(f"Skipping batch report & v2 manifest sealing: missing episodes.jsonl in {output}", file=sys.stderr)
++            return
++        try:
++            _, rows, metadata, status = batch_report.read_batch(output)
++            if not (output / "batch-status.json").is_file():
++                status = {"status": "finished", "planned": planned or len(rows), "completed": len(rows)}
++                atomic_write(output / "batch-status.json", (json.dumps(status, ensure_ascii=False, indent=2) + "\n").encode())
++            official = output / "official-result.json"
++            result = batch_report.summarize(rows, metadata, status, planned=planned,
++                                            official=official if official.is_file() else None)
++            batch_report.write_report(output / "batch-report.json",
++                                      json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n")
++        except (OSError, ValueError, TypeError, KeyError) as error:
++            print(f"Could not write batch report: {error}", file=sys.stderr)
++            raise
++        if not (output / "batch-report.json").is_file():
++            raise RuntimeError(f"Missing required batch-report.json after report generation: {output}")
++        publish_v2.write_trial_digests_and_manifest_v2(
++            output,
++            batch_name=output.name,
++            evidence_store_dir=evidence_store_dir,
++        )
+ 
+ 
+ def command_for(args, dataset, bundle, suite):
+@@ -406,7 +540,8 @@
+ 
+ def execute_harbor(args, cmd, dataset, output, metadata, cwd, env):
+     job = args.work / "jobs" / args.batch
+-    origin = {"host": args.source_host, "path": str(job)}
++    origin = publish_v2.public_source_locator(args.source_host, job, args.batch)
++    legacy_origin = {"host": args.source_host, "path": str(job)}
+     lock_dir = args.work / "batch-locks"
+     lock_dir.mkdir(parents=True, exist_ok=True)
+     with (lock_dir / f"{args.batch}.lease").open("a") as lease:
+@@ -445,7 +580,7 @@
+                 raise ValueError("Native Harbor config.json or lock.json changed since dispatch")
+             if (output / "manifest.json").is_file() and read_json(output / "manifest.json") != metadata:
+                 raise ValueError("The shared batch manifest belongs to a different run")
+-            if status_path.is_file() and read_json(status_path).get("source") != origin:
++            if status_path.is_file() and read_json(status_path).get("source") not in (origin, legacy_origin):
+                 raise ValueError("The shared batch belongs to a different execution host or job")
+             pause_path.unlink(missing_ok=True)
+             cmd = [*cmd[:cmd.index("run")], "jobs", "resume", "--job-path", str(job)]
+@@ -473,22 +608,28 @@
+         if returncode < 0:
+             returncode = 128 - returncode
+ 
+-        count = publish(job, output, metadata, args.training_dir, args.source_host,
+-                        resumed=args.resume, reward_key=args.reward_key) if job.is_dir() else 0
+-        print(f"Published {count} trial(s) to {output}")
+-        pause = read_json(pause_path) if pause_path.is_file() else None
+-        progress_file = job / "result.json"
+-        progress = read_json(progress_file) if progress_file.is_file() else {}
+-        stats = progress.get("stats") or {}
+-        state = {
+-            "status": "paused" if pause else "interrupted" if returncode in (130, 143) else
+-                      "failed" if returncode or not count else "finished",
+-            "completed": stats.get("n_completed_trials"), "planned": planned, "task_attempts": task_attempts,
+-            "harbor_planned": progress.get("n_total_trials"),
+-            "consecutive_failure": pause, "source": origin,
+-        }
+-        atomic_write(status_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
+-        write_batch_report(output)
++        with publish_v2.publish_lock(output):
++            count = publish(job, output, metadata, args.training_dir, args.source_host,
++                            resumed=args.resume, reward_key=args.reward_key) if job.is_dir() else 0
++            print(f"Published {count} trial(s) to {output}")
++            pause = read_json(pause_path) if pause_path.is_file() else None
++            public_pause = None
++            if pause is not None:
++                ev_store_pause = publish_v2.ensure_private_evidence_store(job_dir=job)
++                publish_v2.record_private_pause_state(ev_store_pause, output.name, pause)
++                public_pause = publish_v2.sanitize_public_failure(pause, job_dir=job, batch_name=output.name)
++            progress_file = job / "result.json"
++            progress = read_json(progress_file) if progress_file.is_file() else {}
++            stats = progress.get("stats") or {}
++            state = {
++                "status": "paused" if pause else "interrupted" if returncode in (130, 143) else
++                          "failed" if returncode or not count else "finished",
++                "completed": stats.get("n_completed_trials"), "planned": planned, "task_attempts": task_attempts,
++                "harbor_planned": progress.get("n_total_trials"),
++                "consecutive_failure": public_pause, "source": origin,
++            }
++            atomic_write(status_path, (json.dumps(state, ensure_ascii=False, indent=2) + "\n").encode())
++            write_batch_report(output)
+         if pause:
+             print(f"Dispatch paused after {pause['consecutive']} {pause['kind']} failures. "
+                   "Use --resume with the original inputs after resolving the cause.", file=sys.stderr)
+@@ -528,7 +669,7 @@
+     publication_dir(output.parent)
+     output.mkdir()
+     output.chmod(0o755)
+-    state = {"status": "running", "source": {"host": args.source_host, "path": str(job)},
++    state = {"status": "running", "source": publish_v2.public_source_locator(args.source_host, job, args.batch),
+              "planned": planned, "task_attempts": task_attempts}
+ 
+     def write_document(path, document):
+@@ -543,13 +684,14 @@
+         state["status"] = "interrupted"
+         raise
+     finally:
+-        count = publish(job, output, metadata, source_host=args.source_host, reward_key=args.reward_key)
+-        success = count == planned and counts["captured"] == planned
+-        if state["status"] == "running":
+-            state["status"] = "paused" if counts["paused"] else "finished" if success else "failed"
+-        state["completed"] = count
+-        write_document(status, state)
+-        write_batch_report(output)
++        with publish_v2.publish_lock(output):
++            count = publish(job, output, metadata, source_host=args.source_host, reward_key=args.reward_key)
++            success = count == planned and counts["captured"] == planned
++            if state["status"] == "running":
++                state["status"] = "paused" if counts["paused"] else "finished" if success else "failed"
++            state["completed"] = count
++            write_document(status, state)
++            write_batch_report(output)
+     print(f"Published {count} trial(s) to {output}")
+     return batch_guard.PAUSED_EXIT if counts["paused"] else int(not success)
+ 
+@@ -582,7 +724,7 @@
+     output.mkdir()
+     output.chmod(0o755)
+     status = output / "batch-status.json"
+-    state = {"source": {"host": args.source_host, "path": str(job)}, "status": "running"}
++    state = {"source": publish_v2.public_source_locator(args.source_host, job, args.batch), "status": "running"}
+     atomic_write(status, (json.dumps(state) + "\n").encode())
+     try:
+         exit_code = vlmevalkit.launch(args, suite, dataset, job, mode)
+@@ -591,16 +733,17 @@
+         state["status"] = "interrupted"
+         raise
+     finally:
+-        if state["status"] == "running":
+-            state["status"] = "failed"
+-        count = publish(job, output, metadata, source_host=args.source_host)
+-        publish_vlmevalkit_metrics(job, output)
+-        state["completed"] = count
+-        if (job / "result.json").is_file():
+-            state["planned"] = read_json(job / "result.json")["n_total_trials"]
+-        atomic_write(status, (json.dumps(state) + "\n").encode())
+-        write_batch_report(output)
+-        print(f"Published {count} trial(s) to {output}")
++        with publish_v2.publish_lock(output):
++            if state["status"] == "running":
++                state["status"] = "failed"
++            count = publish(job, output, metadata, source_host=args.source_host)
++            publish_vlmevalkit_metrics(job, output)
++            state["completed"] = count
++            if (job / "result.json").is_file():
++                state["planned"] = read_json(job / "result.json")["n_total_trials"]
++            atomic_write(status, (json.dumps(state) + "\n").encode())
++            write_batch_report(output)
++            print(f"Published {count} trial(s) to {output}")
+     return exit_code
+ 
+ 
+@@ -690,18 +833,27 @@
+         metadata["runner"] = runner
+     output = args.output / args.batch
+     if args.export_job:
+-        count = publish(args.export_job.resolve(), output, metadata, args.training_dir, args.source_host,
+-                        reward_key=args.reward_key)
+-        if count == 0:
+-            parser.error("No finished trial receipts found")
+-        if runner == "vlmevalkit":
+-            publish_vlmevalkit_metrics(args.export_job, output)
+-        original_result = args.export_job / "result.json"
+-        try:
+-            planned = read_json(original_result).get("n_total_trials") if original_result.is_file() else None
+-        except (OSError, ValueError):
+-            planned = None
+-        write_batch_report(output, planned=planned if not (output / "batch-status.json").is_file() else None)
++        with publish_v2.publish_lock(output):
++            count = publish(args.export_job.resolve(), output, metadata, args.training_dir, args.source_host,
++                            reward_key=args.reward_key)
++            if count == 0:
++                parser.error("No finished trial receipts found")
++            if runner == "vlmevalkit":
++                publish_vlmevalkit_metrics(args.export_job, output)
++            original_result = args.export_job / "result.json"
++            try:
++                planned = read_json(original_result).get("n_total_trials") if original_result.is_file() else None
++            except (OSError, ValueError):
++                planned = None
++            if not (output / "batch-status.json").is_file():
++                export_state = {
++                    "status": "finished",
++                    "planned": planned or count,
++                    "completed": count,
++                    "source": publish_v2.public_source_locator(args.source_host or batch_guard.source_host(), args.export_job, args.batch),
++                }
++                atomic_write(output / "batch-status.json", (json.dumps(export_state, ensure_ascii=False, indent=2) + "\n").encode())
++            write_batch_report(output, planned=planned if not (output / "batch-status.json").is_file() else None)
+         print(f"Published {count} trial(s) to {output}")
+         return 0
+ 
+@@ -798,8 +950,21 @@
+         if job.exists() or output.exists():
+             parser.error("Batch already exists. Use a fresh name or --export-job")
+         success = direct.run(cases, dataset, job, args, suite, scorer, os.environ["OPENAI_API_KEY"])
+-        count = publish(job, output, metadata, args.training_dir, args.source_host)
+-        write_batch_report(output, planned=len(cases))
++        task_attempts = Counter()
++        for case in cases:
++            task_attempts[case["id"]] += args.attempts
++        direct_planned = sum(task_attempts.values())
++        with publish_v2.publish_lock(output):
++            count = publish(job, output, metadata, args.training_dir, args.source_host)
++            direct_state = {
++                "status": "finished" if success else "failed",
++                "planned": direct_planned,
++                "completed": count,
++                "task_attempts": dict(task_attempts),
++                "source": publish_v2.public_source_locator(args.source_host or batch_guard.source_host(), job, args.batch),
++            }
++            atomic_write(output / "batch-status.json", (json.dumps(direct_state, ensure_ascii=False, indent=2) + "\n").encode())
++            write_batch_report(output, planned=direct_planned)
+         print(f"Published {count} trial(s) to {output}")
+         return 0 if success else 1
+ 

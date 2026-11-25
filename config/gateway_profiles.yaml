@@ -1,0 +1,31 @@
+# Server-side Gateway & Teacher Profiles (v2.2.1 · 02-6 & 02-7 & 06-1)
+# Secrets (API keys) are NEVER stored in this YAML, SQLite, or API responses!
+# Keys are resolved strictly at runtime from process env or 0600 local ext4 `state/gateways.env`.
+
+profiles:
+  - profile_id: qwen197-vllm
+    display_name: "197 Local vLLM (Qwen3.8-27B)"
+    kind: model_gateway
+    protocol: openai_chat_completions
+    base_url: "http://127.0.0.1:8000/v1"
+    api_key_env: "OPENAI_API_KEY"
+    default_model: "Qwen3_8-27B"
+    notes: "197 局域网 OpenAI Chat Completions 网关（凭据仅从 0600 gateways.env 或服务端环境变量读取）"
+
+  - profile_id: deepseek-synth-teacher
+    display_name: "Synthetic Teacher (DeepSeek V4.1 Flash)"
+    kind: synth_teacher
+    protocol: openai_chat_completions
+    base_url: "https://api.zhizengzeng.com/v1"
+    api_key_env: "TIANXI_SYNTH_TEACHER_API_KEY"
+    default_model: "deepseek-v4.1-flash"
+    notes: "对应 framework/harbor.toml [synthesis.teacher] 配置"
+
+  - profile_id: vlmevalkit-judge
+    display_name: "VLMEvalKit Judge Gateway"
+    kind: vlmevalkit_judge
+    protocol: openai_chat_completions
+    base_url: "http://127.0.0.1:8000/v1"
+    api_key_env: "VLMEVALKIT_JUDGE_API_KEY"
+    default_model: "Qwen3_8-27B"
+    notes: "VLMEvalKit 可选裁判模型端点"
