@@ -339,7 +339,7 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
                     <td className="py-2 px-3 text-right tabular-nums text-[var(--text-secondary)]">
                       {row.scored !== null ? `${row.scored}/${row.recorded}` : 'full_split'}
                     </td>
-                    <td className="py-2 px-3.5 text-right font-bold tabular-nums text-[var(--best-cell)]">
+                    <td className="py-2 px-3.5 text-right tabular-nums text-[var(--text-primary)]">
                       {fmtPct(row.score)}
                     </td>
                   </tr>
