@@ -449,8 +449,10 @@ async function main() {
     await page.waitForTimeout(250);
     clsSamples.push({ route, cls: await page.evaluate(() => window.__lrmCls || 0) });
   }
-  const healthText = await page.textContent('body');
-  assert(healthText.includes('本地运行目录占用') && healthText.includes('存储隔离安全探针'), 'Admin health missing budget or probes');
+  await page.getByRole('heading', { name: '系统监控', exact: true }).waitFor();
+  await page.getByRole('progressbar', { name: '本地存储预算' }).waitFor();
+  await page.locator('summary').filter({ hasText: '运维诊断' }).click();
+  await page.getByRole('table', { name: '隔离探针' }).waitFor();
   console.log('[OK] 7. Harnesses, Benchmarks, Recommend, Methodology, Admin Health verified');
 
   await browser.close();

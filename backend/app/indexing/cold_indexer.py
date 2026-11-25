@@ -34,7 +34,6 @@ from app.services.methodology import finite
 
 _TOP_DICT_KEY_RE = re.compile(rb'^    "([^"]+)": \{\s*$')
 _TOP_DICT_END_RE = re.compile(rb'^    \},?\s*$')
-_BUNDLE_CONTENT_CACHE_KIND = "bundle_tar_task_content_v1"
 _MAX_TASK_INSTRUCTION_BYTES = 256 * 1024
 MAX_TASK_ATTACHMENT_BYTES = 8 * 1024 * 1024
 _GAIA_ATTACHMENT_EXTENSIONS = {
@@ -1294,14 +1293,29 @@ class ColdIndexer:
             if st is None:
                 continue
             cache_key = str(fpath)
-            cached = self.db.fetchone(
-                "SELECT cache_kind FROM cold_file_cache WHERE file_path = ?", (cache_key,)
-            )
-            if (
-                not force and cached and cached["cache_kind"] == _BUNDLE_CONTENT_CACHE_KIND
-                and self._is_cached(cache_key, st[1], st[2])
-            ):
-                continue
+            if not force:
+                cached = self.db.fetchone(
+                    """
+                    SELECT cache_kind, item_count FROM cold_file_cache
+                    WHERE file_path = ? AND mtime_ns = ? AND size_bytes = ? AND status = 'ready'
+                    """,
+                    (cache_key, st[1], st[2]),
+                )
+                if cached and (
+                    cached["item_count"] == 0
+                    or self.db.fetchone(
+                        """SELECT 1 FROM dataset_bundle_task_content
+                           WHERE dataset_release_id = ? AND archive_path = ? LIMIT 1""",
+                        (rel_id, cache_key),
+                    )
+                ):
+                    if cached["cache_kind"] != "bundle_tar":
+                        with self.db.transaction() as conn:
+                            conn.execute(
+                                "UPDATE cold_file_cache SET cache_kind = 'bundle_tar' WHERE file_path = ?",
+                                (cache_key,),
+                            )
+                    continue
             try:
                 if fname.endswith(".zst"):
                     dctx = zstd.ZstdDecompressor()
@@ -1312,7 +1326,7 @@ class ColdIndexer:
                         tasks, content = self._read_bundle_tasks(tf, rel_id, fpath)
             except Exception as exc:
                 with self.db.transaction() as conn:
-                    self._upsert_cache(conn, cache_key, _BUNDLE_CONTENT_CACHE_KIND, st[1], st[2], 0, "error", str(exc))
+                    self._upsert_cache(conn, cache_key, "bundle_tar", st[1], st[2], 0, "error", str(exc))
                 continue
 
             with self.db.transaction() as conn:
@@ -1342,7 +1356,7 @@ class ColdIndexer:
                         """,
                         content,
                     )
-                self._upsert_cache(conn, cache_key, _BUNDLE_CONTENT_CACHE_KIND, st[1], st[2], len(tasks))
+                self._upsert_cache(conn, cache_key, "bundle_tar", st[1], st[2], len(tasks))
             count += len(tasks)
         return count
 
