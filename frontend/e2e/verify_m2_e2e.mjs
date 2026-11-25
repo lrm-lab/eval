@@ -188,7 +188,8 @@ async function main() {
   await recordCls('/toolkit/manuals');
 
   await page.goto(`${BASE_URL}/admin/health`, { waitUntil: 'networkidle' });
-  await page.waitForSelector('text=服务端 Gateway / Teacher / Judge Profiles', { timeout: 15000 });
+  await page.getByRole('heading', { name: '系统监控', exact: true }).waitFor({ timeout: 15000 });
+  await page.getByRole('heading', { name: '隔离 Runner', exact: true }).waitFor({ timeout: 15000 });
   await recordCls('/admin/health');
   console.log('[OK] 7. Toolkit Params, Manuals, and upgraded Admin Health verified');
 

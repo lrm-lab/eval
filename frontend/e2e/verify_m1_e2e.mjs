@@ -147,14 +147,15 @@ async function main() {
   );
   await page.waitForTimeout(300);
 
+  assert((await page.getAttribute('html', 'data-theme')) === 'dark', 'Theme must default to dark');
   inpSamples.push(
     await sampleEventTimingInp(page, 'theme-toggle', async () => {
       await page.click('button[aria-label="切换明暗主题"]');
     })
   );
-  assert((await page.getAttribute('html', 'data-theme')) === 'dark', 'Theme did not switch to dark');
+  assert((await page.getAttribute('html', 'data-theme')) === 'light', 'Theme did not switch to light');
   await page.click('button[aria-label="切换明暗主题"]');
-  assert((await page.getAttribute('html', 'data-theme')) === 'light', 'Theme did not switch back to light');
+  assert((await page.getAttribute('html', 'data-theme')) === 'dark', 'Theme did not switch back to dark');
 
   await page.click('button[role="tab"]:has-text("Trend")');
   await page.waitForSelector('canvas', { timeout: 5000 });

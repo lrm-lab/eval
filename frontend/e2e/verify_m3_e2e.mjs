@@ -376,9 +376,9 @@ async function verify(browser) {
   //    docker_group_attached=false, managed_framework probe ok=true)
   // =========================================================================
   await page.goto(`${BASE_URL}/admin/health`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('text=系统健康、磁盘预算与数据源覆盖', { timeout: 15000 });
+  await page.getByRole('heading', { name: '系统监控', exact: true }).waitFor({ timeout: 15000 });
   await page.waitForSelector('text=managed_framework', { timeout: 15000 });
-  await page.waitForSelector('text=已隔离 (无 docker 组)', { timeout: 15000 });
+  await page.getByRole('heading', { name: '隔离 Runner', exact: true }).waitFor({ timeout: 15000 });
   await recordCls('/admin/health');
 
   const healthJson = await page.evaluate(async () => {
