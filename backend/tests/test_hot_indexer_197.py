@@ -188,9 +188,18 @@ def test_a01_exact_parity_with_report_py_and_i03_i04_i06_on_real_197(isolated_se
     assert mmif["official_result"] is None
 
     # I-03: unreadable dir logged cleanly to index_warnings without crashing
-    warn = db2.fetchone("SELECT * FROM index_warnings WHERE code = 'DIR_PERMISSION_DENIED'")
-    assert warn is not None
-    assert "synth-v1-qwen-opencode-20261124T022715" in warn["message"]
+    recovered_name = "synth-v1-qwen-opencode-20261124T022715"
+    warn = db2.fetchone(
+        "SELECT 1 FROM index_warnings WHERE code = 'DIR_PERMISSION_DENIED' AND message LIKE ?",
+        (f"%{recovered_name}%",),
+    )
+    try:
+        list((isolated_settings.harbor_runs_dir / recovered_name).iterdir())
+    except PermissionError:
+        assert warn is not None
+    else:
+        assert warn is None
+        assert db2.fetchone("SELECT 1 FROM batches WHERE source_locator = ?", (f"harbor_runs:{recovered_name}",))
 
     # A-12: ATIF dual-key reasoning extraction across 197 harbor-runs
     r_cnt = db2.fetchone("SELECT COUNT(*) AS c FROM episodes WHERE reasoning_tokens IS NOT NULL")["c"]  # type: ignore[index]

@@ -52,6 +52,28 @@ _CORE_TASK_ID_PREFIXES = {
     "deepswe__1.1__default": "",
     "terminal-bench__2.1__default": "terminal-bench/",
 }
+_WILDCLAW_SUMMARIES = {
+    "openclaw-2026.11.6-Qwen3_8-27B": ("openclaw", "openclaw-2026.11.6", "vllm/Qwen3_8-27B"),
+    "openclaw-2026.11.6-Qwen3_8-27B-v5prompt": ("openclaw", "openclaw-2026.11.6", "vllm/Qwen3_8-27B"),
+    "pi-jhpV5-Qwen3_8-27B": ("pi", "pi-jhpV5", "relay-openai/Qwen3_8-27B"),
+    "pi-jhpV5-Qwen3_8-27B-nov5": ("pi", "pi-jhpV5", "relay-openai/Qwen3_8-27B"),
+}
+
+
+def _wildclaw_episode(obj: dict[str, Any], task_id: str, trial_id: str, attempt: int) -> dict[str, Any]:
+    scores = obj.get("scores") if isinstance(obj.get("scores"), dict) else {}
+    raw_score = scores.get("overall_score") if finite(scores.get("overall_score")) else scores.get("reward")
+    valid = finite(raw_score) and not (obj.get("error") or obj.get("timed_out"))
+    status = "scored" if valid else ("timeout" if obj.get("timed_out") else "failed")
+    return {
+        "trial_id": trial_id,
+        "task_id": task_id,
+        "attempt_index": attempt,
+        "status": status,
+        "reward": float(raw_score) if valid else None,
+        "reward_valid": int(valid),
+        "verifier_rewards_json": json.dumps(scores, ensure_ascii=False),
+    }
 
 
 def _parse_iso_dt(val: str | None) -> float | None:
@@ -856,7 +878,6 @@ class ColdIndexer:
         wc_root = self.settings.legacy_root_dir / "wildclawbench"
         if not wc_root.is_dir():
             return {"batches": 0, "unreadable_dirs": 0}
-        reg_proj, reg_owner, reg_approval = self.approval_registry.lookup(wc_root)
         cache_map = self._load_cache_map()
         batches_done = 0
         unreadable_dirs = 0
@@ -873,16 +894,81 @@ class ColdIndexer:
         for run_dir, st_obj in run_entries:
             cache_key = str(run_dir)
             st = (st_obj.st_ino, st_obj.st_mtime_ns, st_obj.st_size)
+            reg_proj, reg_owner, reg_approval, classes = self.approval_registry.lookup_full(run_dir)
+            summary_identity = _WILDCLAW_SUMMARIES.get(run_dir.name)
+            summary_path = run_dir / f"rsi_summary_{summary_identity[1]}_all.json" if summary_identity else None
+            summary_stat = _stat_tuple(summary_path) if summary_path and not summary_path.is_symlink() else None
+            use_summary = (
+                summary_stat is not None and reg_approval != "pending" and "summary_dto" in classes
+                and self.approval_registry.lookup_full(summary_path) == (reg_proj, reg_owner, reg_approval, classes)
+            )
+            if use_summary:
+                st = summary_stat
+                cache_key = str(summary_path)
             if not force and self._is_cached(
-                cache_key, st[1], st[2], allow_permission_denied=True, cache_map=cache_map
+                cache_key, st[1], st[2], allow_permission_denied=not use_summary, cache_map=cache_map
             ):
                 continue
 
             ep_rows: list[dict[str, Any]] = []
+            summary_digest: str | None = None
+            harness, harness_version, model_route = "harbor", None, run_dir.name
+            run_config: str | None = None
             seen_tids: set[str] = set()
             att_counter: dict[str, int] = {}
             unreadable_files = 0
-            for rj in sorted(run_dir.rglob("result.json")):
+            if use_summary:
+                harness, harness_version, model_route = summary_identity
+                try:
+                    raw = summary_path.read_bytes()
+                    if _stat_tuple(summary_path) != summary_stat:
+                        continue
+                    summary = json.loads(raw)
+                    reports = summary["results"]
+                    if (
+                        summary["bench"] != "wildclawbench" or summary["model"] != model_route
+                        or summary["agent"] != harness_version or summary["n"] != 60
+                        or not isinstance(reports, dict) or len(reports) != 60
+                        or not finite(summary["score"])
+                        or not all(
+                            re.fullmatch(r"[A-Za-z0-9_.-]+", task_id)
+                            and isinstance(result, dict)
+                            and isinstance(result.get("task_id"), str)
+                            and re.fullmatch(r"[A-Za-z0-9_.-]+", result["task_id"])
+                            for task_id, result in reports.items()
+                        )
+                        or len({result["task_id"] for result in reports.values()}) != 60
+                    ):
+                        raise ValueError("WildClawBench summary identity or task records do not match")
+                    known_tasks = self.db.fetchall(
+                        "SELECT task_id FROM task_definitions WHERE dataset_release_id = ?",
+                        ("wildclawbench__2026-11-20__default",),
+                    )
+                    if known_tasks and set(reports) != {row["task_id"] for row in known_tasks}:
+                        raise ValueError("WildClawBench summary contains tasks outside its registered release")
+                except (OSError, ValueError, TypeError, KeyError):
+                    continue
+                for task_id, obj in sorted(reports.items()):
+                    scores = obj.get("scores") or {}
+                    public_scores = {
+                        key: float(value) for key, value in scores.items() if finite(value)
+                    } if isinstance(scores, dict) else {}
+                    # Result keys identify benchmark tasks. The inner task_id identifies a historical attempt.
+                    episode = _wildclaw_episode(
+                        {**obj, "scores": public_scores}, task_id, f"{run_dir.name}__{obj['task_id']}", 1,
+                    )
+                    if not episode["reward_valid"] and not (obj.get("error") or obj.get("timed_out")):
+                        episode["status"] = "unscored"
+                    ep_rows.append(episode)
+                valid_scores = [ep["reward"] for ep in ep_rows if ep["reward_valid"]]
+                if not all(0 <= score <= 1 for score in valid_scores) or not math.isclose(
+                    math.fsum(valid_scores) / len(ep_rows), summary["score"], abs_tol=1e-8,
+                ):
+                    continue
+                summary_digest = hashlib.sha256(raw).hexdigest()
+                run_config = json.dumps({"source_score": summary["score"], "source_denominator": summary["n"]})
+
+            for rj in [] if use_summary else sorted(run_dir.rglob("result.json")):
                 try:
                     obj = json.loads(rj.read_text(encoding="utf-8", errors="replace"))
                 except PermissionError:
@@ -899,28 +985,11 @@ class ColdIndexer:
                 if tid in seen_tids:
                     tid = f"{tid}__{att_counter[task_id]}"
                 seen_tids.add(tid)
-                scores_obj = obj.get("scores") if isinstance(obj.get("scores"), dict) else {}
-                raw_score = scores_obj.get("overall_score") if finite(scores_obj.get("overall_score")) else (
-                    scores_obj.get("reward") if finite(scores_obj.get("reward")) else None
-                )
-                has_err = bool(obj.get("error")) or bool(obj.get("timed_out"))
-                is_valid = (raw_score is not None) and not has_err
-                status = "scored" if is_valid else ("timeout" if obj.get("timed_out") else "failed")
-                ep_rows.append(
-                    {
-                        "trial_id": tid,
-                        "task_id": task_id,
-                        "attempt_index": att_counter[task_id],
-                        "status": status,
-                        "reward": float(raw_score) if is_valid else None,
-                        "reward_valid": 1 if is_valid else 0,
-                        "verifier_rewards_json": json.dumps(scores_obj, ensure_ascii=False),
-                    }
-                )
+                ep_rows.append(_wildclaw_episode(obj, task_id, tid, att_counter[task_id]))
 
             # Always inspect score.json permission gaps even when some result.json files were readable
             # (e.g. pi-jhpV5-Qwen3_8-27B has 1 readable result.json + 82 permission-denied score.json!)
-            for sj in run_dir.rglob("score.json"):
+            for sj in [] if use_summary else run_dir.rglob("score.json"):
                 try:
                     with open(sj, "rb") as _fh:
                         _fh.read(1)
@@ -963,8 +1032,8 @@ class ColdIndexer:
 
             source_locator = f"legacy_json:wildclawbench/{run_dir.name}"
             batch_id = make_batch_id(source_locator)
-            mc, mp, ck, th = canonicalize_model(run_dir.name)
-            digest = hashlib.sha256(f"{source_locator}:{st[1]}:{len(ep_rows)}".encode("utf-8")).hexdigest()
+            mc, mp, ck, th = canonicalize_model(model_route)
+            digest = summary_digest or hashlib.sha256(f"{source_locator}:{st[1]}:{len(ep_rows)}".encode("utf-8")).hexdigest()
             gen_id = f"gen_legacy_{digest[:16]}"
             scored_vals = [e["reward"] for e in ep_rows if e["reward_valid"] == 1 and e["reward"] is not None]
             valid_mean = (math.fsum(scored_vals) / len(scored_vals)) if scored_vals else None
@@ -981,28 +1050,42 @@ class ColdIndexer:
                         is_running_placeholder, source_path_redacted, source_tags_json,
                         benchmark_slug, dataset_release_id, identity_status, raw_dataset_name,
                         model_route, model_canonical, model_provider, checkpoint, thinking_mode,
-                        harness, runner, run_scope, scoring_protocol,
+                        harness, harness_version, runner, run_scope, scoring_protocol,
                         official_status, batch_status, report_origin,
                         generation_id, unique_tasks, planned, recorded, scored, unscored,
-                        coverage, valid_mean, content_digest, indexed_at
+                        coverage, valid_mean, run_config_json, content_digest, indexed_at
                     ) VALUES (
                         ?, ?, 'legacy_json', ?,
                         ?, ?, ?,
                         0, ?, '["legacy_json","2026-11-20"]',
                         ?, ?, ?, 'WildClawBench',
                         ?, ?, ?, ?, ?,
-                        'harbor', 'harbor', ?, ?,
+                        ?, ?, 'harbor', ?, ?,
                         'unofficial_valid_mean', 'finished', 'legacy_adapter',
-                        ?, ?, ?, ?, ?, 0,
-                        ?, ?, ?, ?
+                        ?, ?, ?, ?, ?, ?,
+                        ?, ?, ?, ?, ?
                     )
                     ON CONFLICT(batch_id) DO UPDATE SET
                         project_id = excluded.project_id,
                         owner_id = excluded.owner_id,
                         evidence_approval = excluded.evidence_approval,
+                        model_route = excluded.model_route,
+                        model_canonical = excluded.model_canonical,
+                        model_provider = excluded.model_provider,
+                        checkpoint = excluded.checkpoint,
+                        thinking_mode = excluded.thinking_mode,
+                        harness = excluded.harness,
+                        harness_version = excluded.harness_version,
+                        run_scope = excluded.run_scope,
+                        generation_id = excluded.generation_id,
+                        unique_tasks = excluded.unique_tasks,
+                        planned = excluded.planned,
+                        coverage = excluded.coverage,
                         valid_mean = excluded.valid_mean,
                         scored = excluded.scored,
                         recorded = excluded.recorded,
+                        unscored = excluded.unscored,
+                        run_config_json = excluded.run_config_json,
                         content_digest = excluded.content_digest,
                         indexed_at = excluded.indexed_at
                     """,
@@ -1017,11 +1100,13 @@ class ColdIndexer:
                         bm_slug,
                         rel_id,
                         id_status,
-                        run_dir.name,
+                        model_route,
                         mc,
                         mp,
                         ck,
                         th,
+                        harness,
+                        harness_version,
                         "full_split" if len({e["task_id"] for e in ep_rows}) == 60 else "subset",
                         proto,
                         gen_id,
@@ -1029,8 +1114,10 @@ class ColdIndexer:
                         len(ep_rows),
                         len(ep_rows),
                         len(scored_vals),
+                        sum(ep["status"] == "unscored" for ep in ep_rows),
                         (len(scored_vals) / len(ep_rows)) if ep_rows else None,
                         valid_mean,
+                        run_config,
                         digest,
                         utcnow_iso(),
                     ),
@@ -1043,7 +1130,7 @@ class ColdIndexer:
                         batch_id=batch_id,
                         task_id=ep["task_id"],
                         checkpoint=ck,
-                        harness_version=None,
+                        harness_version=harness_version,
                         attempt_index=ep["attempt_index"],
                     )
                     conn.execute(
@@ -1094,7 +1181,16 @@ class ColdIndexer:
                         ),
                     )
                 else:
-                    self._upsert_cache(conn, cache_key, "legacy_wildclaw_dir", st[1], st[2], len(ep_rows))
+                    if use_summary:
+                        conn.execute("DELETE FROM cold_file_cache WHERE file_path = ?", (str(run_dir),))
+                    self._upsert_cache(
+                        conn, cache_key, "legacy_wildclaw_summary" if use_summary else "legacy_wildclaw_dir",
+                        st[1], st[2], len(ep_rows),
+                    )
+                    conn.execute(
+                        "DELETE FROM index_warnings WHERE tier = 'cold' AND code = 'WILDCLAW_PERMISSION_DENIED' AND target_path = ?",
+                        (redact_path(str(run_dir)) or run_dir.name,),
+                    )
                 batches_done += 1
         return {"batches": batches_done, "unreadable_dirs": unreadable_dirs}
 

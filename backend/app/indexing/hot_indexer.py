@@ -2497,6 +2497,11 @@ class HotIndexer:
                     )
 
             conn.execute("DELETE FROM search_fts WHERE entity_type = 'batch' AND entity_id = ?", (effective_batch_id,))
+            if ns == "harbor_runs":
+                conn.execute(
+                    "DELETE FROM index_warnings WHERE tier = 'hot' AND code = 'DIR_PERMISSION_DENIED' AND target_path = ?",
+                    (redact_path(str(batch_dir)) or batch_name,),
+                )
             conn.execute(
                 """
                 INSERT INTO search_fts (entity_type, entity_id, title, subtitle, body, project_id, required_scope)
