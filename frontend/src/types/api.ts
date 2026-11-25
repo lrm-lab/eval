@@ -446,6 +446,7 @@ export interface CompareQueryResponse {
     goal_type?: string;
     scoring_protocol: string;
     comparable: boolean;
+    version_drift?: { drifted_task_count: number };
     intersection: {
       common_covered_tasks: number | null;
       common_valid_scored_tasks: number | null;

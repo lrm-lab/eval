@@ -1,8 +1,8 @@
 import React, { useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type * as echarts from 'echarts';
-import { ArrowLeft, BarChart3, Crosshair, Flame, Layers3, ListChecks, Search } from 'lucide-react';
+import { ArrowLeft, BarChart3, Crosshair, Flame, GitCompareArrows, Layers3, ListChecks, Search } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { fmtDuration, fmtPct, runScopeLabel, trackDisplayName } from '../lib/format';
 import { useAppStore } from '../lib/store';
@@ -10,6 +10,7 @@ import type { BatchDTO, DatasetReleaseDTO } from '../types/api';
 import { PageTransition, SlidingTabs, SpotlightCard } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
+import { GroupedComparePanel, type GroupedComparison } from '../components/ui/GroupedComparePanel';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
 import { EfficiencyScatterChart } from '../components/charts/EfficiencyScatterChart';
@@ -31,6 +32,7 @@ interface BenchmarkListItem {
 }
 
 interface BenchmarkProfileResp {
+  grouped_comparison?: GroupedComparison;
   benchmark: {
     benchmark_slug: string;
     display_name: string;
@@ -204,7 +206,16 @@ function BenchmarkDirectoryView() {
 function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
   const navigate = useNavigate();
   const theme = useAppStore((s) => s.theme);
-  const [tab, setTab] = useState('leaderboard');
+  const [params, setParams] = useSearchParams();
+  const requestedTab = params.get('tab');
+  const tab = requestedTab && ['groups', 'scatter', 'hardest', 'tasks', 'properties'].includes(requestedTab)
+    ? requestedTab : 'leaderboard';
+  const setTab = (next: string) => setParams((previous) => {
+    const search = new URLSearchParams(previous);
+    if (next === 'leaderboard') search.delete('tab');
+    else search.set('tab', next);
+    return search;
+  });
 
   const profQ = useQuery({
     queryKey: ['benchmark-profile', benchmarkSlug],
@@ -262,6 +273,7 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
         onChange={setTab}
         options={[
           { id: 'leaderboard', label: '基准分榜', badge: data?.mini_leaderboard.length, icon: <BarChart3 size={14} /> },
+          { id: 'groups', label: '分组对比', icon: <GitCompareArrows size={14} /> },
           { id: 'scatter', label: '效率前沿散点', icon: <Crosshair size={14} /> },
           { id: 'hardest', label: '最难题目榜 (Hardest)', icon: <Flame size={14} /> },
           { id: 'tasks', label: '题目分布', badge: data?.task_summary.indexed_tasks, icon: <ListChecks size={14} /> },
@@ -269,7 +281,15 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
         ]}
       />
 
-      {tab === 'leaderboard' && data && (
+      {tab === 'groups' && data && !profQ.isError && (
+        <GroupedComparePanel
+          benchmark={benchmarkSlug}
+          data={data.grouped_comparison}
+          datasetReleases={data.releases}
+          onReload={profQ.refetch}
+        />
+      )}
+      {(tab === 'leaderboard' || tab === 'groups') && data && (
         <PublicBaselinePanel
           benchmark={benchmarkSlug}
           candidates={data.mini_leaderboard.map((row, index) => ({
@@ -328,7 +348,7 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
             </table>
           </div>
         )
-      ) : tab === 'scatter' ? (
+      ) : tab === 'groups' ? null : tab === 'scatter' ? (
         data.scatter_configs.length === 0 ? (
           <StateNoticeCard kind="empty" title="该基准暂无多批次效率散点数据" description="需要至少包含有效单题耗时或 Token 数据的批次。" />
         ) : (
