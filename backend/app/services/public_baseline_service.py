@@ -14,7 +14,7 @@ from app.api.errors import AppError
 from app.db.database import Database
 from app.security.auth import AuthUser
 from app.security.authz import can_access_project, has_scope
-from app.services.public_baseline_sources import SOURCES, SOURCES_BY_ID, PublicSource
+from app.services.public_baseline_sources import SOURCES, SOURCES_BY_ID, TEXT_LEADERS, PublicSource
 
 logger = logging.getLogger(__name__)
 
@@ -147,7 +147,7 @@ class PublicBaselineService:
                 return None
             raise
 
-    def catalog(self) -> dict[str, Any]:
+    def catalog(self, *, include_text_leaders: bool = False) -> dict[str, Any]:
         result = []
         for source in SOURCES:
             snapshot = self._snapshot(source.id)
@@ -164,8 +164,6 @@ class PublicBaselineService:
                 "benchmark_slug": source.benchmark_slug,
                 "url": source.url,
                 "release_id": source.release_id,
-                "legacy_release_id": source.legacy_release_id,
-                "legacy_metric": source.legacy_metric,
                 "dataset_version": source.dataset_version,
                 "split": source.split,
                 "task_count": source.task_count,
@@ -178,6 +176,13 @@ class PublicBaselineService:
                 "published_at": snapshot["published_at"] if snapshot else None,
                 "rows": json.loads(snapshot["rows_json"]) if synced else [],
             })
+        if include_text_leaders:
+            for leader in TEXT_LEADERS:
+                item = asdict(leader)
+                item["id"] = leader.row.id.partition(":")[0]
+                item["status"] = "snapshot"
+                item["rows"] = [item.pop("row")]
+                result.append(item)
         return {"sources": result}
 
     @staticmethod

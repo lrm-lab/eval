@@ -29,7 +29,7 @@ class PublicScore:
     configuration: str | None
     score_pct: float
     task_count: int
-    sample_count: int
+    sample_count: int | None
     published_at: str | None = None
 
 
@@ -49,8 +49,6 @@ class PublicSource:
     task_ids_sha256: str | None
     runner: str | None
     fetch: Callable[[], tuple[list[PublicScore], str | None]]
-    legacy_release_id: str | None = None
-    legacy_metric: str | None = None
 
 
 def _read_json(url: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:
@@ -230,3 +228,59 @@ SOURCES = (
     ),
 )
 SOURCES_BY_ID = {source.id: source for source in SOURCES}
+
+
+@dataclass(frozen=True)
+class PublicTextLeader:
+    benchmark_slug: str
+    legacy_release_id: str
+    legacy_metric: str
+    label: str
+    url: str
+    dataset_version: str
+    split: str
+    metric: str
+    scoring_rule: str
+    row: PublicScore
+    captured_on: str = "2026-11-25"
+
+
+# Dated, attributed rank-one observations from the evaluator's published score pages.
+# The historical CSV gives no per-configuration scoring protocol for these rows.
+TEXT_LEADERS = (
+    PublicTextLeader(
+        "aa-lcr", "aa-lcr__1.1__default", "accuracy", "Artificial Analysis · AA-LCR v1.1",
+        "https://artificialanalysis.ai/evaluations/artificial-analysis-long-context-reasoning",
+        "1.1", "全量", "Pass@1",
+        "100 道公开题，每题 3 次。按 v1.1 答案和等价判定评分。",
+        PublicScore("aa-lcr-1.1:snapshot", "Kimi K3 (Max)", "", None, 88.7, 100, 300),
+    ),
+    PublicTextLeader(
+        "gpqa-diamond", "gpqa-diamond__2026-11-20__default", "accuracy", "Artificial Analysis · GPQA Diamond",
+        "https://artificialanalysis.ai/evaluations/gpqa-diamond",
+        "GPQA Diamond 原版", "gpqa_diamond", "Pass@1",
+        "198 道 Diamond 四选一题，用正则提取答案。该行计分次数未公布。",
+        PublicScore("gpqa-diamond:snapshot", "GPT-6 Astra (Xhigh)", "", None, 96.3, 198, None),
+    ),
+    PublicTextLeader(
+        "ifbench", "ifbench__2026-11-20__default", "score", "Artificial Analysis · IFBench",
+        "https://artificialanalysis.ai/evaluations/ifbench",
+        "IFBench 单轮 294 题版", "test", "提示级宽松准确率",
+        "294 道单轮题，每题 5 次。使用官方宽松校验。",
+        PublicScore("ifbench:snapshot", "Grok 4.3 (Medium)", "", None, 83.3, 294, 1470),
+    ),
+    PublicTextLeader(
+        "hle", "hle__2026-11-20__default", "accuracy", "Artificial Analysis · HLE 纯文本",
+        "https://artificialanalysis.ai/evaluations/humanitys-last-exam",
+        "2025-05", "纯文本 test", "Pass@1",
+        "2025 年 5 月版的 2,158 道纯文本题，按答案等价性判定。",
+        PublicScore("hle-text:snapshot", "Claude Fable 5.2 (Max, Default Fallback)", "", None, 74.3, 2158, 2158),
+    ),
+    PublicTextLeader(
+        "ifeval", "ifeval__2026-11-20__default", "Prompt-level-strict-accuracy", "FrozeBench · IFEval 开放权重榜",
+        "https://www.frozebench.com/benchmarks/ifeval",
+        "Google IFEval 2023", "train", "提示级严格准确率",
+        "单轮 541 条提示，每条提示全部约束通过才记为正确。",
+        PublicScore("ifeval-strict:snapshot", "google/gemma-4-31B-it", "lm-evaluation-harness", None, 91.3, 541, 541),
+    ),
+)

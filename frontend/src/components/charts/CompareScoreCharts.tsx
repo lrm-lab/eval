@@ -58,13 +58,14 @@ export function CompareScoreCharts({
       if (point && visibleLegend.current[LEADER_SERIES] === false) return '';
       if (!point) return '<div>' + escapeHtml(LEADER_SERIES) + ' · ' + escapeHtml(missing) + '</div>';
       const { leader, source } = point;
-      const denominator = leader.task_count + ' 题 / ' + leader.sample_count + ' 次计分';
+      const denominator = leader.task_count + ' 题 · ' + (leader.sample_count == null ? '计分次数未公布' : leader.sample_count + ' 次计分');
       const scope = [source.dataset_version, source.split, source.metric, denominator].join(' · ');
+      const date = source.captured_on ? ' · 快照 ' + source.captured_on : '';
       const differences = deltas.map(({ subject, delta }) =>
         '<div>' + escapeHtml(subject) + ' · ' + escapeHtml(fmtDeltaPP(delta)) + '</div>').join('');
       const reference = reasons.length ? '<div>未列分差的分数仅供参考</div>' : '';
       return '<div><strong>' + escapeHtml(LEADER_SERIES) + ' · ' + escapeHtml(fmtPct(leader.score_pct)) + '</strong></div>'
-        + '<div>' + escapeHtml(leaderName(leader)) + '</div><div>' + escapeHtml(source.label) + '</div>'
+        + '<div>' + escapeHtml(leaderName(leader)) + '</div><div>' + escapeHtml(source.label + date) + '</div>'
         + '<div>' + escapeHtml(scope) + '</div>' + differences + reference;
     }
 
@@ -235,14 +236,17 @@ export function CompareScoreCharts({
                     {leaderName(point.leader)} · {fmtPct(point.leader.score_pct)} · {point.source.metric}
                   </div>
                   <div className="mt-1 text-[var(--text-muted)]">
-                    {point.source.dataset_version} · {point.source.split} · {point.leader.task_count} 题 / {point.leader.sample_count} 次计分
+                    {point.source.dataset_version} · {point.source.split} · {point.leader.task_count} 题
+                    {point.leader.sample_count == null ? ' · 计分次数未公布' : ' · ' + point.leader.sample_count + ' 次计分'}
                     {point.source.status === 'stale' && ' · 显示上次核验数据'}
                     {point.source.synced_at && ' · 同步于 ' + point.source.synced_at.slice(0, 10)}
+                    {point.source.captured_on && ' · 快照 ' + point.source.captured_on}
                     {' · '}
                     <a href={point.source.url} target="_blank" rel="noreferrer" className="text-[var(--brand-primary)] hover:underline">
                       {point.source.label}
                     </a>
                   </div>
+                  <div className="mt-1 text-[var(--text-muted)]">{point.source.scoring_rule}</div>
                   {deltas.map(({ subject, delta }) => (
                     <div key={subject} className="mt-1 text-[var(--text-secondary)]">{subject} · {fmtDeltaPP(delta)}</div>
                   ))}

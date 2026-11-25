@@ -10,25 +10,26 @@ interface PublicScore {
   configuration: string | null;
   score_pct: number;
   task_count: number;
-  sample_count: number;
+  sample_count: number | null;
   published_at: string | null;
 }
 
 interface PublicSource {
-  release_id: string;
-  legacy_release_id: string | null;
-  legacy_metric: string | null;
+  release_id?: string;
+  legacy_release_id?: string;
+  legacy_metric?: string;
   benchmark_slug: string;
   label: string;
   url: string;
   dataset_version: string;
   split: string;
   metric: string;
-  protocol: string;
+  protocol?: string;
+  scoring_rule: string;
   task_count: number;
-  status: 'pending' | 'ready' | 'stale' | 'unavailable';
-  synced_at: string | null;
-  published_at: string | null;
+  status: 'pending' | 'ready' | 'stale' | 'unavailable' | 'snapshot';
+  synced_at?: string | null;
+  captured_on?: string;
   rows: PublicScore[];
 }
 
@@ -59,8 +60,8 @@ export function leaderName(leader: PublicScore) {
 export function useComparePublicLeaders(rows: CompareRow[], subjects: CompareSubject[], snapshot: Snapshot) {
   const userId = useAppStore((state) => state.user?.user_id);
   const catalog = useQuery({
-    queryKey: ['public-baselines', userId],
-    queryFn: ({ signal }) => apiFetch<{ sources: PublicSource[] }>('/api/v1/public-baselines', { signal }),
+    queryKey: ['public-baselines', userId, 'with-text-leaders'],
+    queryFn: ({ signal }) => apiFetch<{ sources: PublicSource[] }>('/api/v1/public-baselines?include_text_leaders=true', { signal }),
     staleTime: 60_000,
     refetchInterval: 60_000,
     enabled: rows.length > 0,

@@ -12,9 +12,9 @@ router = APIRouter(prefix="/api/v1/public-baselines", tags=["public-baselines"])
 
 @router.get("")
 def list_public_baselines(
-    request: Request, user: AuthUser = Depends(get_current_user)
+    request: Request, user: AuthUser = Depends(get_current_user), include_text_leaders: bool = False,
 ) -> dict[str, Any]:
-    return request.app.state.ctx.public_baselines.catalog()
+    return request.app.state.ctx.public_baselines.catalog(include_text_leaders=include_text_leaders)
 
 
 @router.get("/compare")
