@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import json
 import math
@@ -13,7 +14,7 @@ import time
 import tomllib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
@@ -870,42 +871,66 @@ class HotIndexer:
         self,
         batch_name: str,
         default_batch_id: str,
+        *,
+        generation_id: str | None,
+        runner_job_id: str | None,
+        manifest_sha256: str | None,
     ) -> tuple[str, str, str] | None:
-        """Recover Runner ownership from the control-plane submission or its private recovery record."""
-        job_row = self.db.fetchone(
+        """Bind ownership to the current manifest and its authenticated control-plane publication."""
+        doc = None
+        if self.settings.state_dir is not None:
+            try:
+                name = _submission_filename(batch_name)
+                with _submission_dir(self.settings.state_dir) as directory:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                    with os.fdopen(fd, "rb") as stream:
+                        _check_submission_file(os.fstat(fd))
+                        doc = json.load(stream)
+            except (AppError, OSError, ValueError):
+                pass
+        if (
+            isinstance(doc, dict)
+            and doc.get("batch_name") == batch_name
+            and doc.get("batch_id") == default_batch_id
+            and doc.get("source_namespace") == "runner_published"
+            and doc.get("generation_id") == generation_id
+            and (generation_id is None or isinstance(doc.get("job_id"), str))
+            and doc.get("manifest_sha256") in (None, manifest_sha256)
+            and (runner_job_id is None or (
+                doc.get("job_id") == runner_job_id and doc.get("manifest_sha256") == manifest_sha256
+            ))
+            and doc.get("evidence_approval") in ("approved_restricted", "pending", "revoked")
+            and all(isinstance(doc.get(k), str) and doc[k].strip() for k in ("project_id", "owner_id"))
+        ):
+            job = self.db.fetchone(
+                "SELECT batch_name, project_id, owner_id FROM exec_jobs WHERE job_id = ?",
+                (doc.get("job_id"),),
+            )
+            if job is None or (job["batch_name"], job["project_id"], job["owner_id"]) == (
+                batch_name, doc["project_id"], doc["owner_id"]
+            ):
+                return doc["project_id"], doc["owner_id"], doc["evidence_approval"]
+
+        if generation_id is None or manifest_sha256 is None:
+            return None
+        # Releases before the private ledger still recorded the complete manifest digest in
+        # the control-plane reconciliation event. A matching batch name alone is insufficient.
+        job = self.db.fetchone(
             """
-            SELECT project_id, owner_id
-            FROM exec_jobs
-            WHERE batch_id = ? AND batch_name = ?
-            ORDER BY created_at DESC
+            SELECT j.project_id, j.owner_id FROM exec_jobs j
+            JOIN exec_job_events e ON e.job_id = j.job_id AND e.event_type = 'reconciled'
+            WHERE j.batch_id = ? AND j.batch_name = ? AND (? IS NULL OR j.job_id = ?)
+              AND json_extract(e.payload_json, '$.source_namespace') = 'runner_published'
+              AND json_extract(e.payload_json, '$.generation_id') = ?
+              AND json_extract(e.payload_json, '$.snapshot_digest') = ?
             LIMIT 1
             """,
-            (default_batch_id, batch_name),
+            (default_batch_id, batch_name, runner_job_id, runner_job_id,
+             generation_id, f"sha256:{manifest_sha256}"),
         )
-        if job_row is not None and job_row.get("project_id") and job_row.get("owner_id"):
-            return (str(job_row["project_id"]), str(job_row["owner_id"]), "approved_restricted")
-
-        if self.settings.state_dir is None:
+        if job is None:
             return None
-        try:
-            name = _submission_filename(batch_name)
-            with _submission_dir(self.settings.state_dir) as directory:
-                fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
-                with os.fdopen(fd, "rb") as stream:
-                    _check_submission_file(os.fstat(fd))
-                    doc = json.load(stream)
-        except (AppError, OSError, ValueError):
-            return None
-        if (
-            not isinstance(doc, dict)
-            or doc.get("batch_name") != batch_name
-            or doc.get("batch_id") != default_batch_id
-            or doc.get("source_namespace") != "runner_published"
-            or doc.get("evidence_approval") not in ("approved_restricted", "pending", "revoked")
-            or not all(isinstance(doc.get(k), str) and doc[k].strip() for k in ("project_id", "owner_id"))
-        ):
-            return None
-        return doc["project_id"], doc["owner_id"], doc["evidence_approval"]
+        return job["project_id"], job["owner_id"], "approved_restricted"
 
     def _reject_unowned_runner_batch(self, batch_dir: Path, source_locator: str) -> str:
         """Remove stale derived rows while leaving the publish artifacts available for recovery."""
@@ -954,18 +979,30 @@ class HotIndexer:
     ) -> str:
         """Index one harbor-runs/<batch> or runner_published/<batch> directory atomically (I-01, I-03)."""
         try:
-            return self._scan_single_harbor_batch_impl(
-                batch_dir,
-                force=force,
-                source_namespace=source_namespace,
-                project_override=project_override,
-                owner_override=owner_override,
-                approval_override=approval_override,
-                existing_digests=existing_digests,
-                precomputed_digest=precomputed_digest,
-                prefetched_top_bytes=prefetched_top_bytes,
-                deep_trial_enrich=deep_trial_enrich,
-            )
+            with ExitStack() as resources:
+                if source_namespace == "runner_published":
+                    try:
+                        fd = os.open(batch_dir / ".publish.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        lease = resources.enter_context(os.fdopen(fd, "rb"))
+                        try:
+                            fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            return "skipped_locked"
+                return self._scan_single_harbor_batch_impl(
+                    batch_dir,
+                    force=force,
+                    source_namespace=source_namespace,
+                    project_override=project_override,
+                    owner_override=owner_override,
+                    approval_override=approval_override,
+                    existing_digests=existing_digests,
+                    precomputed_digest=precomputed_digest,
+                    prefetched_top_bytes=prefetched_top_bytes,
+                    deep_trial_enrich=deep_trial_enrich,
+                )
         except AppError as exc:
             if exc.code == "LOCAL_DISK_LOW":
                 raise
@@ -1013,9 +1050,35 @@ class HotIndexer:
         source_locator = f"{ns}:{batch_name}"
         default_batch_id = make_batch_id(source_locator)
         now = utcnow_iso()
+        pub_manifest_path = batch_dir / "publish-manifest.json"
         runner_ownership = None
         if ns == "runner_published":
-            runner_ownership = self._resolve_runner_published_ownership(batch_name, default_batch_id)
+            runner_job_id = None
+            runner_generation = None
+            manifest_sha256 = None
+            try:
+                if pub_manifest_path.is_symlink():
+                    raise ValueError("Runner manifest is a symlink")
+                raw_runner_manifest = pub_manifest_path.read_bytes()
+                parsed_manifest = json.loads(raw_runner_manifest)
+                runner_generation = parsed_manifest["generation_id"]
+                runner_job_id = parsed_manifest.get("runner_job_id")
+                if not isinstance(runner_generation, str) or not runner_generation:
+                    raise ValueError("Invalid Runner manifest generation")
+                if runner_job_id is not None and (
+                    not isinstance(runner_job_id, str) or not SAFE_ID_RE.fullmatch(runner_job_id)
+                ):
+                    raise ValueError("Invalid Runner manifest job")
+                manifest_sha256 = _sha256_bytes(raw_runner_manifest)
+                prefetched_top_bytes = {"publish-manifest.json": raw_runner_manifest}
+            except FileNotFoundError:
+                pass  # Legacy private submissions predate v2 manifests.
+            except (OSError, ValueError, TypeError, KeyError):
+                return self._reject_unowned_runner_batch(batch_dir, source_locator)
+            runner_ownership = self._resolve_runner_published_ownership(
+                batch_name, default_batch_id, generation_id=runner_generation,
+                runner_job_id=runner_job_id, manifest_sha256=manifest_sha256,
+            )
             if runner_ownership is None:
                 return self._reject_unowned_runner_batch(batch_dir, source_locator)
 
@@ -1094,6 +1157,8 @@ class HotIndexer:
 
         if runner_ownership is not None:
             project_id, owner_id, reg_approval = runner_ownership
+        elif project_override and owner_override and approval_override:
+            project_id, owner_id, reg_approval = project_override, owner_override, approval_override
         else:
             reg_proj, reg_owner, reg_approval, _ = self.approval_registry.lookup_full(batch_dir)
             project_id = project_override or reg_proj
@@ -1108,8 +1173,6 @@ class HotIndexer:
         vlm_metrics_path = batch_dir / "vlmevalkit" / "metrics.json"
         selection_path = batch_dir / "selection.json"
         run_config_path = batch_dir / "run-config.json"
-        pub_manifest_path = batch_dir / "publish-manifest.json"
-
         # Rule 3: strict publish-manifest.json verification — parse ONLY verified in-memory bytes!
         pub_manifest: dict[str, Any] | None = None
         verified_bytes: dict[str, bytes] = {}
@@ -2914,13 +2977,25 @@ class HotIndexer:
                             return d, dg, None
                     return d, dg, buf
 
+                # Source registry paths also require CIFS metadata lookups.
+                def _lookup_approval(batch_dir: Path) -> tuple[str | None, str | None, str | None]:
+                    try:
+                        return self.approval_registry.lookup(batch_dir)
+                    except (OSError, RuntimeError):
+                        # Let the batch scanner report resolution errors on its normal path.
+                        return None, None, None
+
                 with ThreadPoolExecutor(max_workers=20) as pool:
                     prefetched = list(pool.map(_prefetch_batch, to_scan))
+                    approvals = list(pool.map(_lookup_approval, (d for d, _, _ in prefetched)))
 
-                for d, dg, top_buf in prefetched:
+                for (d, dg, top_buf), (project_id, owner_id, approval) in zip(prefetched, approvals, strict=True):
                     res = self.scan_single_harbor_batch(
                         d,
                         force=force,
+                        project_override=project_id,
+                        owner_override=owner_id,
+                        approval_override=approval,
                         existing_digests=existing_digests,
                         precomputed_digest=dg,
                         prefetched_top_bytes=top_buf,
