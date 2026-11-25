@@ -38,6 +38,7 @@ import uuid
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 # Ensure backend root is importable when run via `python3 -m app.runner.daemon` or direct script
@@ -58,6 +59,12 @@ from app.logging_setup import (
 from app.runner.cli_contract import (
     build_managed_run_py_command,
     materialize_managed_run_config,
+)
+from app.managed_framework.vlmevalkit import (
+    PUBLIC_IMAGE_CACHE_ROOT,
+    PUBLIC_IMAGE_CACHE_SOURCE,
+    is_public_image_source,
+    public_image_cache_root,
 )
 from app.runner.terminal_images import terminal_image_readiness, terminal_selection_ready
 from app.runner.vlmevalkit_results import read_vlmevalkit_results
@@ -378,6 +385,18 @@ class IsolatedRunnerManager:
                 "message": "当前隔离 Runner 节点未配置 VLMEVALKIT_ROOT / VLMEVALKIT_PYTHON，拒绝执行 VLMEvalKit 作业",
                 "detail": {"kind": kind, "vlmevalkit_ready": False},
             }
+        if kind == "vlmevalkit" and is_public_image_source(spec.get("dataset_path")):
+            if self.settings.production_mode or os.getenv(PUBLIC_IMAGE_CACHE_ROOT) or os.getenv(PUBLIC_IMAGE_CACHE_SOURCE):
+                try:
+                    with TemporaryDirectory(prefix="vlm-image-check-", dir=public_image_cache_root()) as probe:
+                        (Path(probe) / "write-test").touch()
+                except ValueError as error:
+                    return 503, {"code": "VLMEVALKIT_IMAGE_CACHE_UNAVAILABLE", "message": str(error)}
+                except OSError as error:
+                    return 503, {
+                        "code": "VLMEVALKIT_IMAGE_CACHE_UNAVAILABLE",
+                        "message": f"公开视觉图片缓存目录无法写入（{error.strerror or type(error).__name__}）",
+                    }
 
         assert self.settings.runner_work_dir is not None and self.settings.evidence_store_dir is not None
         work_dir = self.settings.runner_work_dir / job_id
@@ -705,6 +724,10 @@ class IsolatedRunnerManager:
         if is_vlm and os.environ.get("REQUESTS_CA_BUNDLE"):
             # The native toolkit uses requests, which otherwise uses its bundled CA set.
             extra_env["REQUESTS_CA_BUNDLE"] = os.environ["REQUESTS_CA_BUNDLE"]
+        if is_vlm and is_public_image_source(spec.get("dataset_path")):
+            for pass_key in (PUBLIC_IMAGE_CACHE_ROOT, PUBLIC_IMAGE_CACHE_SOURCE):
+                if os.getenv(pass_key):
+                    extra_env[pass_key] = os.environ[pass_key]
         if uses_gateway:
             extra_env.update(self._gateway_env)
 
