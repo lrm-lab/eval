@@ -200,6 +200,9 @@ export function ComparePage() {
   const openId = shortId || cmpQueryId;
   const focusBenchmarkParam = searchParams.get('focus_benchmark') || '';
   const focusDatasetParam = searchParams.get('focus_dataset') || '';
+  const routeProtocol = searchParams.get('scoring_protocol')?.trim() || undefined;
+  const routeBaselineGeneration = searchParams.get('baseline_generation')?.trim() || undefined;
+  const routeCandidateGeneration = searchParams.get('candidate_generation')?.trim() || undefined;
 
   const [modeKind, setModeKind] = useState<'batch' | 'legacy_model'>('batch');
   const [subjects, setSubjects] = useState<CompareSubjectRef[]>([]);
@@ -619,7 +622,10 @@ export function ComparePage() {
     const bParam = searchParams.get('baseline');
     const cParam = searchParams.get('candidate');
     const thrParam = searchParams.get('regression_threshold_pp');
-    const initKey = `${routeA || ''}|${routeB || ''}|${presetParam || ''}|${kindParam || ''}|${bParam || ''}|${cParam || ''}|${thrParam || ''}|${focusBenchmarkParam}|${focusDatasetParam}`;
+    const initKey = JSON.stringify([
+      routeA, routeB, presetParam, kindParam, bParam, cParam, thrParam, focusBenchmarkParam, focusDatasetParam,
+      ...(routeA && routeB ? [routeProtocol, routeBaselineGeneration, routeCandidateGeneration] : []),
+    ]);
     if (initTriggeredRef.current === initKey) return;
 
     if (kindParam === 'legacy_model' && bParam && cParam) {
@@ -640,13 +646,21 @@ export function ComparePage() {
     if (routeA && routeB) {
       initTriggeredRef.current = initKey;
       const subjs: CompareSubjectRef[] = [
-        { id: 's1', kind: 'batch', batch_id: routeA, alias: routeA },
-        { id: 's2', kind: 'batch', batch_id: routeB, alias: routeB },
+        { id: 's1', kind: 'batch', batch_id: routeA, alias: routeA, expected_generation_id: routeBaselineGeneration },
+        { id: 's2', kind: 'batch', batch_id: routeB, alias: routeB, expected_generation_id: routeCandidateGeneration },
       ];
       setModeKind('batch');
       setSubjects(subjs);
       setBaselineId('s1');
-      runCompareMut.mutate({ subjects: subjs, baseline_subject_id: 's1', regression_threshold_pp: thresholdPp, include_verdict: true });
+      setScoringProtocol(routeProtocol || '');
+      setResult(null);
+      runCompareMut.mutate({
+        subjects: subjs,
+        baseline_subject_id: 's1',
+        scoring_protocol: routeProtocol,
+        regression_threshold_pp: thresholdPp,
+        include_verdict: true,
+      });
       return;
     }
 
@@ -1021,6 +1035,9 @@ export function ComparePage() {
         />
       ) : runCompareMut.isPending || needsSavedOpen ? (
         <TableSkeleton rows={8} cols={5} />
+      ) : routeA && routeB && !openId && (routeBaselineGeneration || routeCandidateGeneration) &&
+        runCompareMut.error instanceof ApiError && runCompareMut.error.code === 'GENERATION_MISMATCH' ? (
+        <StateNoticeCard kind="error" title="对比链接中的批次发布代已更新" description={runCompareMut.error.message} />
       ) : result ? (
         <div className="space-y-5">
           {(user && ['researcher', 'admin'].includes(user.role) || result.auto_insights.length > 0 || activeShare) && (

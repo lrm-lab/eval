@@ -415,6 +415,7 @@ export interface CompareSubjectRef {
   id: string;
   kind: 'batch' | 'legacy_model';
   batch_id?: string;
+  expected_generation_id?: string;
   model_col?: string;
   model_cols?: string[];
   alias: string;
