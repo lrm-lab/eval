@@ -148,10 +148,9 @@ def test_a02_a03_a04_a13_a15_real_197_cold_data(isolated_settings: Settings) -> 
     assert res_g["rows"][0]["intersection"]["common_covered_tasks"] == 165
     assert res_g["rows"][0]["intersection"]["common_valid_scored_tasks"] == 118
 
-    # WildClawBench readable batches + permission gaps (incl. partial permission gap on pi-jhpV5-Qwen3_8-27B)
+    # WildClawBench can have no remaining permission gaps after the shared owner grants read access.
     wc_res = cold.index_legacy_wildclawbench(force=True)
     assert wc_res["batches"] >= 2
-    assert wc_res["unreadable_dirs"] >= 4
 
     # Historical text & multimodal offset indexing (IFEval, AI2D_TEST, RealWorldQA) + O(1) seek < 25ms!
     assert cold.index_legacy_text_json_offsets("IFEval", force=True) >= 1
@@ -198,13 +197,71 @@ def test_a02_a03_a04_a13_a15_real_197_cold_data(isolated_settings: Settings) -> 
     cov = cold.build_source_coverage_report()
     sources = {c["source"]: c for c in cov}
     assert "harbor-runs" in sources
-    assert "2026-11-20/wildclawbench" in sources and sources["2026-11-20/wildclawbench"]["status"] == "partial_permission_denied"
+    assert sources["2026-11-20/wildclawbench"]["status"] == (
+        "partial_permission_denied" if wc_res["unreadable_dirs"] else "indexed"
+    )
     assert "2026-11-20/IFEval" in sources and sources["2026-11-20/IFEval"]["status"] == "indexed"
     assert "2026-11-20/AI2D_TEST" in sources and sources["2026-11-20/AI2D_TEST"]["status"] == "indexed"
     assert "2026-11-20/RealWorldQA" in sources and sources["2026-11-20/RealWorldQA"]["status"] == "indexed"
     assert "bundles/gaia-validation-20261124.tar" in sources and sources["bundles/gaia-validation-20261124.tar"]["status"] == "ready"
     assert "training-runs" in sources
     db.close_thread_connection()
+
+
+def test_wildclaw_summary_preserves_attempt_denominator_and_source_generation(
+    isolated_settings: Settings, tmp_path: Path,
+) -> None:
+    settings = isolated_settings
+    taxonomy = settings.taxonomy_file.read_text()
+    settings.config_dir = tmp_path / "config"
+    settings.config_dir.mkdir()
+    settings.taxonomy_file.write_text(taxonomy)
+    settings.tianxi_root = tmp_path / "tianxi"
+    run = settings.legacy_root_dir / "wildclawbench" / "openclaw-2026.11.6-Qwen3_8-27B"
+    run.mkdir(parents=True)
+    settings.source_approval_file.write_text(json.dumps({"sources": [{
+        "source_root": str(run),
+        "project_id": "science",
+        "approval_status": "approved_public",
+        "approved_evidence_classes": ["summary_dto"],
+    }]}))
+    summary = run / "rsi_summary_openclaw-2026.11.6_all.json"
+    tasks = {f"task-{i}": {"task_id": f"attempt-{i}", "scores": {"overall_score": 0.5}} for i in range(60)}
+    tasks["task-0"]["error"] = "failed"
+    tasks["task-1"]["scores"]["private_text"] = "hidden"
+    report = {"bench": "wildclawbench", "agent": "openclaw-2026.11.6", "model": "vllm/Qwen3_8-27B",
+              "n": 60, "score": 29.5 / 60, "results": tasks}
+    summary.write_text(json.dumps(report))
+
+    probe_isolated_dir(settings.state_dir, create=True)
+    db = Database(settings.db_path)
+    init_db(db)
+    sync_taxonomy_to_db(db, settings.taxonomy_file)
+    cold = ColdIndexer(settings, db)
+    assert cold.index_legacy_wildclawbench() == {"batches": 1, "unreadable_dirs": 0}
+    assert cold.index_legacy_wildclawbench() == {"batches": 0, "unreadable_dirs": 0}
+    meta = db.fetchone("SELECT * FROM batches")
+    assert (meta["project_id"], meta["recorded"], meta["scored"], meta["valid_mean"]) == ("science", 60, 59, 0.5)
+    assert meta["harness"] == "openclaw"
+    assert meta["harness_version"] == "openclaw-2026.11.6"
+    assert json.loads(meta["run_config_json"])["source_denominator"] == 60
+    failed = db.fetchone("SELECT reward_valid, reward, status FROM episodes WHERE task_id='task-0'")
+    assert failed == {"reward_valid": 0, "reward": None, "status": "failed"}
+    metrics = db.fetchone("SELECT verifier_rewards_json FROM episodes WHERE task_id='task-1'")
+    assert json.loads(metrics["verifier_rewards_json"]) == {"overall_score": 0.5}
+
+    tasks["task-1"]["scores"]["overall_score"] = 1
+    report["score"] = 30 / 60
+    summary.write_text(json.dumps(report))
+    assert cold.index_legacy_wildclawbench(force=True)["batches"] == 1
+    generation = db.fetchone("SELECT generation_id FROM batches")["generation_id"]
+    assert generation != meta["generation_id"]
+    assert db.fetchall("SELECT DISTINCT generation_id FROM episodes") == [{"generation_id": generation}]
+
+    report["score"] = 0.25
+    summary.write_text(json.dumps(report))
+    assert cold.index_legacy_wildclawbench(force=True)["batches"] == 0
+    assert db.fetchone("SELECT generation_id FROM batches")["generation_id"] == generation
 
 
 def test_cold_zst_bundle_streaming_and_cache_hit(tmp_path: Path, isolated_settings: Settings) -> None:
