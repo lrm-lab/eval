@@ -50,6 +50,11 @@ export function CompareScoreCharts({
 
     const leaderValues = overlays.map(({ point }) => point?.leader.score_pct ?? null);
     const hasLeader = leaderValues.some((score) => score != null);
+    const legendNames = scores.map(({ name }) => name);
+    if (hasLeader) {
+      if (stacked) legendNames.unshift(LEADER_SERIES);
+      else legendNames.push(LEADER_SERIES);
+    }
     const radarY = stacked ? 148 : 158;
     const radarRadius = stacked ? 78 : 86;
 
@@ -75,8 +80,8 @@ export function CompareScoreCharts({
       itemStyle: { color: LEADER_COLOR, borderRadius: [4, 4, 0, 0] },
       data: leaderValues,
     };
-    // Native radar layouts place missing values at the center. Plot symbols
-    // only on measured axes so missing scores cannot look like zero scores.
+    // Native radar layouts place missing values at the center. Connect only
+    // adjacent measured axes so a gap never looks like a score of zero.
     const leaderRadar: echarts.CustomSeriesOption = {
       name: LEADER_SERIES,
       type: 'custom',
@@ -87,16 +92,32 @@ export function CompareScoreCharts({
       tooltip: { trigger: 'item' },
       renderItem: (_params, api) => {
         const index = Number(api.value(0));
-        const angle = Math.PI / 2 + Math.PI * 2 * index / rows.length;
-        const radius = Number(api.value(1)) / 100 * radarRadius;
-        return {
+        function position(axis: number, score: number) {
+          const angle = Math.PI / 2 + Math.PI * 2 * axis / rows.length;
+          const radius = score / 100 * radarRadius;
+          return {
+            x: api.getWidth() * (stacked ? 0.5 : 0.1667) + radius * Math.cos(angle),
+            y: radarY - radius * Math.sin(angle),
+          };
+        }
+        const { x, y } = position(index, Number(api.value(1)));
+        const marker: echarts.CustomSeriesRenderItemReturn = {
           type: 'circle',
-          shape: {
-            cx: api.getWidth() * (stacked ? 0.5 : 0.1667) + radius * Math.cos(angle),
-            cy: radarY - radius * Math.sin(angle),
-            r: 5,
-          },
+          shape: { cx: x, cy: y, r: 4 },
           style: { fill: LEADER_COLOR, stroke: theme === 'dark' ? '#18181b' : '#ffffff', lineWidth: 1 },
+        };
+        const next = (index + 1) % rows.length;
+        const nextScore = leaderValues[next];
+        if (nextScore == null) return marker;
+        const end = position(next, nextScore);
+        return {
+          type: 'group',
+          children: [{
+            type: 'line',
+            silent: true,
+            shape: { x1: x, y1: y, x2: end.x, y2: end.y },
+            style: { stroke: LEADER_COLOR, opacity: 0.85, lineWidth: 1.5, lineDash: [4, 3] },
+          }, marker],
         };
       },
     };
@@ -145,7 +166,9 @@ export function CompareScoreCharts({
       legend: {
         type: 'scroll',
         selected: visibleLegend.current,
-        data: [...scores.map(({ name }) => name), ...(hasLeader ? [LEADER_SERIES] : [])],
+        data: legendNames,
+        itemWidth: stacked ? 16 : undefined,
+        itemGap: stacked ? 8 : undefined,
         left: 4,
         right: 4,
         bottom: 32,

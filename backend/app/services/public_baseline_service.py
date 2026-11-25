@@ -181,6 +181,7 @@ class PublicBaselineService:
                 item = asdict(leader)
                 item["id"] = leader.row.id.partition(":")[0]
                 item["status"] = "snapshot"
+                item["task_count"] = leader.row.task_count
                 item["rows"] = [item.pop("row")]
                 result.append(item)
         return {"sources": result}

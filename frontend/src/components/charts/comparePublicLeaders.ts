@@ -71,6 +71,7 @@ export function useComparePublicLeaders(rows: CompareRow[], subjects: CompareSub
     if (!catalog.data) return { missing: catalog.isError ? '公开榜单加载失败' : '正在加载公开榜单' };
     const legacy = row.scoring_protocol === 'legacy-20261120-csv';
     const forBenchmark = catalog.data.sources.filter((source) => source.benchmark_slug === row.benchmark_slug);
+    if (legacy && !row.legacy_metric && forBenchmark.length) return { missing: '历史对比缺少可核验的指标' };
     const source = forBenchmark.find((source) => legacy
       ? source.legacy_release_id === row.dataset_release_id && source.legacy_metric === row.legacy_metric
       : source.release_id === row.dataset_release_id);
