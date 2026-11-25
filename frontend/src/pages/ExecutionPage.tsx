@@ -80,6 +80,12 @@ export interface RegisteredSuite {
   reason: string | null;
 }
 
+const harborSmokeTasks: Partial<Record<string, string>> = {
+  gaia: '076c8171-9b3b-49b9-a477-244d2a532826',
+  deepswe: 'clack-async-autocomplete-options',
+  wildclaw: '03_Social_Interaction_task_1_meeting_negotiation',
+};
+
 function defaultSuiteForRunner(suites: RegisteredSuite[], kind: RunnerKind) {
   const runner = kind === 'harbor_gateway' ? 'harbor' : kind;
   const matching = suites.filter((suite) => suite.runner === runner && suite.selectable);
@@ -1597,14 +1603,14 @@ export function ExecutionPage() {
                       const nextSuiteId = e.target.value;
                       setSuiteId(nextSuiteId);
                       setKind(null);
-                      if (nextSuiteId === 'gaia') {
-                        // Use the native configuration that has completed grading on this host.
+                      const smokeTask = harborSmokeTasks[nextSuiteId];
+                      if (smokeTask) {
                         setAgent('pi');
                         setHarnessVersion('0.87.1');
                         setSelectionMode('tasks');
-                        setTasksInput('076c8171-9b3b-49b9-a477-244d2a532826');
+                        setTasksInput(smokeTask);
                       } else {
-                        if (suiteId === 'gaia') setSelectionMode('all');
+                        if (harborSmokeTasks[suiteId]) setSelectionMode('all');
                         setTasksInput('');
                       }
                       setPlanResult(null);
