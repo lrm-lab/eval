@@ -16,7 +16,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any, Iterator
+from typing import Any, Callable, Iterable, Iterator
 
 import yaml
 
@@ -91,12 +91,26 @@ def _sha256_file(path: Path) -> tuple[str, int]:
     return h.hexdigest(), total
 
 
-def _stat_tuple(path: Path) -> tuple[int, int, int] | None:
+_FileIdentity = tuple[int, int, int]
+
+
+def _file_identity(st: os.stat_result) -> _FileIdentity:
+    return st.st_ino, st.st_mtime_ns, st.st_size
+
+
+def _stat_tuple(path: Path) -> _FileIdentity | None:
     try:
-        st = path.stat()
-        return (st.st_ino, st.st_mtime_ns, st.st_size)
+        return _file_identity(path.stat())
     except OSError:
         return None
+
+
+def _stat_if_type(path: Path, matches: Callable[[int], bool]) -> os.stat_result | None:
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    return info if matches(info.st_mode) else None
 
 
 def _training_ref_needs_backfill(ev_refs_json: str | None) -> bool:
@@ -156,29 +170,54 @@ def _batch_needs_backfill(
     return runner == "vlmevalkit" and checks.get("legacy_vlm_media_indexed") is not True
 
 
-def _dir_content_digest(batch_dir: Path) -> str:
-    """Single-scandir digest for 15s incremental polling (< 200ms across all harbor-runs on CIFS).
-    Explicitly ignores `.publish.lock` (v2.2.1 I-06 / run.py:64)."""
-    items: list[str] = []
-    has_vlm_dir = False
-    with os.scandir(batch_dir) as it:
-        for entry in it:
-            name = entry.name
-            if name == "vlmevalkit" and entry.is_dir(follow_symlinks=False):
-                has_vlm_dir = True
-                continue
-            if name in _WATCHED_TOP_FILES:
+def _batch_dirs(root: Path) -> list[Path]:
+    try:
+        with os.scandir(root) as entries:
+            return sorted(Path(entry.path) for entry in entries if entry.is_dir(follow_symlinks=False))
+    except OSError:
+        return []
+
+
+def _batch_top_snapshot(batch_dir: Path) -> tuple[str, dict[str, _FileIdentity]]:
+    """Fingerprint the watched files in one directory enumeration, ignoring .publish.lock."""
+    files: dict[str, _FileIdentity] = {}
+    with os.scandir(batch_dir) as entries:
+        for entry in entries:
+            if entry.name == "vlmevalkit" and entry.is_dir(follow_symlinks=False):
+                metrics = _stat_tuple(batch_dir / "vlmevalkit" / "metrics.json")
+                if metrics is not None:
+                    files["vlmevalkit/metrics.json"] = metrics
+            elif entry.name in _WATCHED_TOP_FILES:
                 try:
-                    st = entry.stat(follow_symlinks=False)
-                    items.append(f"{name}:{st.st_ino}:{st.st_mtime_ns}:{st.st_size}")
+                    files[entry.name] = _file_identity(entry.stat(follow_symlinks=False))
                 except OSError:
                     pass
-    if has_vlm_dir:
-        st_v = _stat_tuple(batch_dir / "vlmevalkit" / "metrics.json")
-        if st_v is not None:
-            items.append(f"vlmevalkit/metrics.json:{st_v[0]}:{st_v[1]}:{st_v[2]}")
-    items.sort()
-    return hashlib.sha256("|".join(items).encode("utf-8")).hexdigest()
+    digest_input = "|".join(
+        f"{name}:{ino}:{mtime}:{size}" for name, (ino, mtime, size) in sorted(files.items())
+    )
+    return hashlib.sha256(digest_input.encode("utf-8")).hexdigest(), files
+
+
+def _dir_content_digest(batch_dir: Path) -> str:
+    digest, _ = _batch_top_snapshot(batch_dir)
+    return digest
+
+
+def _prefetch_batch_top(
+    batch_dir: Path, files: dict[str, _FileIdentity]
+) -> dict[str, bytes] | None:
+    paths = ("publish-manifest.json",) if "publish-manifest.json" in files else files
+    data: dict[str, bytes] = {}
+    for rel in paths:
+        path = batch_dir / rel
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            return None
+        if _stat_tuple(path) != files[rel]:
+            return None
+        data[rel] = raw
+    return data
 
 
 def _recompute_report_summary(
@@ -635,32 +674,42 @@ class SourceApprovalRegistry:
         else:
             self.sources = []
 
-    def lookup_full(self, target_path: Path) -> tuple[str, str, str, frozenset[str]]:
-        """Return (project_id, owner_id, approval_status, approved_evidence_classes) for target_path.
-        Unmatched directories default strictly to pending with EMPTY approved_evidence_classes."""
-        resolved = str(target_path.resolve())
-        best: dict[str, Any] | None = None
-        best_len = -1
+    def _resolved_sources(self) -> Iterator[tuple[str, bool, dict[str, Any]]]:
         for entry in self.sources:
             raw_root = str(entry.get("source_root") or "")
             if not raw_root:
                 continue
-            mode = str(entry.get("match_mode", "dir"))
-            if mode == "prefix":
-                p_raw = Path(raw_root)
-                norm_prefix = (
-                    str(p_raw.parent.resolve() / p_raw.name)
-                    if p_raw.parent.exists()
-                    else raw_root
-                )
-                if resolved.startswith(norm_prefix) and len(norm_prefix) > best_len:
-                    best = entry
-                    best_len = len(norm_prefix)
+            is_prefix = entry.get("match_mode", "dir") == "prefix"
+            path = Path(raw_root)
+            if is_prefix:
+                parent = path.parent
+                root = str(parent.resolve() / path.name) if parent.exists() else raw_root
             else:
-                root = str(Path(raw_root).resolve())
-                if (resolved == root or resolved.startswith(root.rstrip("/") + "/")) and len(root) > best_len:
-                    best = entry
-                    best_len = len(root)
+                root = str(path.resolve())
+            yield root, is_prefix, entry
+
+    def resolve_sources(self) -> tuple[tuple[str, bool, dict[str, Any]], ...]:
+        return tuple(self._resolved_sources())
+
+    def lookup_full(
+        self,
+        target_path: Path,
+        *,
+        resolved_sources: Iterable[tuple[str, bool, dict[str, Any]]] | None = None,
+    ) -> tuple[str, str, str, frozenset[str]]:
+        """Return (project_id, owner_id, approval_status, approved_evidence_classes) for target_path."""
+        resolved = str(target_path.resolve())
+        best: dict[str, Any] | None = None
+        best_len = -1
+        sources = self._resolved_sources() if resolved_sources is None else resolved_sources
+        for root, is_prefix, entry in sources:
+            matches = (
+                resolved.startswith(root) if is_prefix
+                else resolved == root or resolved.startswith(root.rstrip("/") + "/")
+            )
+            if matches and len(root) > best_len:
+                best = entry
+                best_len = len(root)
         if best is not None:
             classes = frozenset(str(c) for c in (best.get("approved_evidence_classes") or []))
             return (
@@ -1121,7 +1170,6 @@ class HotIndexer:
         if precomputed_digest is not None:
             digest = precomputed_digest
         else:
-            # Single scandir performs both permission check and digest calculation (fast on CIFS!)
             try:
                 digest = _dir_content_digest(batch_dir)
             except PermissionError:
@@ -2515,14 +2563,14 @@ class HotIndexer:
 
     def scan_legacy_leaderboard_csv(self) -> int:
         csv_path = self.settings.legacy_root_dir / "leaderboard.csv"
-        if not csv_path.is_file():
-            return 0
-        st = _stat_tuple(csv_path)
+        return self._index_legacy_leaderboard_csv(csv_path, _stat_if_type(csv_path, stat.S_ISREG))
+
+    def _index_legacy_leaderboard_csv(self, csv_path: Path, st: os.stat_result | None) -> int:
         if st is None:
             return 0
         cache_key = str(csv_path)
         cached = self.db.fetchone("SELECT mtime_ns, size_bytes FROM cold_file_cache WHERE file_path = ?", (cache_key,))
-        if cached and cached["mtime_ns"] == st[1] and cached["size_bytes"] == st[2]:
+        if cached and cached["mtime_ns"] == st.st_mtime_ns and cached["size_bytes"] == st.st_size:
             return 0
 
         rows_to_insert: list[tuple[Any, ...]] = []
@@ -2567,6 +2615,10 @@ class HotIndexer:
                         )
                     )
 
+        current = _stat_if_type(csv_path, stat.S_ISREG)
+        if current is None or _file_identity(current) != _file_identity(st):
+            return 0  # Retry on the next poll with one version of the CSV.
+
         with self.db.transaction() as conn:
             conn.execute("DELETE FROM legacy_leaderboard_rows")
             for item in rows_to_insert:
@@ -2607,21 +2659,26 @@ class HotIndexer:
                     status = 'ready',
                     updated_at = excluded.updated_at
                 """,
-                (cache_key, st[1], st[2], len(rows_to_insert), utcnow_iso()),
+                (cache_key, st.st_mtime_ns, st.st_size, len(rows_to_insert), utcnow_iso()),
             )
         return len(rows_to_insert)
 
+    def _dataset_folders(self) -> list[tuple[Path, str, str]]:
+        root = self.settings.datasets_dir / "tianxi-synth-v1"
+        return [(root / split, f"tianxi-synth-v1__1.0__{split}", split) for split in ("train", "holdout")]
+
     def scan_hot_datasets(self, *, force: bool = False) -> int:
-        ds_root = self.settings.datasets_dir
-        if not ds_root.is_dir():
-            return 0
+        folders = (
+            (path, release_id, split, _stat_if_type(path, stat.S_ISDIR))
+            for path, release_id, split in self._dataset_folders()
+        )
+        return self._index_hot_datasets(folders, force=force)
+
+    def _index_hot_datasets(
+        self, folders: Iterable[tuple[Path, str, str, os.stat_result | None]], *, force: bool
+    ) -> int:
         indexed = 0
-        mapping = [
-            (ds_root / "tianxi-synth-v1" / "train", "tianxi-synth-v1__1.0__train", "train"),
-            (ds_root / "tianxi-synth-v1" / "holdout", "tianxi-synth-v1__1.0__holdout", "holdout"),
-        ]
-        for folder, rel_id, split in mapping:
-            st = _stat_tuple(folder)
+        for folder, rel_id, split, st in folders:
             if st is None:
                 continue
             cache_key = f"hot_ds:{folder}"
@@ -2630,7 +2687,7 @@ class HotIndexer:
                     "SELECT mtime_ns, status FROM cold_file_cache WHERE file_path = ?",
                     (cache_key,),
                 )
-                if cached and cached["status"] == "ready" and cached["mtime_ns"] == st[1]:
+                if cached and cached["status"] == "ready" and cached["mtime_ns"] == st.st_mtime_ns:
                     continue
             # Parallel read of task.toml & instruction.md presence on CIFS (~10x faster on cold cache!)
             try:
@@ -2669,6 +2726,10 @@ class HotIndexer:
             with ThreadPoolExecutor(max_workers=16) as pool:
                 task_rows = [row for row in pool.map(_read_task_dir, task_dirs) if row is not None]
 
+            current = _stat_if_type(folder, stat.S_ISDIR)
+            if current is None or _file_identity(current) != _file_identity(st):
+                continue
+
             folder_count = len(task_rows)
             with self.db.transaction() as conn:
                 rel_exists = conn.execute(
@@ -2703,7 +2764,7 @@ class HotIndexer:
                         status = 'ready',
                         updated_at = excluded.updated_at
                     """,
-                    (cache_key, st[1], folder_count, utcnow_iso()),
+                    (cache_key, st.st_mtime_ns, folder_count, utcnow_iso()),
                 )
         return indexed
 
@@ -2960,192 +3021,160 @@ class HotIndexer:
             enriched_batches += 1
         return {"batches": enriched_batches, "trials": enriched_trials}
 
-    def run_hot_scan(self, *, force: bool = False, deep_trial_enrich: bool = False) -> dict[str, Any]:
-        """Parallel CIFS-optimized hot scan:
-        - Uses single os.scandir(harbor-runs) + ThreadPoolExecutor to stat all batch dirs concurrently
-          -> < 120ms on restart cache-hit & no-change poll even after CIFS actimeo=1 expires!
-        - Prefetches top-level files of changed/new batches IN PARALLEL across 20 worker threads
-          -> < 2.0s initial cold scan across all 53 harbor-runs + leaderboard.csv + datasets!"""
-        t0 = time.perf_counter()
+    def _scan_shared_batches(
+        self,
+        entries: list[Path],
+        pool: ThreadPoolExecutor,
+        *,
+        force: bool,
+        deep_trial_enrich: bool,
+    ) -> Counter[str]:
         counts: Counter[str] = Counter()
-        hr = self.settings.harbor_runs_dir
-        if hr.is_dir():
-            unbackfilled_tr_batches: set[str] = set()
-            if not force:
-                for tr_r in self.db.fetchall(
-                    """
-                    SELECT e.batch_id, e.evidence_refs_json
-                    FROM episodes e
-                    JOIN batches b ON b.batch_id = e.batch_id
-                    WHERE b.source_namespace = 'harbor_runs'
-                      AND b.is_running_placeholder = 0
-                      AND e.evidence_refs_json LIKE '%"training"%'
-                    """
-                ):
-                    if _training_ref_needs_backfill(tr_r["evidence_refs_json"]):
-                        unbackfilled_tr_batches.add(str(tr_r["batch_id"]))
+        if not entries:
+            return counts
 
-            existing_digests: dict[str, str] = {}
-            for r in self.db.fetchall(
+        unbackfilled_tr_batches: set[str] = set()
+        if not force:
+            for tr_r in self.db.fetchall(
                 """
-                SELECT batch_id, source_locator, content_digest, generation_id, checks_json, is_running_placeholder, runner
-                FROM batches WHERE source_namespace = 'harbor_runs'
+                SELECT e.batch_id, e.evidence_refs_json
+                FROM episodes e
+                JOIN batches b ON b.batch_id = e.batch_id
+                WHERE b.source_namespace = 'harbor_runs'
+                  AND b.is_running_placeholder = 0
+                  AND e.evidence_refs_json LIKE '%"training"%'
                 """
             ):
-                if not force and _batch_needs_backfill(
-                    r["checks_json"],
-                    r["generation_id"],
-                    r["is_running_placeholder"],
-                    runner=r["runner"],
-                    has_unbackfilled_training=str(r["batch_id"]) in unbackfilled_tr_batches,
-                ):
-                    # Revisit older rows even when the source files have not changed.
-                    continue
-                existing_digests[str(r["source_locator"])] = str(r["content_digest"])
+                if _training_ref_needs_backfill(tr_r["evidence_refs_json"]):
+                    unbackfilled_tr_batches.add(str(tr_r["batch_id"]))
+
+        existing_digests: dict[str, str] = {}
+        for r in self.db.fetchall(
+            """
+            SELECT batch_id, source_locator, content_digest, generation_id, checks_json, is_running_placeholder, runner
+            FROM batches WHERE source_namespace = 'harbor_runs'
+            """
+        ):
+            if not force and _batch_needs_backfill(
+                r["checks_json"],
+                r["generation_id"],
+                r["is_running_placeholder"],
+                runner=r["runner"],
+                has_unbackfilled_training=str(r["batch_id"]) in unbackfilled_tr_batches,
+            ):
+                # Revisit older rows even when the source files have not changed.
+                continue
+            existing_digests[str(r["source_locator"])] = str(r["content_digest"])
+
+        def probe(batch_dir: Path) -> tuple[str | None, dict[str, _FileIdentity], OSError | None]:
             try:
-                with os.scandir(hr) as it:
-                    entries = sorted(
-                        (Path(e.path) for e in it if e.is_dir(follow_symlinks=False)),
-                        key=lambda p: p.name,
-                    )
-            except OSError:
-                entries = []
+                digest, files = _batch_top_snapshot(batch_dir)
+                return digest, files, None
+            except OSError as exc:
+                return None, {}, exc
 
-            def _probe_dir(d: Path) -> tuple[Path, str | None, list[str], str | None]:
-                items: list[str] = []
-                present_top: list[str] = []
-                has_vlm_dir = False
-                try:
-                    with os.scandir(d) as it:
-                        for entry in it:
-                            name = entry.name
-                            if name == "vlmevalkit" and entry.is_dir(follow_symlinks=False):
-                                has_vlm_dir = True
-                                continue
-                            if name in _WATCHED_TOP_FILES:
-                                try:
-                                    st = entry.stat(follow_symlinks=False)
-                                    items.append(f"{name}:{st.st_ino}:{st.st_mtime_ns}:{st.st_size}")
-                                    present_top.append(name)
-                                except OSError:
-                                    pass
-                except PermissionError:
-                    return d, None, [], "permission_denied"
-                except OSError as exc:
-                    return d, None, [], f"os_error:{exc}"
-                if has_vlm_dir:
-                    st_v = _stat_tuple(d / "vlmevalkit" / "metrics.json")
-                    if st_v is not None:
-                        items.append(f"vlmevalkit/metrics.json:{st_v[0]}:{st_v[1]}:{st_v[2]}")
-                        present_top.append("vlmevalkit/metrics.json")
-                items.sort()
-                dg = hashlib.sha256("|".join(items).encode("utf-8")).hexdigest()
-                return d, dg, present_top, None
+        to_scan: list[tuple[Path, str, dict[str, _FileIdentity]]] = []
+        for d, (digest, files, err) in zip(entries, pool.map(probe, entries), strict=True):
+            if isinstance(err, PermissionError):
+                red_p = redact_path(str(d)) or d.name
+                if self.db.fetchone(
+                    "SELECT 1 FROM index_warnings WHERE tier = 'hot' AND code = 'DIR_PERMISSION_DENIED' AND target_path = ?",
+                    (red_p,),
+                ) is None:
+                    with self.db.transaction() as conn:
+                        self._record_warning(
+                            conn,
+                            tier="hot",
+                            severity="warning",
+                            code="DIR_PERMISSION_DENIED",
+                            target_path=str(d),
+                            message=f"目录无读权限，已安全跳过: {d.name}",
+                        )
+                counts["error"] += 1
+                continue
+            if err is not None or digest is None:
+                counts["error"] += 1
+                continue
+            loc = f"harbor_runs:{d.name}"
+            if not force and existing_digests.get(loc) == digest:
+                counts["skipped_unchanged"] += 1
+                continue
+            to_scan.append((d, digest, files))
 
-            with ThreadPoolExecutor(max_workers=20) as pool:
-                probed = list(pool.map(_probe_dir, entries))
+        if not to_scan:
+            return counts
 
-            to_scan: list[tuple[Path, str, list[str]]] = []
-            for d, dg, present_top, err in probed:
-                if err == "permission_denied":
-                    red_p = redact_path(str(d)) or d.name
-                    if self.db.fetchone(
-                        "SELECT 1 FROM index_warnings WHERE tier = 'hot' AND code = 'DIR_PERMISSION_DENIED' AND target_path = ?",
-                        (red_p,),
-                    ) is None:
-                        with self.db.transaction() as conn:
-                            self._record_warning(
-                                conn,
-                                tier="hot",
-                                severity="warning",
-                                code="DIR_PERMISSION_DENIED",
-                                target_path=str(d),
-                                message=f"目录无读权限，已安全跳过: {d.name}",
-                            )
-                    counts["error"] += 1
-                    continue
-                if err is not None or dg is None:
-                    counts["error"] += 1
-                    continue
-                loc = f"harbor_runs:{d.name}"
-                if not force and existing_digests.get(loc) == dg:
-                    counts["skipped_unchanged"] += 1
-                    continue
-                to_scan.append((d, dg, present_top))
+        # Resolve the shared registry paths once for this sweep. Single-batch and API
+        # requests still resolve paths independently, including after a registry reload.
+        resolved_sources = pool.submit(self.approval_registry.resolve_sources)
 
-            # Prefetch top-level files of all dirty batches in parallel on CIFS!
-            if to_scan:
-                def _prefetch_batch(item: tuple[Path, str, list[str]]) -> tuple[Path, str, dict[str, bytes] | None]:
-                    d, dg, present_top = item
-                    if "publish-manifest.json" in present_top:
-                        # Manifest batches do strict hash-verification read inside _verify_publish_manifest
-                        try:
-                            pm_bytes = (d / "publish-manifest.json").read_bytes()
-                            return d, dg, {"publish-manifest.json": pm_bytes}
-                        except OSError:
-                            return d, dg, None
-                    buf: dict[str, bytes] = {}
-                    for rel in present_top:
-                        fp = d / rel
-                        try:
-                            pre_st = _stat_tuple(fp)
-                            raw = fp.read_bytes()
-                            post_st = _stat_tuple(fp)
-                            if pre_st != post_st:
-                                return d, dg, None
-                            buf[rel] = raw
-                        except OSError:
-                            return d, dg, None
-                    return d, dg, buf
-
-                # Source registry paths also require CIFS metadata lookups.
-                def _lookup_approval(batch_dir: Path) -> tuple[str | None, str | None, str | None]:
-                    try:
-                        return self.approval_registry.lookup(batch_dir)
-                    except (OSError, RuntimeError):
-                        # Let the batch scanner report resolution errors on its normal path.
-                        return None, None, None
-
-                with ThreadPoolExecutor(max_workers=20) as pool:
-                    prefetched = list(pool.map(_prefetch_batch, to_scan))
-                    approvals = list(pool.map(_lookup_approval, (d for d, _, _ in prefetched)))
-
-                for (d, dg, top_buf), (project_id, owner_id, approval) in zip(prefetched, approvals, strict=True):
-                    res = self.scan_single_harbor_batch(
-                        d,
-                        force=force,
-                        project_override=project_id,
-                        owner_override=owner_id,
-                        approval_override=approval,
-                        existing_digests=existing_digests,
-                        precomputed_digest=dg,
-                        prefetched_top_bytes=top_buf,
-                        deep_trial_enrich=deep_trial_enrich,
-                    )
-                    counts[res] += 1
-
-        # Also index Runner-published isolated public DTOs (source_namespace='runner_published') so
-        # batches published via default Web Start survive restarts & never return 404 (I-05)!
-        pub_dir = self.settings.published_batches_dir
-        if pub_dir is not None and pub_dir.is_dir():
+        def prepare(item: tuple[Path, str, dict[str, _FileIdentity]]) -> tuple[
+            dict[str, bytes] | None, tuple[str | None, str | None, str | None]
+        ]:
+            batch_dir, _, files = item
+            data = _prefetch_batch_top(batch_dir, files)
             try:
-                pub_entries = sorted(
-                    (Path(e.path) for e in os.scandir(pub_dir) if e.is_dir(follow_symlinks=False)),
-                    key=lambda p: p.name,
+                sources = resolved_sources.result()
+            except (OSError, RuntimeError):
+                sources = None
+            try:
+                project, owner, approval, _ = self.approval_registry.lookup_full(
+                    batch_dir, resolved_sources=sources
                 )
-            except OSError:
-                pub_entries = []
-            for pd in pub_entries:
-                res = self.scan_single_harbor_batch(
-                    pd,
+                return data, (project, owner, approval)
+            except (OSError, RuntimeError):
+                # The single-batch scanner reports resolution failures on its normal path.
+                return data, (None, None, None)
+
+        for (d, digest, _), (data, (project_id, owner_id, approval)) in zip(
+            to_scan, pool.map(prepare, to_scan), strict=True
+        ):
+            result = self.scan_single_harbor_batch(
+                d,
+                force=force,
+                project_override=project_id,
+                owner_override=owner_id,
+                approval_override=approval,
+                existing_digests=existing_digests,
+                precomputed_digest=digest if data is not None else None,
+                prefetched_top_bytes=data,
+                deep_trial_enrich=deep_trial_enrich,
+            )
+            counts[result] += 1
+        return counts
+
+    def run_hot_scan(self, *, force: bool = False, deep_trial_enrich: bool = False) -> dict[str, Any]:
+        """Probe the hot roots concurrently and commit changed batches on the calling thread."""
+        t0 = time.perf_counter()
+        csv_path = self.settings.legacy_root_dir / "leaderboard.csv"
+        with ThreadPoolExecutor(max_workers=20) as pool:
+            shared_entries = pool.submit(_batch_dirs, self.settings.harbor_runs_dir)
+            csv_metadata = pool.submit(_stat_if_type, csv_path, stat.S_ISREG)
+            dataset_metadata = [
+                (path, release_id, split, pool.submit(_stat_if_type, path, stat.S_ISDIR))
+                for path, release_id, split in self._dataset_folders()
+            ]
+            counts = self._scan_shared_batches(
+                shared_entries.result(), pool, force=force, deep_trial_enrich=deep_trial_enrich
+            )
+
+        # Check ownership again for every locally Runner-published batch (I-05 / S-02).
+        pub_dir = self.settings.published_batches_dir
+        if pub_dir is not None:
+            for batch_dir in _batch_dirs(pub_dir):
+                result = self.scan_single_harbor_batch(
+                    batch_dir,
                     force=force,
                     source_namespace="runner_published",
                     deep_trial_enrich=deep_trial_enrich,
                 )
-                counts[res] += 1
+                counts[result] += 1
 
-        csv_rows = self.scan_legacy_leaderboard_csv()
-        ds_tasks = self.scan_hot_datasets(force=force)
+        csv_rows = self._index_legacy_leaderboard_csv(csv_path, csv_metadata.result())
+        ds_tasks = self._index_hot_datasets(
+            ((path, release_id, split, future.result()) for path, release_id, split, future in dataset_metadata),
+            force=force,
+        )
         elapsed_ms = round((time.perf_counter() - t0) * 1000.0, 2)
         return {
             "elapsed_ms": elapsed_ms,

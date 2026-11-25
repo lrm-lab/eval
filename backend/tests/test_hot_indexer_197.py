@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from app.api.errors import AppError
 from app.config import Settings
 from app.db.database import Database
 from app.db.migrations import init_db, sync_taxonomy_to_db
+from app.indexing import hot_indexer
 from app.indexing.hot_indexer import HotIndexer
 from app.indexing.identity import determine_run_scope, make_batch_id, make_collision_safe_slug
 from app.security.auth import AuthUser
@@ -68,6 +70,59 @@ def test_hot_scan_defers_unbound_legacy_gateway_evidence(isolated_settings: Sett
     with pytest.raises(AppError) as changed:
         query.read_trial_gateway(user, changed_id, trial_id)
     assert changed.value.code == "GENERATION_MISMATCH"
+    db.close_thread_connection()
+
+
+def test_hot_scan_reprobes_if_legacy_file_changes_after_enumeration(
+    isolated_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    isolated_settings.tianxi_root = isolated_settings.runtime_dir / "tianxi"
+    probe_isolated_dir(isolated_settings.state_dir, create=True)
+    db = Database(isolated_settings.db_path)
+    init_db(db)
+    sync_taxonomy_to_db(db, isolated_settings.taxonomy_file)
+    indexer = HotIndexer(isolated_settings, db)
+
+    batch_name = "legacy-in-place-update"
+    batch = isolated_settings.harbor_runs_dir / batch_name
+    batch.mkdir(parents=True)
+    (batch / "manifest.json").write_text(
+        json.dumps({"batch": batch_name, "dataset": "GAIA", "model": "fixture", "runner": "harbor"}),
+        encoding="utf-8",
+    )
+    episodes = batch / "episodes.jsonl"
+
+    def rewrite_episode(reward: float) -> None:
+        episodes.write_text(
+            json.dumps({"trial_id": "trial-local", "task_id": "t1", "status": "scored", "reward": reward}) + "\n",
+            encoding="utf-8",
+        )
+
+    rewrite_episode(0.0)
+    old_digest, old_files = hot_indexer._batch_top_snapshot(batch)
+    dir_mtime = batch.stat().st_mtime_ns
+    prefetch = hot_indexer._prefetch_batch_top
+
+    def change_after_probe(path: Path, files: dict[str, tuple[int, int, int]]) -> dict[str, bytes] | None:
+        assert files == old_files
+        rewrite_episode(1.0)
+        new_mtime = old_files["episodes.jsonl"][1] + 1_000_000_000
+        os.utime(episodes, ns=(new_mtime, new_mtime))
+        assert batch.stat().st_mtime_ns == dir_mtime
+        return prefetch(path, files)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(hot_indexer, "_prefetch_batch_top", change_after_probe)
+        assert indexer.run_hot_scan()["batches"] == {"indexed": 1}
+
+    new_digest, _ = hot_indexer._batch_top_snapshot(batch)
+    assert old_digest != new_digest
+    batch_id = make_batch_id(f"harbor_runs:{batch_name}")
+    assert db.fetchone("SELECT content_digest, valid_mean FROM batches WHERE batch_id = ?", (batch_id,)) == {
+        "content_digest": new_digest,
+        "valid_mean": 1.0,
+    }
+    assert indexer.run_hot_scan()["batches"] == {"skipped_unchanged": 1}
     db.close_thread_connection()
 
 
