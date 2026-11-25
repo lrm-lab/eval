@@ -313,6 +313,20 @@ sources:
     approved_evidence_classes: ["summary_dto", "direct_vlm_qa"]
 
   # Registered dataset roots & multimodal media roots
+  - source_root: "/home/share-data/tianxi_benches/bundles/gaia-validation-20261124.tar"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["public_task_metadata", "public_task_attachments"]
+
+  - source_root: "/home/share-data/tianxi_benches/bundles/wildclawbench-20261120-tasks.tar.zst"
+    match_mode: "dir"
+    project_id: "default"
+    owner_id: "system"
+    approval_status: "approved_public"
+    approved_evidence_classes: ["public_task_metadata"]
+
   - source_root: "/home/share-data/tianxi_benches/datasets/tianxi-synth-v1"
     match_mode: "dir"
     project_id: "default"

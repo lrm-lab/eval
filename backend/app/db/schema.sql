@@ -84,6 +84,17 @@ CREATE TABLE IF NOT EXISTS task_definitions (
 );
 CREATE INDEX IF NOT EXISTS idx_task_defs_meta ON task_definitions(dataset_release_id, difficulty, category, split);
 
+CREATE TABLE IF NOT EXISTS dataset_bundle_task_content (
+    dataset_release_id TEXT NOT NULL,
+    task_id            TEXT NOT NULL,
+    archive_path       TEXT NOT NULL,
+    instruction        TEXT,
+    attachments_json   TEXT NOT NULL DEFAULT '{}',
+    PRIMARY KEY (dataset_release_id, task_id),
+    FOREIGN KEY (dataset_release_id, task_id)
+        REFERENCES task_definitions(dataset_release_id, task_id) ON DELETE CASCADE
+);
+
 -- 6. 统一批次主表（URL-safe batch_id + 内部 source_locator + 同代 generation_id + 项目/属主归属）
 CREATE TABLE IF NOT EXISTS batches (
     batch_id                    TEXT PRIMARY KEY,       -- URL-safe 稳定 ID，如 b_8f4c1a90d3e27b51c408（绝不含 '/' 或 ':'）

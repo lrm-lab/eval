@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
@@ -54,6 +55,28 @@ def get_dataset_task_detail(
     user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     return request.app.state.ctx.query.get_dataset_task_detail(user, dataset_release_id, task_id)
+
+
+@router.get("/datasets/{dataset_release_id}/task-attachments/{attachment_name}")
+def download_dataset_task_attachment(
+    dataset_release_id: str,
+    attachment_name: str,
+    request: Request,
+    task_id: str = Query(min_length=1, max_length=512),
+    user: AuthUser = Depends(get_current_user),
+) -> Response:
+    content = request.app.state.ctx.query.get_dataset_task_attachment(
+        user, dataset_release_id, task_id, attachment_name
+    )
+    return Response(
+        content,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f"attachment; filename*=UTF-8''{quote(attachment_name)}",
+            "Cache-Control": "private, no-store",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
 
 
 @router.get("/legacy/dirs")

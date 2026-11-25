@@ -6,6 +6,7 @@ import json
 import math
 import re
 import statistics
+import tarfile
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,7 @@ from app.api.errors import AppError
 from app.config import Settings
 from app.db.database import Database
 from app.db.migrations import load_taxonomy_config
-from app.indexing.cold_indexer import read_legacy_sample_by_offset
+from app.indexing.cold_indexer import MAX_TASK_ATTACHMENT_BYTES, read_legacy_sample_by_offset
 from app.indexing.hot_indexer import SourceApprovalRegistry, _inspect_trial_result_and_media
 from app.security.auth import AuthUser
 from app.security.authz import (
@@ -2375,7 +2376,9 @@ class QueryService:
             "methodology_version": METHODOLOGY_VERSION,
         }
 
-    def get_dataset_task_detail(self, user: AuthUser, dataset_release_id: str, task_id: str) -> dict[str, Any]:
+    def _get_dataset_task_row(
+        self, user: AuthUser, dataset_release_id: str, task_id: str
+    ) -> tuple[dict[str, Any], bool]:
         validate_safe_id(dataset_release_id, "dataset_release_id")
         validate_safe_task_id(task_id)
         rel = self.db.fetchone("SELECT * FROM dataset_releases WHERE dataset_release_id = ?", (dataset_release_id,))
@@ -2397,14 +2400,54 @@ class QueryService:
         is_task_holdout = is_rel_holdout or str(row.get("split") or "").strip().lower() == "holdout"
         if is_task_holdout:
             require_scope(user, "dataset:holdout_read")
-        instruction_text = None
+        return row, is_task_holdout
+
+    def _get_dataset_bundle_content(
+        self, user: AuthUser, dataset_release_id: str, task_id: str, *, is_holdout: bool
+    ) -> tuple[dict[str, Any] | None, frozenset[str]]:
+        row = self.db.fetchone(
+            """
+            SELECT archive_path, instruction, attachments_json FROM dataset_bundle_task_content
+            WHERE dataset_release_id = ? AND task_id = ?
+            """,
+            (dataset_release_id, task_id),
+        )
+        if row is None:
+            return None, frozenset()
+        source = Path(row["archive_path"])
+        proj_id, owner_id, approval, classes = self.approval_registry.lookup_full(source)
+        if is_holdout or approval != "approved_public":
+            require_project_access(user, proj_id, owner_id=owner_id)
+        return row, classes if approval != "pending" else frozenset()
+
+    def get_dataset_task_detail(self, user: AuthUser, dataset_release_id: str, task_id: str) -> dict[str, Any]:
+        row, is_task_holdout = self._get_dataset_task_row(user, dataset_release_id, task_id)
+        needed_class = "holdout_task_body" if is_task_holdout else "public_task_metadata"
+        instruction_text: str | None = None
+        instruction_status = "unavailable"
+        attachments: list[str] = []
         if row.get("instruction_ref"):
             p = Path(row["instruction_ref"])
-            needed_class = "holdout_task_body" if is_task_holdout else "public_task_metadata"
-            proj_id, owner_id, reg_status, reg_classes = self.approval_registry.lookup_full(p.parent)
+            proj_id, owner_id, reg_status, reg_classes = self.approval_registry.lookup_full(p)
             require_project_access(user, proj_id, owner_id=owner_id)
-            if reg_status != "pending" and needed_class in reg_classes and p.is_file():
-                instruction_text = redact_text(p.read_text(encoding="utf-8", errors="replace"))
+            if reg_status == "pending" or needed_class not in reg_classes:
+                instruction_status = "restricted"
+            else:
+                try:
+                    instruction_text = redact_text(p.read_text(encoding="utf-8", errors="replace")).strip()
+                except OSError:
+                    pass
+        else:
+            bundle, classes = self._get_dataset_bundle_content(
+                user, dataset_release_id, task_id, is_holdout=is_task_holdout
+            )
+            if bundle:
+                if needed_class in classes:
+                    instruction_text = bundle["instruction"]
+                    if not is_task_holdout and "public_task_attachments" in classes:
+                        attachments = sorted(json.loads(bundle["attachments_json"]))
+                else:
+                    instruction_status = "restricted"
         return {
             "dataset_release_id": dataset_release_id,
             "task_id": task_id,
@@ -2418,6 +2461,36 @@ class QueryService:
             "tags": json.loads(row["tags_json"] or "[]"),
             "resources": json.loads(row["resources_json"] or "{}"),
             "instruction": instruction_text,
+            "instruction_status": "ready" if instruction_text else instruction_status,
+            "attachments": attachments,
             "has_answer_access": has_scope(user, "dataset:answer_read"),
             "methodology_version": METHODOLOGY_VERSION,
         }
+
+    def get_dataset_task_attachment(
+        self, user: AuthUser, dataset_release_id: str, task_id: str, attachment_name: str
+    ) -> bytes:
+        validate_safe_id(attachment_name, "attachment_name")
+        _, is_task_holdout = self._get_dataset_task_row(user, dataset_release_id, task_id)
+        if is_task_holdout:
+            raise AppError(403, "SCOPE_FORBIDDEN", "题目附件不可读取")
+        bundle, classes = self._get_dataset_bundle_content(user, dataset_release_id, task_id, is_holdout=False)
+        if bundle is None:
+            raise AppError(404, "RESOURCE_NOT_FOUND", "题目附件不存在")
+        if not {"public_task_metadata", "public_task_attachments"} <= classes:
+            raise AppError(403, "SCOPE_FORBIDDEN", "题目附件不可读取")
+        attachment = json.loads(bundle["attachments_json"]).get(attachment_name)
+        if attachment is None:
+            raise AppError(404, "RESOURCE_NOT_FOUND", "题目附件不存在")
+        try:
+            with tarfile.open(bundle["archive_path"], "r:") as archive:
+                member = archive.getmember(attachment["member"])
+                if not member.isfile() or member.size > MAX_TASK_ATTACHMENT_BYTES:
+                    raise AppError(404, "RESOURCE_NOT_FOUND", "题目附件不可读取")
+                with archive.extractfile(member) as stream:
+                    data = stream.read()
+        except (OSError, tarfile.TarError, KeyError):
+            raise AppError(404, "RESOURCE_NOT_FOUND", "题目附件不可读取") from None
+        if _sha256_bytes(data) != attachment["sha256"]:
+            raise AppError(409, "INTEGRITY_MISMATCH", "题目附件已更新，等待索引刷新")
+        return data

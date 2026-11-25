@@ -1,10 +1,12 @@
-import React from 'react';
 import { Link, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
-import { ArrowLeft, FileText, Lock, ShieldCheck } from 'lucide-react';
+import { ArrowLeft, Download, FileText } from 'lucide-react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { apiFetch } from '../lib/api';
 import { PageTransition } from '../components/motion/primitives';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
+import '../styles/manual-reader.css';
 
 interface TaskDetailResp {
   dataset_release_id: string;
@@ -19,7 +21,8 @@ interface TaskDetailResp {
   tags: string[];
   resources: Record<string, unknown>;
   instruction: string | null;
-  has_answer_access: boolean;
+  instruction_status: 'ready' | 'restricted' | 'unavailable';
+  attachments: string[];
 }
 
 export function TaskDetailPage() {
@@ -42,10 +45,10 @@ export function TaskDetailPage() {
           to="/datasets"
           className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] no-underline"
         >
-          <ArrowLeft className="w-3.5 h-3.5" /> 返回 Datasets
+          <ArrowLeft className="w-3.5 h-3.5" /> 返回数据集
         </Link>
         <div className="min-w-0">
-          <h1 className="m-0 text-lg font-bold font-mono text-[var(--text-primary)] truncate">{taskId}</h1>
+          <h1 className="m-0 text-lg font-bold font-mono text-[var(--text-primary)] break-all">{taskId}</h1>
           <div className="text-xs font-mono text-[var(--text-muted)]">{datasetReleaseId}</div>
         </div>
       </div>
@@ -56,9 +59,44 @@ export function TaskDetailPage() {
         <StateNoticeCard kind="forbidden" title="题目详情不可访问" description={(q.error as Error).message} />
       ) : data ? (
         <>
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+          <section className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-5 sm:p-7" aria-labelledby="dataset-task-instruction">
+            <h2 id="dataset-task-instruction" className="m-0 mb-4 flex items-center gap-2 text-base font-bold text-[var(--text-primary)]">
+              <FileText className="w-5 h-5 text-[var(--brand-primary)]" /> 题目内容
+            </h2>
+            {data.instruction ? (
+              <article className="manual-prose break-words" aria-label="题干">
+                <ReactMarkdown skipHtml remarkPlugins={[remarkGfm]} disallowedElements={['img']}>
+                  {data.instruction}
+                </ReactMarkdown>
+              </article>
+            ) : (
+              <p className="m-0 text-sm text-[var(--text-muted)]">
+                {data.instruction_status === 'restricted' ? '该题题干尚未开放读取。' : '当前数据集版本尚无可读取的题干。'}
+              </p>
+            )}
+            {data.attachments?.length > 0 && (
+              <div className="mt-5 border-t border-[var(--border-subtle)] pt-4">
+                <h3 className="m-0 mb-2 text-sm font-semibold">题目附件</h3>
+                <ul className="m-0 flex list-none flex-wrap gap-2 p-0">
+                  {data.attachments.map((name) => (
+                    <li className="min-w-0 max-w-full" key={name}>
+                      <a
+                        className="inline-flex items-center gap-2 break-all rounded-lg border border-[var(--border-subtle)] px-3 py-2 text-sm text-[var(--brand-primary)]"
+                        href={`/api/v1/datasets/${encodeURIComponent(datasetReleaseId)}/task-attachments/${encodeURIComponent(name)}?task_id=${encodeURIComponent(taskId)}`}
+                        download
+                      >
+                        <Download className="h-4 w-4 shrink-0" /> {name}
+                      </a>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </section>
+
+          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
             <div>
-              <div className="text-[var(--text-muted)]">Split</div>
+              <div className="text-[var(--text-muted)]">数据划分</div>
               <div className="mt-0.5 font-semibold">{data.split || 'default'}</div>
             </div>
             <div>
@@ -68,38 +106,9 @@ export function TaskDetailPage() {
               </div>
             </div>
             <div>
-              <div className="text-[var(--text-muted)]">Checksum</div>
+              <div className="text-[var(--text-muted)]">校验值</div>
               <div className="mt-0.5 font-mono truncate">{data.task_checksum || '—'}</div>
             </div>
-            <div>
-              <div className="text-[var(--text-muted)]">答案访问权限</div>
-              <div className="mt-0.5 inline-flex items-center gap-1">
-                {data.has_answer_access ? (
-                  <span className="text-[var(--sem-pass-fg)] inline-flex items-center gap-1">
-                    <ShieldCheck className="w-3.5 h-3.5" /> dataset:answer_read
-                  </span>
-                ) : (
-                  <span className="text-[var(--text-muted)] inline-flex items-center gap-1">
-                    <Lock className="w-3.5 h-3.5" /> 答案已隐藏
-                  </span>
-                )}
-              </div>
-            </div>
-          </div>
-
-          <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-5">
-            <h2 className="m-0 text-sm font-bold text-[var(--text-primary)] flex items-center gap-1.5 mb-3">
-              <FileText className="w-4 h-4 text-[var(--brand-primary)]" /> 题面说明（Instruction）
-            </h2>
-            {data.instruction ? (
-              <pre className="m-0 text-xs leading-relaxed whitespace-pre-wrap break-words font-sans text-[var(--text-primary)]">
-                {data.instruction}
-              </pre>
-            ) : (
-              <div className="text-xs text-[var(--text-muted)]">
-                该题未提供公开 instruction.md 或来源尚未批准 public_task_metadata / holdout_task_body 证据类。
-              </div>
-            )}
           </div>
         </>
       ) : null}

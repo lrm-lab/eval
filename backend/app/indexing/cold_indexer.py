@@ -11,7 +11,7 @@ import time
 import tomllib
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import ijson
@@ -34,6 +34,13 @@ from app.services.methodology import finite
 
 _TOP_DICT_KEY_RE = re.compile(rb'^    "([^"]+)": \{\s*$')
 _TOP_DICT_END_RE = re.compile(rb'^    \},?\s*$')
+_BUNDLE_CONTENT_CACHE_KIND = "bundle_tar_task_content_v1"
+_MAX_TASK_INSTRUCTION_BYTES = 256 * 1024
+MAX_TASK_ATTACHMENT_BYTES = 8 * 1024 * 1024
+_GAIA_ATTACHMENT_EXTENSIONS = {
+    ".csv", ".docx", ".jpg", ".jsonld", ".mp3", ".pdf", ".png",
+    ".pdb", ".pptx", ".py", ".txt", ".xlsx", ".zip",
+}
 
 
 def _parse_iso_dt(val: str | None) -> float | None:
@@ -1274,7 +1281,6 @@ class ColdIndexer:
         b_dir = self.settings.bundles_dir
         if not b_dir.is_dir():
             return 0
-        cache_map = self._load_cache_map()
         count = 0
         bundle_map = {
             "gaia-validation-20261124.tar": "gaia__2026-11-24__val",
@@ -1288,32 +1294,25 @@ class ColdIndexer:
             if st is None:
                 continue
             cache_key = str(fpath)
-            if not force and self._is_cached(cache_key, st[1], st[2], cache_map=cache_map):
+            cached = self.db.fetchone(
+                "SELECT cache_kind FROM cold_file_cache WHERE file_path = ?", (cache_key,)
+            )
+            if (
+                not force and cached and cached["cache_kind"] == _BUNDLE_CONTENT_CACHE_KIND
+                and self._is_cached(cache_key, st[1], st[2])
+            ):
                 continue
-            tasks_extracted: list[tuple[Any, ...]] = []
             try:
                 if fname.endswith(".zst"):
                     dctx = zstd.ZstdDecompressor()
                     with open(fpath, "rb") as raw_fh, dctx.stream_reader(raw_fh) as zr, tarfile.open(fileobj=zr, mode="r|") as tf:
-                        for member in tf:
-                            if member.isfile() and member.name.endswith("task.toml"):
-                                fobj = tf.extractfile(member)
-                                if not fobj:
-                                    continue
-                                parsed = tomllib.loads(fobj.read().decode("utf-8", errors="replace"))
-                                tasks_extracted.append(self._toml_to_row(rel_id, member.name, parsed))
+                        tasks, content = self._read_bundle_tasks(tf, rel_id, fpath)
                 else:
-                    with tarfile.open(fpath, "r") as tf:
-                        for member in tf.getmembers():
-                            if member.isfile() and member.name.endswith("task.toml"):
-                                fobj = tf.extractfile(member)
-                                if not fobj:
-                                    continue
-                                parsed = tomllib.loads(fobj.read().decode("utf-8", errors="replace"))
-                                tasks_extracted.append(self._toml_to_row(rel_id, member.name, parsed))
+                    with tarfile.open(fpath, "r:") as tf:
+                        tasks, content = self._read_bundle_tasks(tf, rel_id, fpath)
             except Exception as exc:
                 with self.db.transaction() as conn:
-                    self._upsert_cache(conn, cache_key, "bundle_tar", st[1], st[2], 0, "error", str(exc))
+                    self._upsert_cache(conn, cache_key, _BUNDLE_CONTENT_CACHE_KIND, st[1], st[2], 0, "error", str(exc))
                 continue
 
             with self.db.transaction() as conn:
@@ -1332,11 +1331,57 @@ class ColdIndexer:
                             category = excluded.category,
                             tags_json = excluded.tags_json
                         """,
-                        tasks_extracted,
+                        tasks,
                     )
-                self._upsert_cache(conn, cache_key, "bundle_tar", st[1], st[2], len(tasks_extracted))
-                count += len(tasks_extracted)
+                    conn.execute("DELETE FROM dataset_bundle_task_content WHERE dataset_release_id = ?", (rel_id,))
+                    conn.executemany(
+                        """
+                        INSERT INTO dataset_bundle_task_content
+                            (dataset_release_id, task_id, archive_path, instruction, attachments_json)
+                        VALUES (?, ?, ?, ?, ?)
+                        """,
+                        content,
+                    )
+                self._upsert_cache(conn, cache_key, _BUNDLE_CONTENT_CACHE_KIND, st[1], st[2], len(tasks))
+            count += len(tasks)
         return count
+
+    def _read_bundle_tasks(
+        self, archive: tarfile.TarFile, release_id: str, path: Path
+    ) -> tuple[list[tuple[Any, ...]], list[tuple[Any, ...]]]:
+        tasks: dict[PurePosixPath, tuple[Any, ...]] = {}
+        instructions: dict[PurePosixPath, str] = {}
+        attachments: dict[PurePosixPath, dict[str, dict[str, str]]] = {}
+        for member in archive:
+            if not member.isfile():
+                continue
+            name = PurePosixPath(member.name)
+            if name.is_absolute() or ".." in name.parts:
+                continue
+            if name.name in {"task.toml", "instruction.md"} and member.size <= _MAX_TASK_INSTRUCTION_BYTES:
+                with archive.extractfile(member) as stream:
+                    text = stream.read().decode("utf-8", errors="replace")
+                if name.name == "task.toml":
+                    tasks[name.parent] = self._toml_to_row(release_id, member.name, tomllib.loads(text))
+                else:
+                    instructions[name.parent] = redact_text(text).strip()
+            elif (
+                len(name.parts) == 5 and name.parts[0] == "gaia"
+                and name.parts[2:4] == ("environment", "workspace")
+                and name.stem == name.parts[1]
+                and name.suffix.lower() in _GAIA_ATTACHMENT_EXTENSIONS
+                and member.size <= MAX_TASK_ATTACHMENT_BYTES
+            ):
+                with archive.extractfile(member) as stream:
+                    digest = hashlib.sha256(stream.read()).hexdigest()
+                task_folder = name.parent.parent.parent
+                attachments.setdefault(task_folder, {})[name.name] = {"member": member.name, "sha256": digest}
+        # Keep one content row for each task ID, matching the upsert order of its metadata.
+        content_by_id = {
+            row[1]: (release_id, row[1], str(path), instructions.get(folder), json.dumps(attachments.get(folder, {})))
+            for folder, row in tasks.items()
+        }
+        return list(tasks.values()), list(content_by_id.values())
 
     @staticmethod
     def _toml_to_row(rel_id: str, member_name: str, parsed: dict[str, Any]) -> tuple[Any, ...]:
