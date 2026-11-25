@@ -638,7 +638,15 @@ def execute_harbor(args, cmd, dataset, output, metadata, cwd, env):
 
 
 
-def execute_gateway(args, dataset, output, metadata):
+def bundle_runtime_env(bundle):
+    return {
+        "PI_BENCH_INSTALL_CACHE": str(bundle / "runtime" / "harbor-cache"),
+        "PI_BENCH_AGENT_FILES": str(bundle / "code" / "agent-profiles" / "v5"),
+        "PI_BENCH_RUNTIME": "1",
+    }
+
+
+def execute_gateway(args, dataset, output, metadata, bundle, suite):
     _, separator, model = args.model.partition("/")
     if not separator:
         model = args.model
@@ -649,13 +657,20 @@ def execute_gateway(args, dataset, output, metadata):
     for task in tasks:
         if not (task / "task.toml").is_file() or not task.resolve().is_relative_to(dataset):
             raise ValueError(f"Task is missing from dataset: {task.name}")
+    agent_import_path = suite.get("gateway_agents", {}).get(args.agent)
     if args.plan:
+        registration = {"agent_import_path": agent_import_path} if agent_import_path else {}
         print(json.dumps({"runner": "openenv-gateway", "tasks": [p.name for p in tasks],
                           "model": model, "harness": args.agent, "attempts": args.attempts,
-                          "concurrent": args.concurrent, "capture_host": args.capture_host}))
+                          "concurrent": args.concurrent, "capture_host": args.capture_host, **registration}))
         return 0
     if not args.base_url:
         raise ValueError("Set OPENAI_BASE_URL or --base-url for gateway capture")
+    if agent_import_path:
+        if bundle is None or not (bundle / "code").is_dir():
+            raise ValueError("The registered Gateway harness requires the local handoff bundle")
+        sys.path.append(str(bundle / "code"))
+        os.environ.update(bundle_runtime_env(bundle))
     key = os.getenv("OPENAI_API_KEY")
     job = args.work / "jobs" / args.batch
     if output.exists() or job.exists():
@@ -679,7 +694,9 @@ def execute_gateway(args, dataset, output, metadata):
     write_document(status, state)
     counts = Counter()
     try:
-        counts = gateway_capture.run_capture(args, tasks, job, args.base_url, model, key, write_document)
+        counts = gateway_capture.run_capture(
+            args, tasks, job, args.base_url, model, key, write_document, harness=agent_import_path or args.agent,
+        )
     except KeyboardInterrupt:
         state["status"] = "interrupted"
         raise
@@ -918,7 +935,7 @@ def main():
         try:
             if suite.get("prepare") == "wildclaw-crlf" and not args.plan:
                 dataset = prepare_wildclaw(dataset, bundle, args.work, args.suite)
-            return execute_gateway(args, dataset, output, metadata)
+            return execute_gateway(args, dataset, output, metadata, bundle, suite)
         except (OSError, ValueError, RuntimeError) as error:
             parser.error(str(error))
 
@@ -1002,9 +1019,7 @@ def main():
     cwd = config_dir
     if bundle is not None and (bundle / "code").is_dir():
         env["PYTHONPATH"] = os.pathsep.join(filter(None, (str(bundle / "code"), env.get("PYTHONPATH"))))
-        env["PI_BENCH_INSTALL_CACHE"] = str(bundle / "runtime" / "harbor-cache")
-        env["PI_BENCH_AGENT_FILES"] = str(bundle / "code" / "agent-profiles" / "v5")
-        env["PI_BENCH_RUNTIME"] = "1"
+        env.update(bundle_runtime_env(bundle))
         cwd = bundle / "code"
     env["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
     try:
