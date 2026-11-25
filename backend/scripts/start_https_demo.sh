@@ -19,6 +19,7 @@
 #      https://127.0.0.1:${HTTPS_PORT}/api/v1/healthz, and print access summary.
 #   8. Support --stop and --status flags.
 set -euo pipefail
+umask 077
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 

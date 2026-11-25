@@ -2046,16 +2046,13 @@ class ExecutionService:
                 latest_progress = e["payload"]["progress"]
                 break
 
-        log_lines: list[str] = []
-        stdio_log_truncated = False
         log_path = self.settings.runner_work_dir / job_id / "runner_stdio.log"  # type: ignore[operator]
-        if log_path.is_file() and not log_path.is_symlink():
-            raw_lines, stdio_log_truncated = read_bounded_tail_lines(
-                log_path,
-                max_read_bytes=MAX_JOB_DETAIL_STDIO_READ_BYTES,
-                max_lines=200,
-            )
-            log_lines = [redact_text(ln) or "" for ln in raw_lines]
+        raw_lines, stdio_log_truncated = read_bounded_tail_lines(
+            log_path,
+            max_read_bytes=MAX_JOB_DETAIL_STDIO_READ_BYTES,
+            max_lines=200,
+        )
+        log_lines = [redact_text(ln) or "" for ln in raw_lines]
 
         summary = self._row_to_summary(row)
         return {

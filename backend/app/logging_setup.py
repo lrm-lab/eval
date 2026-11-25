@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import stat
 import threading
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -29,6 +30,24 @@ MAX_TOTAL_JOB_STDIO_BYTES = 20 * 1024 * 1024   # 20 MiB cumulative across all ru
 MAX_JOB_DETAIL_STDIO_READ_BYTES = 128 * 1024   # 128 KiB bounded tail read in get_job_detail()
 
 
+class ByteRotatingFileHandler(RotatingFileHandler):
+    """Count encoded bytes; even a single oversized record must fit a segment."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            line = self.format(record).encode("utf-8", errors="replace")
+            if len(line) >= self.maxBytes:
+                line = line[: self.maxBytes - 1].decode("utf-8", errors="ignore").encode("utf-8")
+            if self.stream is None:
+                self.stream = self._open()
+            if self.stream.tell() + len(line) + 1 > self.maxBytes:
+                self.doRollover()
+            self.stream.write(line.decode("utf-8") + "\n")
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+
 def ensure_logs_dir(logs_dir: Path) -> Path:
     logs_dir.mkdir(parents=True, exist_ok=True)
     try:
@@ -53,7 +72,7 @@ def build_uvicorn_log_config(
     log_file = logs_dir / f"{component}.log"
     handlers: dict[str, Any] = {
         "rotating_file": {
-            "class": "logging.handlers.RotatingFileHandler",
+            "class": f"{__name__}.ByteRotatingFileHandler",
             "formatter": "default",
             "filename": str(log_file),
             "maxBytes": int(max_bytes),
@@ -107,7 +126,7 @@ def configure_component_rotating_logger(
             h.close()
         except Exception:
             pass
-    fh = RotatingFileHandler(str(log_file), maxBytes=int(max_bytes), backupCount=bc, encoding="utf-8")
+    fh = ByteRotatingFileHandler(str(log_file), maxBytes=int(max_bytes), backupCount=bc, encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s"))
     logger.addHandler(fh)
     try:
@@ -140,15 +159,26 @@ class BoundedJobStdioWriter:
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
         self._fd: int | None = None
         self._cur_size = 0
-        self._open_active()
+        self._dir = os.open(log_path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            self._open_active()
+        except BaseException:
+            os.close(self._dir)
+            raise
 
     def _open_active(self) -> None:
-        fd = os.open(str(self.log_path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        fd = os.open(self.log_path.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND |
+                     os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=self._dir)
         try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                raise OSError("Expected a private regular stdio file")
+            if st.st_size > self.max_segment_bytes:
+                raise OSError("Existing stdio segment exceeds quota")
             os.fchmod(fd, 0o600)
-        except OSError:
-            pass
-        st = os.fstat(fd)
+        except BaseException:
+            os.close(fd)
+            raise
         self._fd = fd
         self._cur_size = int(st.st_size)
 
@@ -162,19 +192,18 @@ class BoundedJobStdioWriter:
 
         if self.backup_count == 0:
             try:
-                self.log_path.unlink(missing_ok=True)
-            except OSError:
+                os.unlink(self.log_path.name, dir_fd=self._dir)
+            except FileNotFoundError:
                 pass
         else:
             for idx in range(self.backup_count, 0, -1):
                 src = self.log_path if idx == 1 else self.log_path.with_name(f"{self.log_path.name}.{idx - 1}")
                 dst = self.log_path.with_name(f"{self.log_path.name}.{idx}")
-                if src.exists() and not src.is_symlink():
-                    try:
-                        os.replace(src, dst)
-                        os.chmod(dst, 0o600)
-                    except OSError:
-                        pass
+                try:
+                    os.replace(src.name, dst.name, src_dir_fd=self._dir, dst_dir_fd=self._dir)
+                except FileNotFoundError:
+                    if idx == 1:
+                        raise
         self.rotated_count += 1
         self._open_active()
 
@@ -182,6 +211,8 @@ class BoundedJobStdioWriter:
         if not data:
             return
         with self._lock:
+            if self._dir < 0:
+                raise OSError("Stdio writer closed")
             mv = memoryview(data)
             pos = 0
             n = len(mv)
@@ -222,6 +253,9 @@ class BoundedJobStdioWriter:
                 except OSError:
                     pass
                 self._fd = None
+            if self._dir >= 0:
+                os.close(self._dir)
+                self._dir = -1
 
 
 def enforce_job_stdio_retention_cap(
@@ -229,14 +263,12 @@ def enforce_job_stdio_retention_cap(
     *,
     max_total_bytes: int = MAX_TOTAL_JOB_STDIO_BYTES,
     active_job_ids: set[str] | None = None,
+    reserve_per_active_job: int = 0,
 ) -> dict[str, Any]:
     """Enforce hard cumulative retention ceiling across ALL `runner-work/*/runner_stdio.log*` files (S-05).
 
     Active jobs are spared; oldest finished job stdio logs (sorted by mtime ascending) are deleted
     first until cumulative size across `runner_work_dir` is strictly `<= max_total_bytes`."""
-    if not runner_work_dir.is_dir():
-        return {"total_bytes_after": 0, "pruned_files": 0, "pruned_bytes": 0}
-
     active = active_job_ids or set()
     entries: list[tuple[float, str, Path, int]] = []
     total = 0
@@ -247,32 +279,42 @@ def enforce_job_stdio_retention_cap(
             jid = job_entry.name
             try:
                 for f_entry in os.scandir(job_entry.path):
-                    if not f_entry.name.startswith("runner_stdio.log") or not f_entry.is_file(follow_symlinks=False):
+                    if f_entry.name not in {"runner_stdio.log", "runner_stdio.log.1"} or not f_entry.is_file(follow_symlinks=False):
                         continue
                     try:
                         st = f_entry.stat(follow_symlinks=False)
-                    except OSError:
+                    except FileNotFoundError:
                         continue
                     total += int(st.st_size)
                     entries.append((float(st.st_mtime), jid, Path(f_entry.path), int(st.st_size)))
-            except OSError:
+            except FileNotFoundError:
                 continue
-    except OSError:
-        return {"total_bytes_after": 0, "pruned_files": 0, "pruned_bytes": 0}
+    except FileNotFoundError:
+        pass
 
-    if total <= max_total_bytes:
-        return {"total_bytes_after": total, "pruned_files": 0, "pruned_bytes": 0}
+    used = dict.fromkeys(active, 0)
+    for _, jid, _, size in entries:
+        if jid in used:
+            used[jid] += size
+    reserved = sum(max(0, reserve_per_active_job - size) for size in used.values())
 
     # Prune oldest non-active job stdio files first (backups before active file for same mtime)
     pruned_files = 0
     pruned_bytes = 0
     candidates = [e for e in entries if e[1] not in active]
-    candidates.sort(key=lambda item: (item[0], 0 if item[2].name != "runner_stdio.log" else 1))
+    last_write: dict[str, float] = {}
+    for mtime, jid, _, _ in candidates:
+        last_write[jid] = max(last_write.get(jid, mtime), mtime)
+    candidates.sort(key=lambda item: (last_write[item[1]], item[1], item[2].name == "runner_stdio.log"))
     for _, _, fpath, sz in candidates:
-        if total <= max_total_bytes:
+        if total + reserved <= max_total_bytes:
             break
         try:
-            fpath.unlink(missing_ok=True)
+            parent = os.open(fpath.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+            try:
+                os.unlink(fpath.name, dir_fd=parent)
+            finally:
+                os.close(parent)
             total -= sz
             pruned_files += 1
             pruned_bytes += sz
@@ -281,6 +323,7 @@ def enforce_job_stdio_retention_cap(
 
     return {
         "total_bytes_after": max(0, total),
+        "committed_bytes_after": total + reserved,
         "pruned_files": pruned_files,
         "pruned_bytes": pruned_bytes,
     }
@@ -294,46 +337,39 @@ def read_bounded_tail_lines(
 ) -> tuple[list[str], bool]:
     """Read at most `max_read_bytes` from the tail of `runner_stdio.log` (and if active segment is small,
     optionally prepend tail of `runner_stdio.log.1`), NEVER loading an entire unbounded file into memory!"""
-    if log_path.is_symlink() or not log_path.is_file():
+    try:
+        parent = os.open(log_path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
+    except OSError:
         return [], False
 
-    budget = max(4096, int(max_read_bytes))
+    remaining = max(0, min(MAX_JOB_DETAIL_STDIO_READ_BYTES, int(max_read_bytes)))
     truncated = False
     chunks: list[bytes] = []
-    remaining = budget
-
-    # Read from active segment first (tail), then optional .1 backup if room remains
-    backup_path = log_path.with_name(f"{log_path.name}.1")
-    read_order: list[Path] = [log_path]
-    if backup_path.is_file() and not backup_path.is_symlink():
-        read_order.append(backup_path)
-
-    for idx, fp in enumerate(read_order):
-        if remaining <= 0:
-            truncated = True
-            break
-        try:
-            sz = fp.stat().st_size
-            if sz <= 0:
+    try:
+        for name in (log_path.name, log_path.name + ".1"):
+            try:
+                fd = os.open(name, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=parent)
+            except OSError:
+                if name == log_path.name:
+                    break
                 continue
-            with fp.open("rb") as fh:
-                if sz > remaining:
-                    fh.seek(sz - remaining)
-                    data = fh.read(remaining)
+            try:
+                st = os.fstat(fd)
+                if not stat.S_ISREG(st.st_mode) or st.st_nlink != 1:
+                    break
+                size = min(st.st_size, remaining)
+                data = os.pread(fd, size, st.st_size - size)
+                remaining -= size
+                if st.st_size > size:
                     truncated = True
-                    # Drop partial leading line after mid-file seek
                     nl = data.find(b"\n")
                     if nl != -1:
                         data = data[nl + 1 :]
-                else:
-                    data = fh.read(sz)
-                remaining -= len(data)
                 chunks.append(data)
-                if idx == 0 and sz >= budget and backup_path.is_file():
-                    truncated = True
-                    break
-        except OSError:
-            continue
+            finally:
+                os.close(fd)
+    finally:
+        os.close(parent)
 
     if not chunks:
         return [], truncated
@@ -342,5 +378,5 @@ def read_bounded_tail_lines(
     lines = text.splitlines()
     if len(lines) > max_lines:
         truncated = True
-        lines = lines[-max_lines:]
+        lines = lines[-max_lines:] if max_lines > 0 else []
     return lines, truncated
