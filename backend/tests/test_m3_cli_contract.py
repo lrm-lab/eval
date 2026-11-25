@@ -84,11 +84,13 @@ def test_native_resume_reuses_unchanged_overlay(isolated_settings: Settings, tmp
 def test_external_runner_rejects_invalid_native_resume(isolated_settings: Settings):
     ipc = RunnerIPCClient(isolated_settings)
     with _start_external_runner_daemon(isolated_settings) as daemon:
-        assert ipc.probe_health()["runner_pid"] == daemon.pid
+        health = ipc.probe_health()
+        assert health["runner_pid"] == daemon.pid
         for kind in ("harbor_gateway", "direct", "vlmevalkit", "harbor"):
             job_id = f"reject-{kind}"
             status, body = ipc.submit_job({
                 "job_id": job_id, "channel_secret": secrets.token_hex(16),
+                "runner_instance_id": health["runner_instance_id"],
                 "spec": {"kind": kind, "resume_mode": "native"},
             })
             assert (status, body["code"]) == (409, "RESUME_UNSUPPORTED")

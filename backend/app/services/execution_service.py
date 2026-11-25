@@ -1616,6 +1616,9 @@ class ExecutionService:
                 str(rhealth.get("reason") or "尚未接入独立隔离执行服务，拒绝在线提交作业"),
                 {"runner_connected": bool(rhealth.get("runner_connected")), "runner_configured": bool(rhealth.get("runner_configured"))},
             )
+        runner_instance_id = rhealth.get("runner_instance_id")
+        if not isinstance(runner_instance_id, str) or not runner_instance_id:
+            raise AppError(503, "RUNNER_PROTOCOL_MISMATCH", "隔离 Runner 未提供实例标识，请同代更新 Web 与 Runner")
 
         batch_name = spec["batch_name"]
         want_harbor_publish = bool(payload.get("publish_to_harbor_runs", False))
@@ -1713,7 +1716,7 @@ class ExecutionService:
             fcntl.flock(lease, fcntl.LOCK_EX)
             runner_id = str(rhealth.get("runner_id") or "external-isolated-runner")
             stored_params = {k: v for k, v in runner_spec.items() if k not in ("dataset_path", "config_path")}
-            stored_params["runner_instance_id"] = rhealth.get("runner_instance_id")
+            stored_params["runner_instance_id"] = runner_instance_id
             stored_params["dispatch_started"] = False
             try:
                 with self.db.transaction() as conn:
@@ -1803,6 +1806,7 @@ class ExecutionService:
                 ipc_status, ipc_body = self.ipc.submit_job(
                     {
                         "job_id": job_id,
+                        "runner_instance_id": runner_instance_id,
                         "channel_secret": channel_secret,
                         "spec": runner_spec,
                     }
@@ -1837,14 +1841,11 @@ class ExecutionService:
                     ipc_body.get("detail") if isinstance(ipc_body.get("detail"), dict) else None,
                 )
 
-            reply_runner_id = str(ipc_body.get("runner_id") or runner_id)
-            reply_instance = ipc_body.get("runner_instance_id") or stored_params["runner_instance_id"]
-            if reply_runner_id != runner_id or reply_instance != stored_params["runner_instance_id"]:
+            reply_runner_id = ipc_body.get("runner_id") if ipc_body.get("runner_instance_id") == runner_instance_id else None
+            if isinstance(reply_runner_id, str) and reply_runner_id and reply_runner_id != runner_id:
                 runner_id = reply_runner_id
-                stored_params["runner_instance_id"] = reply_instance
                 with self.db.transaction() as conn:
-                    conn.execute("UPDATE exec_jobs SET runner_id = ?, params_json = ? WHERE job_id = ?",
-                                 (runner_id, json.dumps(stored_params, ensure_ascii=False), job_id))
+                    conn.execute("UPDATE exec_jobs SET runner_id = ? WHERE job_id = ?", (runner_id, job_id))
 
             # The monitor retains the same flock after this request closes its descriptor.
             monitor_fd = os.dup(lease.fileno())

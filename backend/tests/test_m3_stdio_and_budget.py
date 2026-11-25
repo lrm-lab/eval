@@ -122,6 +122,7 @@ def test_runner_reserves_stdio_for_concurrent_submissions(tmp_path, monkeypatch)
     def submit(job_id):
         return manager.submit_job({
             "job_id": job_id, "channel_secret": "test-channel-secret", "spec": {"kind": "direct"},
+            "runner_instance_id": manager.instance_id,
         })
 
     def concurrent_submit(job_id):

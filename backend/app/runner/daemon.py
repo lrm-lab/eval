@@ -284,6 +284,8 @@ class IsolatedRunnerManager:
     def submit_job(self, req: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         job_id = str(req.get("job_id") or "").strip()
         validate_safe_id(job_id, "job_id")
+        if req.get("runner_instance_id") != self.instance_id:
+            return 409, {"code": "RUNNER_INSTANCE_MISMATCH", "job_id": job_id}
         spec = req.get("spec")
         if not isinstance(spec, dict):
             return 422, {"code": "SCHEMA_VALIDATION_FAILED", "message": "Missing spec"}
