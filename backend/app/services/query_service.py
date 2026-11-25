@@ -1012,6 +1012,8 @@ class QueryService:
         g_ref = ev_refs.get("gateway")
         if not g_ref:
             raise AppError(404, "RESOURCE_NOT_FOUND", "该 Trial 不包含网关抓包文件")
+        if "pending_file_identity" in g_ref:
+            raise AppError(409, "GENERATION_MISMATCH", "网关明细尚未完成当前版本摘要校验，请刷新后重试")
         target = self._resolve_evidence_ref_path(batch, g_ref)
         raw = self._verify_lazy_file(target, g_ref.get("sha256"))
         data = json.loads(raw.decode("utf-8", errors="replace"))
@@ -1431,12 +1433,18 @@ class QueryService:
                 raw_score = float(off_match["official_score"])
                 denom_kind = "official_summary" if int(r["dedup_scored"] or 0) == 0 else "official_verified"
                 batch_id_ref = off_match["batch_id"]
-                cov_str = f"{off_match['official_denominator']}/{off_match['official_denominator']}"
+                planned = int(off_match["official_denominator"])
+                cov_str = f"{planned}/{planned}"
+                official_status = off_match["official_status"]
+                cell_source_namespace = off_match["source_namespace"]
             else:
                 raw_score = float(r["dedup_valid_mean"]) if r["dedup_valid_mean"] is not None else None
                 denom_kind = "dedup_valid"
                 batch_id_ref = r["sample_batch_id"]
                 cov_str = f"{r['dedup_scored']}/{r['dedup_recorded']}"
+                planned = int(r["dedup_recorded"] or 0)
+                official_status = r["official_status"]
+                cell_source_namespace = r["source_namespace"]
 
             norm_score = round(normalize_score_to_100(raw_score, r["scale_type"]), 2) if raw_score is not None else None
             cell_key = _cell_key(rel_id, proto, rscope)
@@ -1451,10 +1459,10 @@ class QueryService:
                     "scale_type": r["scale_type"],
                     "run_scope": rscope,
                     "scoring_protocol": proto,
-                    "official_status": r["official_status"],
-                    "source_type": r["source_namespace"],
+                    "official_status": official_status,
+                    "source_type": cell_source_namespace,
                     "scored": int(r["dedup_scored"] or 0),
-                    "planned": int(r["dedup_recorded"] or 0),
+                    "planned": planned,
                     "batch_id": batch_id_ref,
                 }
                 # Include in macro avg strictly under (rel_id, proto, rscope) composite key so different protocols/scopes NEVER mix!

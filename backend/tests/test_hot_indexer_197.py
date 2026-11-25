@@ -26,6 +26,51 @@ def _sha256(p: Path) -> str:
     return hashlib.sha256(p.read_bytes()).hexdigest()
 
 
+def test_hot_scan_defers_unbound_legacy_gateway_evidence(isolated_settings: Settings) -> None:
+    isolated_settings.tianxi_root = isolated_settings.runtime_dir / "tianxi"
+    probe_isolated_dir(isolated_settings.state_dir, create=True)
+    db = Database(isolated_settings.db_path)
+    init_db(db)
+    sync_taxonomy_to_db(db, isolated_settings.taxonomy_file)
+    indexer = HotIndexer(isolated_settings, db)
+    trial_id = "trial-local"
+    relative = f"trials/{trial_id}/model-gateway.json"
+    paths = {}
+    for name in ("legacy-gateway-stable", "legacy-gateway-changed"):
+        batch = isolated_settings.harbor_runs_dir / name
+        trace = batch / relative
+        trace.parent.mkdir(parents=True)
+        trace.write_text('{"model_calls": 1, "turns": []}', encoding="utf-8")
+        (batch / "manifest.json").write_text(
+            json.dumps({"batch": name, "dataset": "GAIA", "model": "fixture", "runner": "harbor"}),
+            encoding="utf-8",
+        )
+        (batch / "episodes.jsonl").write_text(
+            json.dumps({"trial_id": trial_id, "task_id": name, "status": "scored", "reward": 1.0,
+                        "gateway_trace": relative}) + "\n",
+            encoding="utf-8",
+        )
+        (batch / "batch-status.json").write_text('{"status":"finished","planned":1}', encoding="utf-8")
+        paths[name] = trace
+
+    assert indexer.run_hot_scan()["batches"]["indexed"] == 2
+    query = QueryService(isolated_settings, db)
+    user = AuthUser("u_fixture", "admin", "Admin", "admin", frozenset(ALL_SCOPES), frozenset({"default"}), True)
+    stable_id = make_batch_id("harbor_runs:legacy-gateway-stable")
+    changed_id = make_batch_id("harbor_runs:legacy-gateway-changed")
+    with pytest.raises(AppError) as pending:
+        query.read_trial_gateway(user, stable_id, trial_id)
+    assert pending.value.code == "GENERATION_MISMATCH"
+
+    paths["legacy-gateway-changed"].write_text('{"model_calls": 10, "turns": []}', encoding="utf-8")
+    indexer.enrich_harbor_trials()
+    assert query.read_trial_gateway(user, stable_id, trial_id)["summary"]["model_calls"] == 1
+    with pytest.raises(AppError) as changed:
+        query.read_trial_gateway(user, changed_id, trial_id)
+    assert changed.value.code == "GENERATION_MISMATCH"
+    db.close_thread_connection()
+
+
 def _write_approval_yaml(config_dir: Path, entries: list[dict]) -> None:
     config_dir.mkdir(parents=True, exist_ok=True)
     for fname in ("taxonomy.yaml", "media_matching_rules.yaml", "token_semantics_registry.yaml"):

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import math
@@ -11,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
@@ -1122,7 +1124,14 @@ class ImageBaseDataset:
     def build_prompt(self, row):
         return [{"type": "text", "value": str(row.get("question") or "2 + 2")}]
 class ImageMCQDataset(ImageBaseDataset):
-    pass
+    def evaluate(self, prediction_file, **_kwargs):
+        import time
+        # Inference receipts exist before native evaluation writes the detail scores.
+        time.sleep(0.35)
+        detail = Path(prediction_file).with_name("predictions_exact_matching_result.xlsx")
+        rows = "".join(f"{row['index']}\\t{i % 2}\\n" for i, row in enumerate(self.data._rows))
+        detail.write_text("index\\thit\\n" + rows, encoding="utf-8")
+        return [{"Overall": 0.5, "Science": 0.5}]
 """,
             ),
             ("vlmeval/api/__init__.py", ""),
@@ -1188,7 +1197,7 @@ def dump(data, path):
         with _start_external_runner_daemon(isolated_settings, extra_env=runner_extra_env):
             app_h = create_app(isolated_settings, run_startup_scan=False)
             ctx_h = app_h.state.ctx
-            create_user(
+            original_owner_id = create_user(
                 ctx_h.db,
                 username="m3_hb_adm",
                 password="StrongM3Hb!2026",
@@ -1237,9 +1246,15 @@ def dump(data, path):
             assert r_bad_ver.json()["error"]["code"] == "RESUME_UNSUPPORTED"
 
             # Matching harness_version + SAME original 0700 --work dir -> REAL `run.py --resume` passes lock check & finishes BOTH trials!
-            r_ok_res = c_hb.post(
+            create_user(
+                ctx_h.db, username="m3_resume_adm", password="ResumeOperator!2026", role="admin",
+                projects=["default"], scopes=list(ALL_SCOPES),
+            )
+            c_resume = TestClient(app_h)
+            csrf_resume = login_client(c_resume, "m3_resume_adm", "ResumeOperator!2026")
+            r_ok_res = c_resume.post(
                 f"/api/v1/execution/jobs/{hb_jid}/resume",
-                headers={"X-CSRF-Token": csrf_hb},
+                headers={"X-CSRF-Token": csrf_resume},
                 json={"resume_mode": "native", "harness_version": "1.19.3"},
             )
             assert r_ok_res.status_code == 202, r_ok_res.text
@@ -1251,6 +1266,19 @@ def dump(data, path):
             assert hb_b.status_code == 200, hb_b.text
             assert hb_b.json()["totals"]["scored"] == 2
             assert abs(hb_b.json()["totals"]["valid_mean"] - 0.5) < 1e-6
+            assert ctx_h.db.fetchone("SELECT owner_id FROM exec_jobs WHERE job_id = ?", (r_ok_res.json()["job_id"],)) == {
+                "owner_id": original_owner_id,
+            }
+            assert ctx_h.db.fetchone("SELECT project_id, owner_id FROM batches WHERE batch_id = ?", (hb_bid,)) == {
+                "project_id": "default", "owner_id": original_owner_id,
+            }
+            repeat = c_resume.post(
+                f"/api/v1/execution/jobs/{hb_jid}/resume",
+                headers={"X-CSRF-Token": csrf_resume},
+                json={"resume_mode": "native"},
+            )
+            assert repeat.status_code == 409
+            assert repeat.json()["error"]["code"] == "BATCH_ALREADY_EXISTS"
 
             # 4b) REAL managed `run.py --gateway-capture` (Harbor Gateway) execution & reconcile!
             r_gw = c_hb.post(
@@ -1327,7 +1355,172 @@ def dump(data, path):
             vlm_all_b = c_hb.get(f"/api/v1/batches/{vlm_all_bid}")
             assert vlm_all_b.status_code == 200, vlm_all_b.text
             assert vlm_all_b.json()["totals"]["recorded"] == 2
+            assert vlm_all_b.json()["official_status"] == "unscored"
+            assert vlm_all_b.json()["official_result"] is None
+
+            # The all-mode scorer updates receipts after inference; publish the final rewards once.
+            official_name = "m3-vlm-native-official"
+            r_official = c_hb.post(
+                "/api/v1/execution/jobs",
+                headers={"X-CSRF-Token": csrf_hb},
+                json={
+                    "kind": "vlmevalkit",
+                    "suite_id": "ai2d-test-smoke",
+                    "selection_mode": "all",
+                    "vlmevalkit_mode": "all",
+                    "batch_name": official_name,
+                    "model_route": "vlm-official-fixture",
+                    "project_id": "default",
+                },
+            )
+            assert r_official.status_code == 202, r_official.text
+            official_job = r_official.json()["job_id"]
+            official_detail = _wait_job_terminal(c_hb, official_job)
+            assert official_detail["status"] == "finished", official_detail
+            snapshot = official_detail["shared_snapshot"]
+            official_batch = c_hb.get(f"/api/v1/batches/{snapshot['batch_id']}")
+            assert official_batch.status_code == 200, official_batch.text
+            batch_dto = official_batch.json()
+            assert batch_dto["generation_id"] == snapshot["generation_id"]
+            assert batch_dto["official_status"] == "official_verified"
+            assert batch_dto["official_result"]["score"] == 0.5
+            assert batch_dto["official_result"]["denominator"] == 2
+            assert batch_dto["totals"]["scored"] == 2
+            assert batch_dto["totals"]["valid_mean"] == 0.5
+
+            rewards = ctx_h.db.fetchall(
+                "SELECT reward, reward_valid FROM trial_protocol_scores WHERE batch_id = ? ORDER BY reward",
+                (snapshot["batch_id"],),
+            )
+            assert [(row["reward"], row["reward_valid"]) for row in rewards] == [(0.0, 1), (1.0, 1)]
+            leaderboard = c_hb.get("/api/v1/leaderboard?runner=vlmevalkit")
+            assert leaderboard.status_code == 200, leaderboard.text
+            cells = [
+                cell for item in leaderboard.json()["items"] for cell in item["benchmarks"].values()
+                if cell.get("batch_id") == snapshot["batch_id"]
+            ]
+            assert len(cells) == 1
+            assert cells[0]["official_status"] == "official_verified"
+            assert cells[0]["raw_score"] == 0.5 and cells[0]["planned"] == 2
+
+            published_root = isolated_settings.published_batches_dir
+            assert published_root is not None
+            public_dir = published_root / official_name
+            publish_manifest = json.loads((public_dir / "publish-manifest.json").read_text(encoding="utf-8"))
+            assert publish_manifest["generation_id"] == snapshot["generation_id"]
+            for name in ("official-result.json", "vlmevalkit/metrics.json"):
+                raw = (public_dir / name).read_bytes()
+                assert publish_manifest["top_level_files"][name] == {
+                    "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+                assert name not in publish_manifest["absent_optional_files"]
+            metrics = json.loads((public_dir / "vlmevalkit/metrics.json").read_text(encoding="utf-8"))
+            assert metrics == [{"Overall": 0.5, "Science": 0.5}]
             ctx_h.db.close_thread_connection()
+
+
+def test_m3_s02_reserves_publication_before_dispatch_until_finalization(
+    tmp_path: Path, isolated_settings: Settings, monkeypatch,
+) -> None:
+    def completion(_path, _headers, body):
+        return 200, {
+            "id": "reservation-fixture", "model": body["model"],
+            "choices": [{"message": {"role": "assistant", "content": "4"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        }
+
+    with _MockChatGatewayServer(completion) as gateway:
+        isolated_settings.config_dir = tmp_path / "config"
+        isolated_settings.tianxi_root = tmp_path / "tianxi"
+        _write_test_config(isolated_settings.config_dir, approval_entries=[], gateway_base_url=gateway.base_url)
+        with _start_external_runner_daemon(isolated_settings):
+            app = create_app(isolated_settings, run_startup_scan=False)
+            ctx = app.state.ctx
+            clients = {}
+            for name, project in (("owner_alpha", "team_alpha"), ("owner_beta", "team_beta")):
+                password = "TeamReservation!2026"
+                owner = create_user(ctx.db, username=name, password=password, role="researcher",
+                                    projects=[project], scopes=list(ALL_SCOPES))
+                client = TestClient(app)
+                clients[project] = client, login_client(client, name, password), owner
+
+            def submit(project, batch_name):
+                client, csrf, _ = clients[project]
+                return client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json={
+                    "kind": "direct", "suite_id": "direct-smoke-v1", "selection_mode": "tasks",
+                    "tasks": ["smoke-arith-001"], "batch_name": batch_name, "project_id": project,
+                })
+
+            entered_dispatch, release_dispatch = threading.Event(), threading.Event()
+            entered_finalize, release_finalize = threading.Event(), threading.Event()
+            send_job = ctx.execution.ipc.submit_job
+            finalize = ctx.execution._publish_public_dto_and_reconcile
+            sent = []
+
+            def stalled_dispatch(payload):
+                sent.append(payload["job_id"])
+                if len(sent) == 1:
+                    entered_dispatch.set()
+                    assert release_dispatch.wait(20)
+                return send_job(payload)
+
+            def stalled_finalize(**kwargs):
+                entered_finalize.set()
+                assert release_finalize.wait(20)
+                return finalize(**kwargs)
+
+            monkeypatch.setattr(ctx.execution.ipc, "submit_job", stalled_dispatch)
+            monkeypatch.setattr(ctx.execution, "_publish_public_dto_and_reconcile", stalled_finalize)
+            batch_name = "team-claimed-publication"
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                first = pool.submit(submit, "team_alpha", batch_name)
+                try:
+                    assert entered_dispatch.wait(10)
+                    assert submit("team_beta", batch_name).status_code == 409
+                    assert len(sent) == 1
+                    release_dispatch.set()
+                    accepted = first.result(timeout=15)
+                    assert accepted.status_code == 202, accepted.text
+                    assert entered_finalize.wait(10)
+                    job_id = accepted.json()["job_id"]
+                    assert ctx.db.fetchone("SELECT status FROM exec_jobs WHERE job_id = ?", (job_id,)) == {
+                        "status": "finalizing",
+                    }
+                    assert submit("team_beta", batch_name).status_code == 409
+                    assert len(sent) == 1
+                finally:
+                    release_dispatch.set()
+                    release_finalize.set()
+
+            alpha, _, owner = clients["team_alpha"]
+            detail = _wait_job_terminal(alpha, job_id)
+            assert detail["status"] == "finished", detail
+            snapshot = detail["shared_snapshot"]
+            batch_id = snapshot["batch_id"]
+            assert ctx.db.fetchone("SELECT project_id, owner_id FROM batches WHERE batch_id = ?", (batch_id,)) == {
+                "project_id": "team_alpha", "owner_id": owner,
+            }
+            folder = isolated_settings.published_batches_dir / batch_name
+            manifest_bytes = (folder / "publish-manifest.json").read_bytes()
+            manifest = json.loads(manifest_bytes)
+            ledger_path = isolated_settings.state_dir / "runner-submissions" / f"{batch_name}.json"
+            binding = json.loads(ledger_path.read_bytes())
+            assert binding["job_id"] == manifest["runner_job_id"] == job_id
+            assert binding["generation_id"] == snapshot["generation_id"] == manifest["generation_id"]
+            assert binding["manifest_sha256"] == hashlib.sha256(manifest_bytes).hexdigest()
+            assert ctx.db.fetchone("SELECT 1 FROM exec_batch_reservations WHERE job_id = ?", (job_id,)) is None
+            assert submit("team_beta", batch_name).status_code == 409
+
+            # A confirmed dispatch rejection releases the location for another team's retry.
+            monkeypatch.setattr(ctx.execution.ipc, "submit_job", lambda _: (503, {"code": "RUNNER_CAPACITY_UNAVAILABLE"}))
+            assert submit("team_alpha", "team-retry-publication").status_code == 503
+            assert ctx.db.fetchone("SELECT 1 FROM exec_batch_reservations WHERE batch_name = 'team-retry-publication'") is None
+            assert ctx.db.fetchone("SELECT 1 FROM exec_jobs WHERE batch_name = 'team-retry-publication'") is None
+            monkeypatch.setattr(ctx.execution.ipc, "submit_job", send_job)
+            retry = submit("team_beta", "team-retry-publication")
+            assert retry.status_code == 202, retry.text
+            beta, _, _ = clients["team_beta"]
+            assert _wait_job_terminal(beta, retry.json()["job_id"])["status"] == "finished"
 
 
 def test_m3_e02_training_opd_empty_prod_state_contract_fixture_and_holdout_guardrail(
@@ -1752,6 +1945,41 @@ def test_m3_rev3_s02_runner_published_ownership_preserved_on_reindex_poll_and_fr
         ctx_rec = app_rec.state.ctx
         ctx_rec.coordinator.run_hot_now(force=True)
         _assert_ownership(ctx_rec.db, "fresh_db_restart_recovery")
+
+        published_root = isolated_settings.published_batches_dir
+        assert published_root is not None
+        source_dir = published_root / "m3-team-beta-ownership"
+        with ctx_rec.db.transaction() as conn:
+            conn.execute(
+                "UPDATE batches SET project_id = 'default', owner_id = 'system', evidence_approval = 'pending' WHERE batch_id = ?",
+                (bid,),
+            )
+        assert ctx_rec.coordinator.run_hot_now(force=False)["batches"]["indexed"] == 1
+        _assert_ownership(ctx_rec.db, "poll_repaired_default_ownership")
+
+        held_meta = meta_file.with_suffix(".held")
+        meta_file.rename(held_meta)
+        try:
+            # Reject even a cache hit from a prior scan, and keep the DTO available for recovery.
+            assert ctx_rec.coordinator.run_hot_now(force=False)["batches"]["rejected"] == 1
+            assert ctx_rec.db.fetchone("SELECT 1 FROM batches WHERE batch_id = ?", (bid,)) is None
+            assert ctx_rec.db.fetchone("SELECT 1 FROM trial_protocol_scores WHERE batch_id = ?", (bid,)) is None
+            assert ctx_rec.db.fetchone("SELECT 1 FROM search_fts WHERE entity_id = ?", (bid,)) is None
+            assert (source_dir / "publish-manifest.json").is_file()
+            assert ctx_rec.coordinator.hot.scan_single_harbor_batch(
+                source_dir, force=True, source_namespace="runner_published"
+            ) == "rejected"
+            stale_ledger = json.loads(held_meta.read_bytes())
+            stale_ledger["generation_id"] = "gen_stale"
+            meta_file.write_text(json.dumps(stale_ledger), encoding="utf-8")
+            meta_file.chmod(0o600)
+            assert ctx_rec.coordinator.run_hot_now(force=False)["batches"]["rejected"] == 1
+            assert ctx_rec.db.fetchone("SELECT 1 FROM batches WHERE batch_id = ?", (bid,)) is None
+        finally:
+            held_meta.replace(meta_file)
+
+        assert ctx_rec.coordinator.run_hot_now(force=False)["batches"]["indexed"] == 1
+        _assert_ownership(ctx_rec.db, "original_provenance_restored")
 
         # 3) External `harbor_runs` batch STILL obeys `source_approval_registry.yaml` approval updates!
         ext_batch = hr_dir / "ext-harbor-appr-check"
