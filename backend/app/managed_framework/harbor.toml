@@ -5,6 +5,7 @@ opencode_version = "1.19.3"
 [datasets.terminal]
 handoff_profile = "terminal"
 name = "terminal-bench-2.1"
+path_root = "bundle"
 path = "datasets/terminal-bench-2.1/tasks"
 
 [datasets.wildclaw]
@@ -12,6 +13,7 @@ handoff_profile = "wildclaw"
 prepare = "wildclaw-crlf"
 name = "wildclawbench-harbor"
 reward_key = "overall_score"
+path_root = "bundle"
 path = "datasets/wildclaw-harbor"
 
 [datasets.deepswe]
