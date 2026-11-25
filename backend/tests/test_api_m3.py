@@ -83,7 +83,7 @@ def _write_test_config(
     gateway_base_url: str,
 ) -> None:
     cfg_dir.mkdir(parents=True, exist_ok=True)
-    src_cfg = Path("/home/share-data/eval/config")
+    src_cfg = Path(__file__).resolve().parents[2] / "config"
     for fname in (
         "taxonomy.yaml",
         "media_matching_rules.yaml",
@@ -91,12 +91,8 @@ def _write_test_config(
         "direct_scorers.yaml",
         "direct_suites.yaml",
     ):
-        src = src_cfg / fname
-        if src.is_file():
-            (cfg_dir / fname).write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
-    ds_src = src_cfg / "direct_suites"
-    if ds_src.is_dir():
-        shutil.copytree(ds_src, cfg_dir / "direct_suites", dirs_exist_ok=True)
+        shutil.copyfile(src_cfg / fname, cfg_dir / fname)
+    shutil.copytree(src_cfg / "direct_suites", cfg_dir / "direct_suites", dirs_exist_ok=True)
 
     (cfg_dir / "gateway_profiles.yaml").write_text(
         yaml.safe_dump(
