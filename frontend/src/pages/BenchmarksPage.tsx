@@ -9,6 +9,7 @@ import { useAppStore } from '../lib/store';
 import type { BatchDTO, DatasetReleaseDTO } from '../types/api';
 import { PageTransition, SlidingTabs, SpotlightCard } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
+import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
 import { EfficiencyScatterChart } from '../components/charts/EfficiencyScatterChart';
@@ -267,6 +268,18 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
           { id: 'properties', label: '发行版与属性', badge: data?.releases.length, icon: <Layers3 size={14} /> },
         ]}
       />
+
+      {tab === 'leaderboard' && data && (
+        <PublicBaselinePanel
+          benchmark={benchmarkSlug}
+          candidates={data.mini_leaderboard.map((row, index) => ({
+            id: `${row.batch_id || 'score'}-${index}`,
+            label: `${row.model_canonical || '模型未知'} · ${row.harness || row.runner}`,
+            batchId: row.batch_id,
+          }))}
+          emptyMessage="该基准暂无可用于比较的站内批次。"
+        />
+      )}
 
       {profQ.isLoading ? (
         <TableSkeleton rows={6} cols={5} />

@@ -23,8 +23,11 @@ def compare_public_baseline(
     baseline_id: Annotated[str, Query(min_length=1, max_length=100)],
     batch_id: Annotated[list[str], Query(min_length=1, max_length=100)],
     user: AuthUser = Depends(get_current_user),
+    require_same_model: bool = False,
 ) -> dict[str, Any]:
-    return request.app.state.ctx.public_baselines.compare(user, baseline_id, batch_id)
+    return request.app.state.ctx.public_baselines.compare(
+        user, baseline_id, batch_id, require_same_model=require_same_model,
+    )
 
 
 @router.get("/default")
@@ -32,5 +35,6 @@ def get_default_public_baseline(
     request: Request,
     batch_id: Annotated[list[str], Query(min_length=1, max_length=100)],
     user: AuthUser = Depends(get_current_user),
+    require_same_model: bool = False,
 ) -> dict[str, str | None]:
-    return request.app.state.ctx.public_baselines.default(user, batch_id)
+    return request.app.state.ctx.public_baselines.default(user, batch_id, require_same_model=require_same_model)
