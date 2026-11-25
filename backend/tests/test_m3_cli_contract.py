@@ -3,6 +3,7 @@ import secrets
 import stat
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
@@ -32,14 +33,20 @@ def test_readonly_frozen_plan(isolated_settings: Settings, tmp_path: Path, kind,
     elif kind == "vlmevalkit":
         spec.update(suite_id="cmmmu-val", vlmevalkit_mode=mode, selection_mode="all", tasks=[])
 
-    overlay = materialize_managed_run_config(isolated_settings, spec, work)
+    ca_bundle = tmp_path / "runner-ca.pem"
+    ca_bundle.touch()
+    overlay = materialize_managed_run_config(
+        isolated_settings, spec, work, harbor_agent_ca_bundle=str(ca_bundle),
+    )
+    overlay_ca = tomllib.loads(overlay.read_text()).get("agent_ca_bundle")
+    assert overlay_ca == (str(ca_bundle) if kind == "harbor" else None)
     assert stat.S_IMODE(overlay.stat().st_mode) == 0o600
     before = {p: p.read_bytes() for p in work.iterdir()}
     cmd = build_managed_run_py_command(
         run_py_path=str(resolve_verified_managed_script(isolated_settings, "run.py")),
         python_exe=sys.executable, spec=spec, base_url="http://127.0.0.1:1/v1",
         config_path=None if kind == "direct" else str(overlay), work_dir=str(work),
-        output_dir=str(output), plan_only=True,
+        output_dir=str(output), plan_only=True, harbor_agent_ca_bundle=overlay_ca,
     )
     assert {"--evidence-store", "--mode"}.isdisjoint(cmd)
     assert ("--gateway-capture" in cmd) == (kind == "harbor_gateway")
@@ -50,7 +57,11 @@ def test_readonly_frozen_plan(isolated_settings: Settings, tmp_path: Path, kind,
     assert {p: p.read_bytes() for p in work.iterdir()} == before
     if kind == "harbor":
         assert "harbor run" in result.stdout and spec["tasks"][0] in result.stdout
+        assert "--agent-ca-bundle" in cmd
+        assert "NODE_EXTRA_CA_CERTS=/etc/ssl/certs/tianxi-host-ca.pem" in result.stdout
+        assert str(ca_bundle) in result.stdout
     else:
+        assert "--agent-ca-bundle" not in cmd
         plan = json.loads(result.stdout)
         assert plan["runner"] == ("openenv-gateway" if kind == "harbor_gateway" else kind)
         if kind == "vlmevalkit":
@@ -61,14 +72,22 @@ def test_readonly_frozen_plan(isolated_settings: Settings, tmp_path: Path, kind,
             assert plan["tasks"] == spec["tasks"]
 
 
-def test_native_resume_reuses_unchanged_overlay(isolated_settings: Settings, tmp_path: Path):
+@pytest.mark.parametrize("previous_ca", [False, True])
+def test_native_resume_reuses_unchanged_overlay(isolated_settings: Settings, tmp_path: Path, previous_ca: bool):
     spec = dict(kind="harbor", suite_id="tianxi-synth-v1-train", batch_name="locked",
                 selection_mode="tasks", tasks=["log-rollup-train-001"])
-    overlay = materialize_managed_run_config(isolated_settings, spec, tmp_path)
+    original_ca = tmp_path / "original-ca.pem"
+    original_ca.touch()
+    overlay = materialize_managed_run_config(
+        isolated_settings, spec, tmp_path, harbor_agent_ca_bundle=str(original_ca) if previous_ca else None,
+    )
     original = overlay.stat()
     resumed = dict(spec, resume_mode="native")
-    path = materialize_managed_run_config(isolated_settings, resumed, tmp_path)
+    path = materialize_managed_run_config(
+        isolated_settings, resumed, tmp_path, harbor_agent_ca_bundle=str(tmp_path / "changed-ca.pem"),
+    )
     assert path == overlay
+    assert tomllib.loads(path.read_text()).get("agent_ca_bundle") == (str(original_ca) if previous_ca else None)
     assert (path.stat().st_ino, path.stat().st_mtime_ns) == (original.st_ino, original.st_mtime_ns)
     with pytest.raises(ValueError):
         materialize_managed_run_config(isolated_settings, dict(resumed, tasks=[]), tmp_path)
