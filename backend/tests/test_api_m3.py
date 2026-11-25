@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import http.server
 import json
 import math
@@ -1122,7 +1123,14 @@ class ImageBaseDataset:
     def build_prompt(self, row):
         return [{"type": "text", "value": str(row.get("question") or "2 + 2")}]
 class ImageMCQDataset(ImageBaseDataset):
-    pass
+    def evaluate(self, prediction_file, **_kwargs):
+        import time
+        # Inference receipts exist before native evaluation writes the detail scores.
+        time.sleep(0.35)
+        detail = Path(prediction_file).with_name("predictions_exact_matching_result.xlsx")
+        rows = "".join(f"{row['index']}\\t{i % 2}\\n" for i, row in enumerate(self.data._rows))
+        detail.write_text("index\\thit\\n" + rows, encoding="utf-8")
+        return [{"Overall": 0.5, "Science": 0.5}]
 """,
             ),
             ("vlmeval/api/__init__.py", ""),
@@ -1327,6 +1335,67 @@ def dump(data, path):
             vlm_all_b = c_hb.get(f"/api/v1/batches/{vlm_all_bid}")
             assert vlm_all_b.status_code == 200, vlm_all_b.text
             assert vlm_all_b.json()["totals"]["recorded"] == 2
+            assert vlm_all_b.json()["official_status"] == "unscored"
+            assert vlm_all_b.json()["official_result"] is None
+
+            # The all-mode scorer updates receipts after inference; publish the final rewards once.
+            official_name = "m3-vlm-native-official"
+            r_official = c_hb.post(
+                "/api/v1/execution/jobs",
+                headers={"X-CSRF-Token": csrf_hb},
+                json={
+                    "kind": "vlmevalkit",
+                    "suite_id": "ai2d-test-smoke",
+                    "selection_mode": "all",
+                    "vlmevalkit_mode": "all",
+                    "batch_name": official_name,
+                    "model_route": "vlm-official-fixture",
+                    "project_id": "default",
+                },
+            )
+            assert r_official.status_code == 202, r_official.text
+            official_job = r_official.json()["job_id"]
+            official_detail = _wait_job_terminal(c_hb, official_job)
+            assert official_detail["status"] == "finished", official_detail
+            snapshot = official_detail["shared_snapshot"]
+            official_batch = c_hb.get(f"/api/v1/batches/{snapshot['batch_id']}")
+            assert official_batch.status_code == 200, official_batch.text
+            batch_dto = official_batch.json()
+            assert batch_dto["generation_id"] == snapshot["generation_id"]
+            assert batch_dto["official_status"] == "official_verified"
+            assert batch_dto["official_result"]["score"] == 0.5
+            assert batch_dto["official_result"]["denominator"] == 2
+            assert batch_dto["totals"]["scored"] == 2
+            assert batch_dto["totals"]["valid_mean"] == 0.5
+
+            rewards = ctx_h.db.fetchall(
+                "SELECT reward, reward_valid FROM trial_protocol_scores WHERE batch_id = ? ORDER BY reward",
+                (snapshot["batch_id"],),
+            )
+            assert [(row["reward"], row["reward_valid"]) for row in rewards] == [(0.0, 1), (1.0, 1)]
+            leaderboard = c_hb.get("/api/v1/leaderboard?runner=vlmevalkit")
+            assert leaderboard.status_code == 200, leaderboard.text
+            cells = [
+                cell for item in leaderboard.json()["items"] for cell in item["benchmarks"].values()
+                if cell.get("batch_id") == snapshot["batch_id"]
+            ]
+            assert len(cells) == 1
+            assert cells[0]["official_status"] == "official_verified"
+            assert cells[0]["raw_score"] == 0.5 and cells[0]["planned"] == 2
+
+            published_root = isolated_settings.published_batches_dir
+            assert published_root is not None
+            public_dir = published_root / official_name
+            publish_manifest = json.loads((public_dir / "publish-manifest.json").read_text(encoding="utf-8"))
+            assert publish_manifest["generation_id"] == snapshot["generation_id"]
+            for name in ("official-result.json", "vlmevalkit/metrics.json"):
+                raw = (public_dir / name).read_bytes()
+                assert publish_manifest["top_level_files"][name] == {
+                    "size": len(raw), "sha256": hashlib.sha256(raw).hexdigest(),
+                }
+                assert name not in publish_manifest["absent_optional_files"]
+            metrics = json.loads((public_dir / "vlmevalkit/metrics.json").read_text(encoding="utf-8"))
+            assert metrics == [{"Overall": 0.5, "Science": 0.5}]
             ctx_h.db.close_thread_connection()
 
 
@@ -1752,6 +1821,35 @@ def test_m3_rev3_s02_runner_published_ownership_preserved_on_reindex_poll_and_fr
         ctx_rec = app_rec.state.ctx
         ctx_rec.coordinator.run_hot_now(force=True)
         _assert_ownership(ctx_rec.db, "fresh_db_restart_recovery")
+
+        published_root = isolated_settings.published_batches_dir
+        assert published_root is not None
+        source_dir = published_root / "m3-team-beta-ownership"
+        with ctx_rec.db.transaction() as conn:
+            conn.execute(
+                "UPDATE batches SET project_id = 'default', owner_id = 'system', evidence_approval = 'pending' WHERE batch_id = ?",
+                (bid,),
+            )
+        assert ctx_rec.coordinator.run_hot_now(force=False)["batches"]["indexed"] == 1
+        _assert_ownership(ctx_rec.db, "poll_repaired_default_ownership")
+
+        held_meta = meta_file.with_suffix(".held")
+        meta_file.rename(held_meta)
+        try:
+            # Reject even a cache hit from a prior scan, and keep the DTO available for recovery.
+            assert ctx_rec.coordinator.run_hot_now(force=False)["batches"]["rejected"] == 1
+            assert ctx_rec.db.fetchone("SELECT 1 FROM batches WHERE batch_id = ?", (bid,)) is None
+            assert ctx_rec.db.fetchone("SELECT 1 FROM trial_protocol_scores WHERE batch_id = ?", (bid,)) is None
+            assert ctx_rec.db.fetchone("SELECT 1 FROM search_fts WHERE entity_id = ?", (bid,)) is None
+            assert (source_dir / "publish-manifest.json").is_file()
+            assert ctx_rec.coordinator.hot.scan_single_harbor_batch(
+                source_dir, force=True, source_namespace="runner_published"
+            ) == "rejected"
+        finally:
+            held_meta.rename(meta_file)
+
+        assert ctx_rec.coordinator.run_hot_now(force=False)["batches"]["indexed"] == 1
+        _assert_ownership(ctx_rec.db, "original_provenance_restored")
 
         # 3) External `harbor_runs` batch STILL obeys `source_approval_registry.yaml` approval updates!
         ext_batch = hr_dir / "ext-harbor-appr-check"
