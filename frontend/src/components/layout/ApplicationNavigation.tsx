@@ -11,10 +11,20 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: Luc
     label: '浏览资源',
     items: [
       { to: '/', label: '平台首页', icon: Home, end: true },
-      { to: '/datasets', label: 'Datasets 能力树', icon: Database },
-      { to: '/benchmarks', label: 'Benchmark 档案', icon: BarChart3 },
-      { to: '/models', label: '模型档案', icon: Cpu },
-      { to: '/harnesses', label: 'Harness 档案', icon: Wrench },
+      { to: '/models', label: '模型档案与趋势', icon: Cpu },
+      { to: '/harnesses', label: 'Harness 跨数据集表现', icon: Wrench },
+      { to: '/datasets', label: '数据集能力树', icon: Database },
+      { to: '/benchmarks', label: '基准档案与分组对比', icon: BarChart3 },
+    ],
+  },
+  {
+    label: '结果分析',
+    items: [
+      { to: '/leaderboard', label: '模型与 Harness 排行', icon: Trophy },
+      { to: '/eval/compare', label: '自由对比与同题证据', icon: GitCompareArrows },
+      { to: '/eval/reports', label: '评测报告与批次', icon: FileSpreadsheet },
+      { to: '/eval/diagnostics', label: '失败与差异诊断', icon: Activity },
+      { to: '/recommend', label: '约束选型推荐', icon: Compass },
     ],
   },
   {
@@ -24,16 +34,6 @@ const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: Luc
       { to: '/eval/direct-lab', label: 'Direct 原生验证台', icon: Zap },
       { to: '/toolkit/verify', label: '离线校验与算分', icon: FileCheck2 },
       { to: '/toolkit/params', label: '运行参数对照台账', icon: Sliders },
-    ],
-  },
-  {
-    label: '结果分析',
-    items: [
-      { to: '/leaderboard', label: '综合主榜 & 效率图', icon: Trophy },
-      { to: '/eval/reports', label: '评测报告中心', icon: FileSpreadsheet },
-      { to: '/eval/compare', label: '动态自由对比', icon: GitCompareArrows },
-      { to: '/eval/diagnostics', label: '深度诊断与线索', icon: Activity },
-      { to: '/recommend', label: '约束选型推荐', icon: Compass },
     ],
   },
   {
