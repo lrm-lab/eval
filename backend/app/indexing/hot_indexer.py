@@ -2676,34 +2676,42 @@ class HotIndexer:
         for legacy harbor-runs batches (without publish-manifest.json).
         Manifest-v2 batches (trial_digests_sha256 IS NOT NULL) are already enriched from verified in-memory bytes
         during atomic ingest and are strictly skipped here to eliminate any second unverified disk read."""
+        from app.services.diagnostics_service import GATEWAY_CLUE_SUMMARY_VERSION, read_gateway_clue_for_index
+
         if batch_ids:
             ph = ",".join("?" for _ in batch_ids)
             batches = self.db.fetchall(
-                f"SELECT batch_id, source_locator, runner, harness, harness_version, content_digest FROM batches WHERE batch_id IN ({ph}) AND source_namespace = 'harbor_runs' AND is_running_placeholder = 0 AND trial_digests_sha256 IS NULL",
+                f"SELECT batch_id, source_locator, runner, harness, harness_version, content_digest, generation_id, has_gateway, evidence_approval FROM batches WHERE batch_id IN ({ph}) AND source_namespace = 'harbor_runs' AND is_running_placeholder = 0 AND trial_digests_sha256 IS NULL",
                 batch_ids,
             )
         else:
             batches = self.db.fetchall(
-                "SELECT batch_id, source_locator, runner, harness, harness_version, content_digest FROM batches WHERE source_namespace = 'harbor_runs' AND is_running_placeholder = 0 AND trial_digests_sha256 IS NULL"
+                "SELECT batch_id, source_locator, runner, harness, harness_version, content_digest, generation_id, has_gateway, evidence_approval FROM batches WHERE source_namespace = 'harbor_runs' AND is_running_placeholder = 0 AND trial_digests_sha256 IS NULL"
             )
         enriched_trials = 0
         enriched_batches = 0
         for b in batches:
             cache_key = f"trial_enrich:{b['batch_id']}"
-            cached = self.db.fetchone("SELECT error_message, status FROM cold_file_cache WHERE file_path = ?", (cache_key,))
-            if cached and cached["status"] == "ready" and cached["error_message"] == b["content_digest"]:
-                continue
             bname = str(b["source_locator"]).split(":", 1)[1]
             bdir = self.settings.harbor_runs_dir / bname
+            summarize_gateway = bool(b["has_gateway"]) and self.approval_registry.is_evidence_class_approved(
+                bdir, "gateway_capture", b["evidence_approval"],
+            )
+            cache_revision = b["content_digest"]
+            if summarize_gateway:
+                cache_revision = f"{cache_revision}:gateway-clue-v{GATEWAY_CLUE_SUMMARY_VERSION}"
+            cached = self.db.fetchone("SELECT error_message, status FROM cold_file_cache WHERE file_path = ?", (cache_key,))
+            if cached and cached["status"] == "ready" and cached["error_message"] == cache_revision:
+                continue
             if not bdir.is_dir():
                 continue
             eps = self.db.fetchall(
                 """
                 SELECT trial_id, input_tokens, output_tokens, cached_tokens, reasoning_tokens,
-                       reasoning_key_source, tool_call_count, started_at, finished_at, evidence_refs_json
-                FROM episodes WHERE batch_id = ?
+                       reasoning_key_source, tool_call_count, started_at, finished_at, evidence_refs_json, observable_clues_json
+                FROM episodes WHERE batch_id = ? AND generation_id = ?
                 """,
-                (b["batch_id"],),
+                (b["batch_id"], b["generation_id"]),
             )
             if not eps:
                 continue
@@ -2723,26 +2731,43 @@ class HotIndexer:
                     except AppError:
                         t_info = None
                 gateway = ev.get("gateway")
-                if isinstance(gateway, dict) and gateway.get("pending_file_identity"):
+                gateway_summary = None
+                if (
+                    isinstance(gateway, dict)
+                    and gateway.get("rel_path")
+                    and gateway.get("generation_id") in (None, b["generation_id"])
+                    and gateway.get("storage_tier") != "evidence_store_0700"
+                ):
+                    pending = gateway.get("pending_file_identity")
+                    indexed_digest = gateway.get("sha256")
                     try:
-                        gateway_path = resolve_within_root(bdir, gateway["rel_path"])
-                        expected_identity = tuple(gateway["pending_file_identity"])
-                        if _stat_tuple(gateway_path) == expected_identity:
-                            gateway_digest, _ = _sha256_file(gateway_path)
+                        if summarize_gateway and (pending or (indexed_digest and "pending_file_identity" not in gateway)):
+                            gateway_path = resolve_within_root(bdir, gateway["rel_path"])
+                            measured = read_gateway_clue_for_index(
+                                gateway_path, tuple(pending) if pending else None, indexed_digest,
+                            )
+                            if measured is not None:
+                                gateway["sha256"], gateway_summary = measured
+                                gateway.pop("pending_file_identity", None)
+                        elif pending:
+                            gateway_path = resolve_within_root(bdir, gateway["rel_path"])
+                            expected_identity = tuple(pending)
                             if _stat_tuple(gateway_path) == expected_identity:
-                                gateway["sha256"] = gateway_digest
-                                del gateway["pending_file_identity"]
+                                gateway_digest, _ = _sha256_file(gateway_path)
+                                if _stat_tuple(gateway_path) == expected_identity:
+                                    gateway["sha256"] = gateway_digest
+                                    del gateway["pending_file_identity"]
                     except (AppError, OSError):
                         pass
-                return tid, {"ep": ep_row, "ev": ev, "res": r_info, "traj": t_info}
+                return tid, {"ep": ep_row, "ev": ev, "res": r_info, "traj": t_info, "gateway_clue": gateway_summary}
 
             with ThreadPoolExecutor(max_workers=12) as pool:
                 results = list(pool.map(_enrich_one, eps))
 
             with self.db.transaction() as conn:
                 if conn.execute(
-                    "SELECT 1 FROM batches WHERE batch_id = ? AND content_digest = ?",
-                    (b["batch_id"], b["content_digest"]),
+                    "SELECT 1 FROM batches WHERE batch_id = ? AND generation_id = ? AND content_digest = ?",
+                    (b["batch_id"], b["generation_id"], b["content_digest"]),
                 ).fetchone() is None:
                     continue
                 for tid, bundle in results:
@@ -2791,6 +2816,12 @@ class HotIndexer:
                         output_tokens=ep_row["output_tokens"],
                         reasoning_tokens=reason_tok,
                     )
+                    clues_json = ep_row["observable_clues_json"]
+                    if bundle["gateway_clue"] is not None:
+                        clues = json.loads(clues_json or "[]")
+                        clues = [clue for clue in clues if not isinstance(clue, dict) or clue.get("source") != "gateway_capture"]
+                        clues.append(bundle["gateway_clue"])
+                        clues_json = json.dumps(clues, ensure_ascii=False)
                     conn.execute(
                         """
                         UPDATE episodes
@@ -2804,8 +2835,9 @@ class HotIndexer:
                             token_semantics = ?,
                             has_verifier_output = MAX(has_verifier_output, ?),
                             has_inline_media = MAX(has_inline_media, ?),
-                            evidence_refs_json = ?
-                        WHERE batch_id = ? AND trial_id = ?
+                            evidence_refs_json = ?,
+                            observable_clues_json = ?
+                        WHERE batch_id = ? AND generation_id = ? AND trial_id = ?
                         """,
                         (
                             r_info["started_at"],
@@ -2819,7 +2851,9 @@ class HotIndexer:
                             1 if r_info["has_verifier_output"] else 0,
                             has_media,
                             json.dumps(ev, ensure_ascii=False),
+                            clues_json,
                             b["batch_id"],
+                            b["generation_id"],
                             tid,
                         ),
                     )
@@ -2834,7 +2868,7 @@ class HotIndexer:
                         error_message = excluded.error_message,
                         updated_at = excluded.updated_at
                     """,
-                    (cache_key, len(results), b["content_digest"], utcnow_iso()),
+                    (cache_key, len(results), cache_revision, utcnow_iso()),
                 )
             enriched_batches += 1
         return {"batches": enriched_batches, "trials": enriched_trials}

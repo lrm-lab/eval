@@ -195,7 +195,7 @@ def _compute_gateway_turn_clue(
                 drop = ((prev_len - cur_len) / prev_len) * 100.0
                 if drop > max_drop_pct:
                     max_drop_pct = drop
-                if drop > msg_drop_pct:
+                if drop > msg_drop_pct and len(drop_indices) < 20:
                     drop_indices.append(idx)
             prev_len = cur_len
     if discarded_turns > 0 or drop_indices:
@@ -203,7 +203,7 @@ def _compute_gateway_turn_clue(
             "code": "gateway_discarded_or_msg_drop",
             "discarded_turns": discarded_turns,
             "max_msg_drop_pct": round(max_drop_pct, 2),
-            "drop_turn_indices": drop_indices[:20],
+            "drop_turn_indices": drop_indices,
             "threshold_pct": msg_drop_pct,
         }
     return None
@@ -1005,7 +1005,9 @@ class DiagnosticsService:
                 and indexed_gateway.get("file_identity") == list(file_id)
                 and "clue" in indexed_gateway
             ):
-                return {"clue": indexed_gateway["clue"]}
+                clue = indexed_gateway["clue"]
+                if clue is None or (isinstance(clue, dict) and clue.get("code") == "gateway_discarded_or_msg_drop"):
+                    return {"clue": clue}
             key = (kind, path, generation_id, digest, file_id)
             with self._tool_cache_lock:
                 if key in self._evidence_cache:
