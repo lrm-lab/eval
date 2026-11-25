@@ -4,6 +4,7 @@ import stat
 import subprocess
 import sys
 import tomllib
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -123,6 +124,59 @@ def test_gaia_pi_gateway_plan_keeps_the_registered_agent(isolated_settings: Sett
     assert plan["agent_import_path"] == "cached_pi_gateway:CachedInterceptPi"
     assert cmd[cmd.index("--agent-version") + 1] == "0.87.1"
     assert not output.exists()
+
+
+def test_terminal_nginx_dependency_mounts_are_readonly_and_locked(
+    isolated_settings: Settings, tmp_path: Path,
+):
+    depot = tmp_path / "deps"
+    files = (
+        "apt/debian.sources", "apt/91-isolated-downloads",
+        "uv/uv.tar.gz", "python/pytest.whl",
+    )
+    for name in files:
+        path = depot / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(name)
+    manifest = "".join(f"{sha256(name.encode()).hexdigest()}  ./{name}\n" for name in files).encode()
+    (depot / "SHA256SUMS").write_bytes(manifest)
+    dependency_snapshot = {"root": str(depot), "sha256": sha256(manifest).hexdigest(), "verifier_proxy": True}
+    spec = dict(kind="harbor", suite_id="terminal", batch_name="terminal-smoke", model_route="test-model",
+                agent="pi", harness_version="0.87.1", selection_mode="tasks", tasks=["nginx-request-logging"])
+    work = tmp_path / "work"
+    overlay = materialize_managed_run_config(
+        isolated_settings, spec, work, terminal_nginx_dependencies=dependency_snapshot,
+    )
+    resumed = dict(spec, resume_mode="native")
+    original = materialize_managed_run_config(
+        isolated_settings, resumed, work, terminal_nginx_dependencies={"root": "/different-snapshot"},
+    )
+    assert original == overlay
+    locked_dependencies = tomllib.loads(original.read_text())["terminal_nginx_dependencies"]
+    assert locked_dependencies == dependency_snapshot
+
+    launch = dict(python_exe=sys.executable, run_py_path="run.py", config_path=str(overlay), base_url=None,
+                  work_dir=str(work), output_dir=str(tmp_path / "output"),
+                  terminal_nginx_dependencies=locked_dependencies)
+    argv = build_managed_run_py_command(spec=resumed, **launch)
+    mounts = json.loads(argv[argv.index("--mounts") + 1])
+    assert len(mounts) == 5
+    assert all(mount["read_only"] and Path(mount["source"]).is_relative_to(depot) for mount in mounts)
+    assert "https_proxy=${LRM_TERMINAL_VERIFIER_HTTPS_PROXY}" in argv
+    assert "--agent-env" not in argv
+    other_specs = (
+        dict(spec, kind="harbor_gateway"),
+        dict(spec, tasks=["adaptive-rejection-sampler"]),
+        dict(spec, tasks=["nginx-request-logging", "adaptive-rejection-sampler"]),
+        dict(spec, selection_mode="all"),
+    )
+    for other in other_specs:
+        other_argv = build_managed_run_py_command(spec=other, **launch)
+        assert "--mounts" not in other_argv and "--verifier-env" not in other_argv
+
+    (depot / "python/pytest.whl").write_text("corrupted")
+    with pytest.raises(ValueError, match="dependency SHA-256 mismatch"):
+        build_managed_run_py_command(spec=spec, **launch)
 
 
 def test_external_runner_rejects_invalid_native_resume(isolated_settings: Settings):
