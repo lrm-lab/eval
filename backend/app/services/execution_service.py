@@ -1822,12 +1822,20 @@ class ExecutionService:
                 # until the authenticated event monitor establishes a terminal outcome.
                 ipc_status, ipc_body = 202, {}
 
-            definite_rejection = (
-                ipc_body.get("code") in {
-                    "AUTH_REQUIRED", "GATEWAY_KEY_MISSING", "INVALID_JSON", "JOB_DISPATCH_ABANDONED",
-                    "RESOURCE_NOT_FOUND", "RESUME_UNSUPPORTED", "RUNNER_CAPABILITY_UNAVAILABLE",
-                    "RUNNER_STDIO_CAPACITY_EXHAUSTED", "SCHEMA_VALIDATION_FAILED", "STAGING_PERMISSION_UNSAFE",
-                }
+            if (ipc_status == 409 and ipc_body.get("code") == "RUNNER_INSTANCE_MISMATCH"
+                    and ipc_body.get("job_id") == job_id):
+                reason = "隔离 Runner 已换代并拒绝本次派发，可以重试"
+                self._emit_trusted_event(
+                    job_id, "job_failed",
+                    {"source": "control_plane", "reason": reason, "code": "RUNNER_INSTANCE_MISMATCH", "exit_code": 1},
+                    channel_path=channel_path, channel_secret=channel_secret, new_status="failed", exit_code=1,
+                )
+                raise AppError(409, "RUNNER_INSTANCE_MISMATCH", reason, {"job_id": job_id})
+
+            definite_rejection = ipc_body.get("code") in (
+                "AUTH_REQUIRED", "GATEWAY_KEY_MISSING", "INVALID_JSON", "JOB_DISPATCH_ABANDONED",
+                "RESOURCE_NOT_FOUND", "RESUME_UNSUPPORTED", "RUNNER_CAPABILITY_UNAVAILABLE",
+                "RUNNER_STDIO_CAPACITY_EXHAUSTED", "SCHEMA_VALIDATION_FAILED", "STAGING_PERMISSION_UNSAFE",
             )
             if definite_rejection:
                 with self.db.transaction() as conn:

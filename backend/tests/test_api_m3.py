@@ -1718,9 +1718,35 @@ with TestClient(app) as client:
                         "job_id": unresolved_payload["job_id"],
                     }
                     valid_request = {**job_request, "batch_name": "restart-replacement-valid"}
+                    # The Web health response can predate the restart. The new Runner's
+                    # explicit refusal of this POST releases just this new reservation.
+                    probe_health = ctx.execution.probe_runner_health
+                    stale_health = {**probe_health(), "runner_instance_id": old_payload["runner_instance_id"]}
+                    monkeypatch.setattr(ctx.execution, "probe_runner_health", lambda: stale_health)
+                    rejected = client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json=valid_request)
+                    assert rejected.status_code == 409, rejected.text
+                    error = rejected.json()["error"]
+                    assert error["code"] == "RUNNER_INSTANCE_MISMATCH"
+                    failed_job_id = error["detail"]["job_id"]
+                    failed = _wait_job_terminal(client, failed_job_id)
+                    assert failed["status"] == "failed" and failed["events"][-1]["event_type"] == "job_failed"
+                    assert runner.get_events(failed_job_id)[0] == 404
+                    assert ctx.db.fetchone("SELECT job_id FROM exec_batch_reservations") == {
+                        "job_id": unresolved_payload["job_id"],
+                    }
+                    monkeypatch.setattr(ctx.execution, "probe_runner_health", probe_health)
+                    submit_to_runner = runner.submit_job
+
+                    def accepted_without_reply(payload):
+                        assert submit_to_runner(payload)[0] == 202
+                        raise OSError("Runner accepted but the Web did not receive its reply")
+
+                    monkeypatch.setattr(runner, "submit_job", accepted_without_reply)
                     reply = client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json=valid_request)
                     assert reply.status_code == 202, reply.text
-                    assert _wait_job_terminal(client, reply.json()["job_id"])["status"] == "finished"
+                    new_job_id = reply.json()["job_id"]
+                    assert new_job_id != failed_job_id
+                    assert _wait_job_terminal(client, new_job_id)["status"] == "finished"
 
 
 def test_m3_e02_training_opd_empty_prod_state_contract_fixture_and_holdout_guardrail(
