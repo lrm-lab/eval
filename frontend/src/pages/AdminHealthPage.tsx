@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Activity, AlertTriangle, CheckCircle2, HardDrive, RefreshCw, ShieldAlert, ShieldCheck } from 'lucide-react';
+import { Activity, AlertTriangle, Archive, CheckCircle2, Cpu, FileText, HardDrive, RefreshCw, ShieldAlert, ShieldCheck } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { fmtDateShort } from '../lib/format';
 import { useAppStore } from '../lib/store';
@@ -80,6 +80,268 @@ interface AdminHealthResp {
   };
 }
 
+interface CgroupTelemetry {
+  source: string;
+  scope?: string;
+  cpu_usage_usec: number | null;
+  memory_peak_bytes: number | null;
+  memory_current_bytes?: number | null;
+  memory_max_bytes?: number | null;
+  pids_current?: number | null;
+  note?: string;
+}
+
+interface ExecutionTelemetryResp {
+  generated_at: string;
+  web_cgroup: CgroupTelemetry;
+  streaming: { mode: string; sample_file: string; note: string };
+  stdio_policy: {
+    per_job_cap_bytes: number;
+    segment_bytes: number;
+    backup_segments: number;
+    cumulative_cap_bytes: number;
+    detail_read_bytes: number;
+  };
+  ops: {
+    daemon_logs: {
+      logs_dir_present: boolean;
+      components: Array<{
+        component: string;
+        max_files: number;
+        max_bytes_per_file: number;
+        cap_bytes: number;
+        current_bytes: number;
+        files_present: number;
+      }>;
+      total_bytes: number;
+      cap_bytes: number;
+      within_cap: boolean;
+    };
+    job_stdio_usage: { total_bytes: number | null; jobs_with_stdio: number | null; cap_bytes: number; within_cap: boolean | null };
+    backup: {
+      status: 'ok' | 'missing' | 'multiple' | 'oversize' | 'unavailable';
+      retained_count: number | null;
+      retention_limit: number;
+      size_limit_bytes: number;
+      latest_name: string | null;
+      latest_size_bytes: number | null;
+      latest_at: string | null;
+      age_hours: number | null;
+      note?: string;
+    };
+  } | null;
+}
+
+function fmtBytes(bytes: number | null | undefined): string {
+  if (bytes === null || bytes === undefined || !Number.isFinite(bytes)) return '—';
+  if (bytes >= 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
+  if (bytes >= 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${bytes} B`;
+}
+
+function UsageBar({ value, cap, alert }: { value: number; cap: number; alert: boolean }) {
+  const pct = Math.min(100, (value / Math.max(1, cap)) * 100);
+  return (
+    <div className="h-1.5 w-full rounded-full bg-[var(--border-subtle)] overflow-hidden">
+      <div
+        className="h-full rounded-full"
+        style={{ width: `${pct}%`, backgroundColor: alert ? 'var(--sem-err-fg)' : 'var(--sem-pass-fg)' }}
+      />
+    </div>
+  );
+}
+
+const OPS_GRID = 'grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4';
+const OPS_CARD = 'rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 h-[196px] overflow-hidden text-xs flex flex-col';
+
+const BACKUP_LABEL: Record<string, string> = {
+  ok: '单份备份正常',
+  missing: '尚无备份',
+  multiple: '超出单份保留',
+  oversize: '超出 45 MB',
+  unavailable: '无法读取',
+};
+
+function OpsTelemetryPanel({ q }: { q: { data?: ExecutionTelemetryResp; isPending: boolean; isError: boolean; error: unknown } }) {
+  if (q.isPending) {
+    return (
+      <div className={OPS_GRID} aria-busy="true" aria-label="运维遥测加载中">
+        {[0, 1, 2, 3].map((i) => (
+          <div key={i} className={`${OPS_CARD} motion-safe:animate-pulse`}>
+            <div className="h-3 w-1/2 rounded bg-[var(--border-subtle)]" />
+            <div className="mt-4 h-6 w-2/3 rounded bg-[var(--border-subtle)]" />
+            <div className="mt-4 h-1.5 w-full rounded bg-[var(--border-subtle)]" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+  const d = q.data;
+  if (q.isError || !d || !d.ops) {
+    return (
+      <div className="h-[832px] md:h-[408px] xl:h-[196px] overflow-hidden flex items-start">
+        <StateNoticeCard
+          kind="error"
+          title="运维遥测接口不可用"
+          description={q.isError ? (q.error as Error).message : '未返回运维状态（需 admin 角色）'}
+        />
+      </div>
+    );
+  }
+  const { daemon_logs: logs, job_stdio_usage: stdio, backup } = d.ops;
+  const cg = d.web_cgroup;
+  const backupOk = backup.status === 'ok';
+  return (
+    <div className={OPS_GRID}>
+      <div className={OPS_CARD} aria-label="守护进程日志轮转上限">
+        <div className="flex items-center justify-between text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-1.5">
+            <FileText className="w-4 h-4 text-[var(--brand-primary)]" /> 守护进程日志轮转
+          </span>
+          <span className="font-mono tabular-nums">
+            {fmtBytes(logs.total_bytes)} / {fmtBytes(logs.cap_bytes)}
+          </span>
+        </div>
+        <div className="mt-2">
+          <UsageBar value={logs.total_bytes} cap={logs.cap_bytes} alert={!logs.within_cap} />
+        </div>
+        <div className="mt-2.5 space-y-1 font-mono text-[11px]">
+          {logs.components.map((c) => (
+            <div key={c.component} className="flex justify-between gap-2 text-[var(--text-secondary)]">
+              <span>{c.component}.log</span>
+              <span className="tabular-nums">
+                {fmtBytes(c.current_bytes)} · {c.files_present}/{c.max_files} 份 × {fmtBytes(c.max_bytes_per_file)}
+              </span>
+            </div>
+          ))}
+        </div>
+        <div className="mt-auto text-[11px] text-[var(--text-muted)] truncate">
+          {logs.logs_dir_present ? '达到单文件上限时轮转' : '日志目录尚未创建'}
+        </div>
+      </div>
+
+      <div className={OPS_CARD} aria-label="作业 stdio 限额">
+        <div className="flex items-center justify-between text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-1.5">
+            <HardDrive className="w-4 h-4 text-[var(--brand-primary)]" /> 作业 stdio 累计留存
+          </span>
+          <span className="font-mono tabular-nums">
+            {fmtBytes(stdio.total_bytes)} / {fmtBytes(stdio.cap_bytes)}
+          </span>
+        </div>
+        <div className="mt-2">
+          {stdio.total_bytes != null ? (
+            <UsageBar value={stdio.total_bytes} cap={stdio.cap_bytes} alert={stdio.within_cap === false} />
+          ) : <div className="h-1.5 rounded-full bg-[var(--border-subtle)]" />}
+        </div>
+        <div className="mt-2.5 space-y-1 font-mono text-[11px] text-[var(--text-secondary)]">
+          <div className="flex justify-between">
+            <span>含输出作业</span>
+            <span className="tabular-nums">{stdio.jobs_with_stdio ?? '—'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>单作业硬上限</span>
+            <span className="tabular-nums">
+              {fmtBytes(d.stdio_policy.per_job_cap_bytes)}（{1 + d.stdio_policy.backup_segments} × {fmtBytes(d.stdio_policy.segment_bytes)}）
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span>详情尾部读取</span>
+            <span className="tabular-nums">≤ {fmtBytes(d.stdio_policy.detail_read_bytes)} / 200 行</span>
+          </div>
+        </div>
+        <div className="mt-auto text-[11px] text-[var(--text-muted)] truncate">
+          {stdio.total_bytes == null ? '无法读取作业日志用量' : '超出累计上限时优先裁剪最旧已结束作业'}
+        </div>
+      </div>
+
+      <div className={OPS_CARD} aria-label="SQLite 单份 db.zst 备份状态">
+        <div className="flex items-center justify-between text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-1.5">
+            <Archive className="w-4 h-4 text-[var(--brand-primary)]" /> 单份 .db.zst 备份
+          </span>
+          <span
+            className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+              backupOk ? 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)]' : 'bg-[var(--sem-zero-bg)] text-[var(--sem-zero-fg)]'
+            }`}
+          >
+            {BACKUP_LABEL[backup.status] ?? backup.status}
+          </span>
+        </div>
+        <div className="mt-2 font-mono text-[11px] text-[var(--text-primary)] truncate" title={backup.latest_name ?? undefined}>
+          {backup.latest_name ?? '—'}
+        </div>
+        <div className="mt-2 space-y-1 font-mono text-[11px] text-[var(--text-secondary)]">
+          <div className="flex justify-between">
+            <span>体积 / 上限</span>
+            <span className="tabular-nums">
+              {backup.latest_size_bytes == null ? '—' : `${(backup.latest_size_bytes / 1e6).toFixed(2)} MB`} / {(backup.size_limit_bytes / 1e6).toFixed(0)} MB
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span>保留份数</span>
+            <span className="tabular-nums">
+              {backup.retained_count ?? '—'} / {backup.retention_limit}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span>最近备份</span>
+            <span className="tabular-nums">
+              {backup.latest_at ? `${fmtDateShort(backup.latest_at)}（${backup.age_hours} h 前）` : '—'}
+            </span>
+          </div>
+        </div>
+        <div className="mt-auto text-[11px] text-[var(--text-muted)] truncate" title={backup.note}>
+          {backup.note || 'zstd 在线快照，原子替换，仅保留最新 1 份'}
+        </div>
+      </div>
+
+      <div className={OPS_CARD} aria-label="可选遥测">
+        <div className="flex items-center justify-between text-[var(--text-secondary)]">
+          <span className="inline-flex items-center gap-1.5">
+            <Cpu className="w-4 h-4 text-[var(--brand-primary)]" /> 可选遥测
+          </span>
+          <span
+            className={`rounded px-1.5 py-0.5 text-[10px] font-mono ${
+              cg.source === 'cgroup_v2'
+                ? 'bg-[var(--sem-pass-bg)] text-[var(--sem-pass-fg)]'
+                : 'bg-[var(--sem-unscored-bg)] text-[var(--sem-unscored-fg)]'
+            }`}
+          >
+            {cg.source}
+          </span>
+        </div>
+        <div className="mt-2 space-y-1 font-mono text-[11px] text-[var(--text-secondary)]">
+          <div className="flex justify-between">
+            <span>Web cgroup 作用域</span>
+            <span>{cg.scope ?? 'unknown'}</span>
+          </div>
+          <div className="flex justify-between">
+            <span>内存峰值 / 上限</span>
+            <span className="tabular-nums">
+              {fmtBytes(cg.memory_peak_bytes)} / {fmtBytes(cg.memory_max_bytes)}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span>CPU 累计</span>
+            <span className="tabular-nums">
+              {cg.cpu_usage_usec != null ? `${(cg.cpu_usage_usec / 1e6).toFixed(1)} s` : '—'}
+            </span>
+          </div>
+          <div className="flex justify-between">
+            <span>流式 TTFT/TPS</span>
+            <span>在作业详情查看</span>
+          </div>
+        </div>
+        <div className="mt-auto text-[11px] text-[var(--text-muted)] line-clamp-2" title={cg.note || d.streaming.note}>
+          {cg.note || d.streaming.note}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function AdminHealthPage() {
   const user = useAppStore((s) => s.user);
   const pushToast = useAppStore((s) => s.pushToast);
@@ -94,6 +356,12 @@ export function AdminHealthPage() {
     queryFn: () => apiFetch<AdminHealthResp>('/api/v1/admin/health'),
   });
 
+  const telemetryQ = useQuery({
+    queryKey: ['admin-execution-telemetry'],
+    enabled: isAdmin,
+    queryFn: () => apiFetch<ExecutionTelemetryResp>('/api/v1/execution/telemetry'),
+  });
+
   const reindexMut = useMutation({
     mutationFn: async (opts: { force: boolean; includeCold: boolean }) => {
       setBusyAction(opts.includeCold ? 'full' : 'hot');
@@ -104,6 +372,7 @@ export function AdminHealthPage() {
     onSuccess: () => {
       pushToast('success', '索引扫描完成，已刷新健康视图');
       qc.invalidateQueries({ queryKey: ['admin-health'] });
+      qc.invalidateQueries({ queryKey: ['admin-execution-telemetry'] });
       qc.invalidateQueries({ queryKey: ['system-overview'] });
     },
     onError: (err: Error) => pushToast('error', `重扫失败：${err.message}`),
@@ -182,6 +451,11 @@ export function AdminHealthPage() {
           </button>
         </div>
       </div>
+
+      <section aria-label="日志限额、备份与可选遥测" className="space-y-2">
+        <h2 className="m-0 text-sm font-bold text-[var(--text-primary)]">日志限额、备份与可选遥测</h2>
+        <OpsTelemetryPanel q={telemetryQ} />
+      </section>
 
       {healthQ.isLoading ? (
         <CardGridSkeleton count={4} />
