@@ -144,6 +144,8 @@ def _batch_needs_backfill(
     if not isinstance(top_files, dict) or not top_files:
         return True
     gen = str(generation_id or "")
+    if "selection.json" in top_files and "selection_thresholds" not in checks:
+        return True
     manifest_mode = str(checks.get("manifest_mode") or "")
     is_v2 = manifest_mode == "publish_manifest_v2" or (
         manifest_mode != "legacy_v1"
@@ -2151,6 +2153,10 @@ class HotIndexer:
                 }
                 if index_legacy_vlm_media:
                     checks_payload_doc["legacy_vlm_media_indexed"] = True
+            if selection_obj is not None:
+                checks_payload_doc["selection_thresholds"] = {
+                    key: selection_obj.get(key) for key in ("required_attempts", "min_grpo")
+                }
             checks_payload_json = json.dumps(checks_payload_doc, ensure_ascii=False)
 
             bm_slug, release_id, identity_status, inferred_scope = resolve_dataset_identity(

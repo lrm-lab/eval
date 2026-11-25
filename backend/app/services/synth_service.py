@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -651,18 +652,35 @@ class SynthService:
 
     def _load_batch_and_episodes(self, user: AuthUser, batch_id: str) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], bool]:
         validate_safe_id(batch_id, "batch_id")
-        batch = self.db.fetchone(
-            """
-            SELECT b.*, r.split AS rel_split
-            FROM batches b
-            LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
-            WHERE b.batch_id = ?
-            """,
-            (batch_id,),
-        )
-        if batch is None:
-            raise AppError(404, "RESOURCE_NOT_FOUND", f"批次不存在: {batch_id}")
-        require_project_access(user, batch["project_id"], owner_id=batch["owner_id"])
+        with self.db.read_snapshot() as conn:
+            row = conn.execute(
+                """
+                SELECT b.*, r.split AS rel_split
+                FROM batches b
+                LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                WHERE b.batch_id = ?
+                """,
+                (batch_id,),
+            ).fetchone()
+            if row is None:
+                raise AppError(404, "RESOURCE_NOT_FOUND", f"批次不存在: {batch_id}")
+            batch = dict(row)
+            require_project_access(user, batch["project_id"], owner_id=batch["owner_id"])
+            eps = [dict(ep) for ep in conn.execute(
+                """
+                SELECT trial_id, task_id, task_checksum, attempt_index, status, reward, reward_valid,
+                       failure_kind, exception_type, duration_sec
+                FROM episodes
+                WHERE batch_id = ?
+                ORDER BY task_id ASC, attempt_index ASC, trial_id ASC
+                """,
+                (batch_id,),
+            )]
+            sel_rows = [dict(selection) for selection in conn.execute(
+                "SELECT task_id, task_directory, attempts, scored, passed, excluded_json, lane "
+                "FROM selection_tasks WHERE batch_id = ?",
+                (batch_id,),
+            )]
         is_hold = is_holdout_dataset_or_batch(
             dataset_release_id=batch.get("dataset_release_id"),
             release_split=batch.get("rel_split"),
@@ -670,41 +688,47 @@ class SynthService:
             raw_dataset_name=batch.get("raw_dataset_name"),
             batch_name=batch.get("batch_name"),
         )
-        eps = self.db.fetchall(
-            """
-            SELECT trial_id, task_id, task_checksum, attempt_index, status, reward, reward_valid,
-                   failure_kind, exception_type, duration_sec
-            FROM episodes
-            WHERE batch_id = ?
-            ORDER BY task_id ASC, attempt_index ASC, trial_id ASC
-            """,
-            (batch_id,),
-        )
-        sel_rows = self.db.fetchall(
-            "SELECT task_id, task_directory, attempts, scored, passed, excluded_json, lane FROM selection_tasks WHERE batch_id = ?",
-            (batch_id,),
-        )
         return batch, eps, sel_rows, is_hold
+
+    def _selection_thresholds(self, batch: dict[str, Any], eps: list[dict[str, Any]]) -> tuple[int, int]:
+        is_shared = batch["source_namespace"] == "harbor_runs"
+        default_attempts = 8 if is_shared else max(Counter(e["task_id"] for e in eps).values(), default=1)
+        if not batch["has_selection"]:
+            return default_attempts, 10
+        checks = json.loads(batch["checks_json"] or "{}")
+        thresholds = checks.get("selection_thresholds")
+        if thresholds is None and is_shared:
+            # Older indexes stored the digest, but did not persist the two thresholds.
+            # Only the bytes belonging to the already-selected generation are usable.
+            expected = checks.get("top_level_files", {}).get("selection.json", {}).get("sha256")
+            if not expected:
+                raise AppError(409, "GENERATION_MISMATCH", "已索引选题的阈值尚未完成同代回填")
+            name = batch["source_locator"].split(":", 1)[1]
+            try:
+                path = resolve_within_root(self.settings.harbor_runs_dir, f"{name}/selection.json")
+                data = path.read_bytes()
+                if hashlib.sha256(data).hexdigest() != expected:
+                    raise ValueError("Selection generation changed")
+                thresholds = json.loads(data)
+            except (AppError, OSError, ValueError) as exc:
+                raise AppError(409, "GENERATION_MISMATCH", "已索引代的选题阈值暂不可读取") from exc
+        if not isinstance(thresholds, dict):
+            return default_attempts, 10
+
+        def positive_int(value: Any, default: int) -> int:
+            try:
+                return max(1, int(value or default))
+            except (TypeError, ValueError, OverflowError):
+                return default
+
+        return (
+            positive_int(thresholds.get("required_attempts"), default_attempts),
+            positive_int(thresholds.get("min_grpo"), 10),
+        )
 
     def get_selection_board(self, user: AuthUser, batch_id: str) -> dict[str, Any]:
         batch, eps, sel_rows, is_hold = self._load_batch_and_episodes(user, batch_id)
-        # Read required_attempts / min_grpo from selection.json if present on disk
-        req_attempts = 8
-        min_grpo = 10
-        if batch.get("source_namespace") == "harbor_runs" and ":" in str(batch.get("source_locator") or ""):
-            bname = str(batch["source_locator"]).split(":", 1)[1]
-            try:
-                sp = resolve_within_root(self.settings.harbor_runs_dir, f"{bname}/selection.json")
-                if sp.is_file():
-                    sdoc = json.loads(sp.read_text(encoding="utf-8"))
-                    req_attempts = int(sdoc.get("required_attempts") or req_attempts)
-                    min_grpo = int(sdoc.get("min_grpo") or min_grpo)
-            except (AppError, OSError, ValueError):
-                pass
-        else:
-            counts = Counter(e["task_id"] for e in eps)
-            req_attempts = max(counts.values(), default=1)
-
+        req_attempts, min_grpo = self._selection_thresholds(batch, eps)
         computed = self._compute_selection_and_curves(
             batch, eps, sel_rows, required_attempts=req_attempts, min_grpo=min_grpo, use_stored_lanes=True
         )
@@ -729,6 +753,7 @@ class SynthService:
             redacted = False
         return {
             "batch_id": batch_id,
+            "generation_id": batch["generation_id"],
             "batch_name": batch["batch_name"],
             "model_canonical": batch["model_canonical"],
             "harness": batch["harness"],
