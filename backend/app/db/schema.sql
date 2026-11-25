@@ -337,6 +337,13 @@ CREATE TABLE IF NOT EXISTS exec_jobs (
     finished_at     TEXT
 );
 
+CREATE TABLE IF NOT EXISTS exec_batch_reservations (
+    source_namespace TEXT NOT NULL,
+    batch_name       TEXT NOT NULL,
+    job_id           TEXT NOT NULL UNIQUE REFERENCES exec_jobs(job_id) ON DELETE CASCADE,
+    PRIMARY KEY (source_namespace, batch_name)
+);
+
 CREATE TABLE IF NOT EXISTS exec_job_events (
     job_id       TEXT NOT NULL REFERENCES exec_jobs(job_id) ON DELETE CASCADE,
     seq_id       INTEGER NOT NULL,

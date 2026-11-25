@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import fcntl
 import hashlib
 import json
 import math
@@ -13,7 +14,7 @@ import time
 import tomllib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
 from typing import Any, Iterator
 
@@ -870,28 +871,13 @@ class HotIndexer:
         self,
         batch_name: str,
         default_batch_id: str,
-        source_locator: str,
+        *,
+        generation_id: str | None,
+        runner_job_id: str | None,
+        manifest_sha256: str | None,
     ) -> tuple[str, str, str] | None:
-        """Resolve authoritative `(project_id, owner_id, evidence_approval)` for a Runner-published
-        batch (`source_namespace='runner_published'`) strictly from trusted control-plane records (S-02):
-        1. SQLite `exec_jobs` row for this exact published batch;
-        2. Private `0700 <state_dir>/runner-submissions/<batch_name>.json` (`0600`, symlink-rejected)
-           for fresh-DB restart recovery;
-        3. Existing committed `batches` row for `source_locator`.
-        Returns None for unknown/untracked directories."""
-        job_row = self.db.fetchone(
-            """
-            SELECT project_id, owner_id
-            FROM exec_jobs
-            WHERE batch_id = ? AND batch_name = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (default_batch_id, batch_name),
-        )
-        if job_row is not None and job_row.get("project_id") and job_row.get("owner_id"):
-            return (str(job_row["project_id"]), str(job_row["owner_id"]), "approved_restricted")
-
+        """Bind ownership to the current manifest and its authenticated control-plane publication."""
+        doc = None
         if self.settings.state_dir is not None:
             try:
                 name = _submission_filename(batch_name)
@@ -900,31 +886,82 @@ class HotIndexer:
                     with os.fdopen(fd, "rb") as stream:
                         _check_submission_file(os.fstat(fd))
                         doc = json.load(stream)
-            except FileNotFoundError:
-                pass  # Older installations may only have the committed database record.
-            else:
-                if (
-                    not isinstance(doc, dict)
-                    or doc.get("batch_name") != batch_name
-                    or doc.get("batch_id") != default_batch_id
-                    or doc.get("source_namespace") != "runner_published"
-                    or doc.get("evidence_approval") not in ("approved_restricted", "pending", "revoked")
-                    or not all(isinstance(doc.get(k), str) and doc[k].strip() for k in ("project_id", "owner_id"))
-                ):
-                    raise ValueError("Invalid runner submission record")
+            except (AppError, OSError, ValueError):
+                pass
+        if (
+            isinstance(doc, dict)
+            and doc.get("batch_name") == batch_name
+            and doc.get("batch_id") == default_batch_id
+            and doc.get("source_namespace") == "runner_published"
+            and doc.get("generation_id") == generation_id
+            and (generation_id is None or isinstance(doc.get("job_id"), str))
+            and doc.get("manifest_sha256") in (None, manifest_sha256)
+            and (runner_job_id is None or (
+                doc.get("job_id") == runner_job_id and doc.get("manifest_sha256") == manifest_sha256
+            ))
+            and doc.get("evidence_approval") in ("approved_restricted", "pending", "revoked")
+            and all(isinstance(doc.get(k), str) and doc[k].strip() for k in ("project_id", "owner_id"))
+        ):
+            job = self.db.fetchone(
+                "SELECT batch_name, project_id, owner_id FROM exec_jobs WHERE job_id = ?",
+                (doc.get("job_id"),),
+            )
+            if job is None or (job["batch_name"], job["project_id"], job["owner_id"]) == (
+                batch_name, doc["project_id"], doc["owner_id"]
+            ):
                 return doc["project_id"], doc["owner_id"], doc["evidence_approval"]
 
-        existing = self.db.fetchone(
-            "SELECT project_id, owner_id, evidence_approval FROM batches WHERE source_locator = ? AND is_running_placeholder = 0",
-            (source_locator,),
+        if generation_id is None or manifest_sha256 is None:
+            return None
+        # Releases before the private ledger still recorded the complete manifest digest in
+        # the control-plane reconciliation event. A matching batch name alone is insufficient.
+        job = self.db.fetchone(
+            """
+            SELECT j.project_id, j.owner_id FROM exec_jobs j
+            JOIN exec_job_events e ON e.job_id = j.job_id AND e.event_type = 'reconciled'
+            WHERE j.batch_id = ? AND j.batch_name = ? AND (? IS NULL OR j.job_id = ?)
+              AND json_extract(e.payload_json, '$.source_namespace') = 'runner_published'
+              AND json_extract(e.payload_json, '$.generation_id') = ?
+              AND json_extract(e.payload_json, '$.snapshot_digest') = ?
+            LIMIT 1
+            """,
+            (default_batch_id, batch_name, runner_job_id, runner_job_id,
+             generation_id, f"sha256:{manifest_sha256}"),
         )
-        if existing is not None and existing.get("project_id") and existing.get("owner_id"):
-            return (
-                str(existing["project_id"]),
-                str(existing["owner_id"]),
-                str(existing.get("evidence_approval") or "approved_restricted"),
+        if job is None:
+            return None
+        return job["project_id"], job["owner_id"], "approved_restricted"
+
+    def _reject_unowned_runner_batch(self, batch_dir: Path, source_locator: str) -> str:
+        """Remove stale derived rows while leaving the publish artifacts available for recovery."""
+        target_path = redact_path(str(batch_dir)) or batch_dir.name
+        with self.db.transaction() as conn:
+            conn.execute(
+                """
+                DELETE FROM search_fts WHERE entity_type = 'batch' AND entity_id IN (
+                    SELECT batch_id FROM batches WHERE source_locator = ? AND source_namespace = 'runner_published'
+                )
+                """,
+                (source_locator,),
             )
-        return None
+            conn.execute(
+                "DELETE FROM batches WHERE source_locator = ? AND source_namespace = 'runner_published'",
+                (source_locator,),
+            )
+            warning = conn.execute(
+                "SELECT 1 FROM index_warnings WHERE tier = 'hot' AND code = 'RUNNER_OWNERSHIP_MISSING' AND target_path = ?",
+                (target_path,),
+            ).fetchone()
+            if warning is None:
+                self._record_warning(
+                    conn,
+                    tier="hot",
+                    severity="error",
+                    code="RUNNER_OWNERSHIP_MISSING",
+                    target_path=str(batch_dir),
+                    message="缺少可信 Runner 提交归属，批次已从查询索引隔离。恢复提交记录后可重新索引。",
+                )
+        return "rejected"
 
     def scan_single_harbor_batch(
         self,
@@ -942,18 +979,30 @@ class HotIndexer:
     ) -> str:
         """Index one harbor-runs/<batch> or runner_published/<batch> directory atomically (I-01, I-03)."""
         try:
-            return self._scan_single_harbor_batch_impl(
-                batch_dir,
-                force=force,
-                source_namespace=source_namespace,
-                project_override=project_override,
-                owner_override=owner_override,
-                approval_override=approval_override,
-                existing_digests=existing_digests,
-                precomputed_digest=precomputed_digest,
-                prefetched_top_bytes=prefetched_top_bytes,
-                deep_trial_enrich=deep_trial_enrich,
-            )
+            with ExitStack() as resources:
+                if source_namespace == "runner_published":
+                    try:
+                        fd = os.open(batch_dir / ".publish.lock", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    except FileNotFoundError:
+                        pass
+                    else:
+                        lease = resources.enter_context(os.fdopen(fd, "rb"))
+                        try:
+                            fcntl.flock(lease, fcntl.LOCK_SH | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            return "skipped_locked"
+                return self._scan_single_harbor_batch_impl(
+                    batch_dir,
+                    force=force,
+                    source_namespace=source_namespace,
+                    project_override=project_override,
+                    owner_override=owner_override,
+                    approval_override=approval_override,
+                    existing_digests=existing_digests,
+                    precomputed_digest=precomputed_digest,
+                    prefetched_top_bytes=prefetched_top_bytes,
+                    deep_trial_enrich=deep_trial_enrich,
+                )
         except AppError as exc:
             if exc.code == "LOCAL_DISK_LOW":
                 raise
@@ -1001,6 +1050,37 @@ class HotIndexer:
         source_locator = f"{ns}:{batch_name}"
         default_batch_id = make_batch_id(source_locator)
         now = utcnow_iso()
+        pub_manifest_path = batch_dir / "publish-manifest.json"
+        runner_ownership = None
+        if ns == "runner_published":
+            runner_job_id = None
+            runner_generation = None
+            manifest_sha256 = None
+            try:
+                if pub_manifest_path.is_symlink():
+                    raise ValueError("Runner manifest is a symlink")
+                raw_runner_manifest = pub_manifest_path.read_bytes()
+                parsed_manifest = json.loads(raw_runner_manifest)
+                runner_generation = parsed_manifest["generation_id"]
+                runner_job_id = parsed_manifest.get("runner_job_id")
+                if not isinstance(runner_generation, str) or not runner_generation:
+                    raise ValueError("Invalid Runner manifest generation")
+                if runner_job_id is not None and (
+                    not isinstance(runner_job_id, str) or not SAFE_ID_RE.fullmatch(runner_job_id)
+                ):
+                    raise ValueError("Invalid Runner manifest job")
+                manifest_sha256 = _sha256_bytes(raw_runner_manifest)
+                prefetched_top_bytes = {"publish-manifest.json": raw_runner_manifest}
+            except FileNotFoundError:
+                pass  # Legacy private submissions predate v2 manifests.
+            except (OSError, ValueError, TypeError, KeyError):
+                return self._reject_unowned_runner_batch(batch_dir, source_locator)
+            runner_ownership = self._resolve_runner_published_ownership(
+                batch_name, default_batch_id, generation_id=runner_generation,
+                runner_job_id=runner_job_id, manifest_sha256=manifest_sha256,
+            )
+            if runner_ownership is None:
+                return self._reject_unowned_runner_batch(batch_dir, source_locator)
 
         if precomputed_digest is not None:
             digest = precomputed_digest
@@ -1037,14 +1117,8 @@ class HotIndexer:
                     )
                 return "error"
 
-        trusted = None
-        if ns == "runner_published":
-            trusted = self._resolve_runner_published_ownership(batch_name, default_batch_id, source_locator)
-            if trusted is None:
-                raise ValueError("Cannot establish ownership of runner publication")
-
         if not force:
-            if existing_digests is not None and trusted is None:
+            if existing_digests is not None and runner_ownership is None:
                 if existing_digests.get(source_locator) == digest:
                     return "skipped_unchanged"
             else:
@@ -1057,10 +1131,12 @@ class HotIndexer:
                     (source_locator,),
                 )
                 if (
-                    existing is not None and existing["content_digest"] == digest
-                    and (trusted is None or trusted == (
-                        existing["project_id"], existing["owner_id"], existing["evidence_approval"]
-                    ))
+                    existing is not None
+                    and existing["content_digest"] == digest
+                    and (
+                        runner_ownership is None
+                        or runner_ownership == (existing["project_id"], existing["owner_id"], existing["evidence_approval"])
+                    )
                 ):
                     tr_rows = self.db.fetchall(
                         """
@@ -1079,8 +1155,10 @@ class HotIndexer:
                     ):
                         return "skipped_unchanged"
 
-        if trusted is not None:
-            project_id, owner_id, reg_approval = trusted
+        if runner_ownership is not None:
+            project_id, owner_id, reg_approval = runner_ownership
+        elif project_override and owner_override and approval_override:
+            project_id, owner_id, reg_approval = project_override, owner_override, approval_override
         else:
             reg_proj, reg_owner, reg_approval, _ = self.approval_registry.lookup_full(batch_dir)
             project_id = project_override or reg_proj
@@ -1095,8 +1173,6 @@ class HotIndexer:
         vlm_metrics_path = batch_dir / "vlmevalkit" / "metrics.json"
         selection_path = batch_dir / "selection.json"
         run_config_path = batch_dir / "run-config.json"
-        pub_manifest_path = batch_dir / "publish-manifest.json"
-
         # Rule 3: strict publish-manifest.json verification — parse ONLY verified in-memory bytes!
         pub_manifest: dict[str, Any] | None = None
         verified_bytes: dict[str, bytes] = {}
@@ -1755,11 +1831,17 @@ class HotIndexer:
                         or (ep_kind.get("storage_tier") if ep_kind else None)
                         or "shared_cifs"
                     )
+                    gateway_identity = None
+                    defer_gateway_digest = False
                     if sha_val is None and not using_manifest and storage_tier != "evidence_store_0700" and kind in ("training", "gateway"):
+                        defer_gateway_digest = kind == "gateway" and not (force or deep_trial_enrich)
                         try:
                             art_fp = resolve_within_root(batch_dir, rel_val)
                             if art_fp.is_file() and not art_fp.is_symlink():
-                                sha_val, _ = _sha256_file(art_fp)
+                                if defer_gateway_digest:
+                                    gateway_identity = _stat_tuple(art_fp)
+                                else:
+                                    sha_val, _ = _sha256_file(art_fp)
                         except (AppError, OSError):
                             sha_val = None
                     ref_obj: dict[str, Any] = {
@@ -1768,6 +1850,8 @@ class HotIndexer:
                         "sha256": sha_val,
                         "storage_tier": storage_tier,
                     }
+                    if defer_gateway_digest:
+                        ref_obj["pending_file_identity"] = gateway_identity
                     ev_id = (td_kind.get("evidence_id") if td_kind else None) or (ep_kind.get("evidence_id") if ep_kind else None)
                     if ev_id:
                         ref_obj["evidence_id"] = ev_id
@@ -2588,7 +2672,7 @@ class HotIndexer:
         return indexed
 
     def enrich_harbor_trials(self, *, batch_ids: list[str] | None = None) -> dict[str, int]:
-        """Parallel trial-level enrichment (result.json, ATIF trajectory reasoning/cached/tools, media SHA-256)
+        """Parallel trial-level enrichment (result, trajectory, media, and deferred Gateway digests)
         for legacy harbor-runs batches (without publish-manifest.json).
         Manifest-v2 batches (trial_digests_sha256 IS NOT NULL) are already enriched from verified in-memory bytes
         during atomic ingest and are strictly skipped here to eliminate any second unverified disk read."""
@@ -2638,12 +2722,29 @@ class HotIndexer:
                             t_info = _extract_atif_metrics(tp, rel_traj)
                     except AppError:
                         t_info = None
+                gateway = ev.get("gateway")
+                if isinstance(gateway, dict) and gateway.get("pending_file_identity"):
+                    try:
+                        gateway_path = resolve_within_root(bdir, gateway["rel_path"])
+                        expected_identity = tuple(gateway["pending_file_identity"])
+                        if _stat_tuple(gateway_path) == expected_identity:
+                            gateway_digest, _ = _sha256_file(gateway_path)
+                            if _stat_tuple(gateway_path) == expected_identity:
+                                gateway["sha256"] = gateway_digest
+                                del gateway["pending_file_identity"]
+                    except (AppError, OSError):
+                        pass
                 return tid, {"ep": ep_row, "ev": ev, "res": r_info, "traj": t_info}
 
             with ThreadPoolExecutor(max_workers=12) as pool:
                 results = list(pool.map(_enrich_one, eps))
 
             with self.db.transaction() as conn:
+                if conn.execute(
+                    "SELECT 1 FROM batches WHERE batch_id = ? AND content_digest = ?",
+                    (b["batch_id"], b["content_digest"]),
+                ).fetchone() is None:
+                    continue
                 for tid, bundle in results:
                     ep_row = bundle["ep"]
                     ev = bundle["ev"]
@@ -2876,13 +2977,25 @@ class HotIndexer:
                             return d, dg, None
                     return d, dg, buf
 
+                # Source registry paths also require CIFS metadata lookups.
+                def _lookup_approval(batch_dir: Path) -> tuple[str | None, str | None, str | None]:
+                    try:
+                        return self.approval_registry.lookup(batch_dir)
+                    except (OSError, RuntimeError):
+                        # Let the batch scanner report resolution errors on its normal path.
+                        return None, None, None
+
                 with ThreadPoolExecutor(max_workers=20) as pool:
                     prefetched = list(pool.map(_prefetch_batch, to_scan))
+                    approvals = list(pool.map(_lookup_approval, (d for d, _, _ in prefetched)))
 
-                for d, dg, top_buf in prefetched:
+                for (d, dg, top_buf), (project_id, owner_id, approval) in zip(prefetched, approvals, strict=True):
                     res = self.scan_single_harbor_batch(
                         d,
                         force=force,
+                        project_override=project_id,
+                        owner_override=owner_id,
+                        approval_override=approval,
                         existing_digests=existing_digests,
                         precomputed_digest=dg,
                         prefetched_top_bytes=top_buf,

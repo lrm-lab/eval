@@ -36,6 +36,7 @@ from app.logging_setup import (
 )
 from app.runner.cli_contract import build_managed_run_py_command
 from app.runner.client import RunnerIPCClient
+from app.runner.vlmevalkit_results import OFFICIAL_RESULT_FILE, VLM_SCORING_FILES, encode_vlmevalkit_results
 from app.security.auth import AuthUser
 from app.security.authz import (
     authorize,
@@ -903,6 +904,8 @@ class ExecutionService:
                     params.append(batch_id)
                 params.append(job_id)
                 conn.execute(f"UPDATE exec_jobs SET {', '.join(updates)} WHERE job_id = ?", tuple(params))
+                if new_status in TERMINAL_STATUSES:
+                    conn.execute("DELETE FROM exec_batch_reservations WHERE job_id = ?", (job_id,))
 
             if channel_path is not None and channel_secret is not None:
                 sig = _sign_event_record(channel_secret, seq_id, event_type, clean_payload)
@@ -975,6 +978,7 @@ class ExecutionService:
         channel_path: Path,
         channel_secret: str,
         publish_to_harbor_runs: bool = False,
+        vlmevalkit_scoring_results: Any = None,
     ) -> dict[str, Any]:
         """Common Finalizer:
         1. Binds `generation_id` into every real `0700`/`0600` `evidence.json` produced by the isolated Runner
@@ -987,11 +991,16 @@ class ExecutionService:
         3. Validates the published public DTO using managed `report.py` AND triggers `HotIndexer.scan_single_harbor_batch`.
         4. STRICTLY VERIFIES `scan_status in ('indexed', 'skipped_unchanged')` AND SQLite `batches` holds the exact
            `(batch_id, generation_id)` BEFORE emitting `reconciled` (eliminates 404 reconciled links completely!)."""
+        scoring_files = {}
+        if spec["kind"] == "vlmevalkit" and spec.get("vlmevalkit_mode") == "all":
+            scoring_files = encode_vlmevalkit_results(vlmevalkit_scoring_results)
         batch_name = spec["batch_name"]
         gen_id = f"gen_{uuid.uuid4().hex[:12]}"
-        if publish_to_harbor_runs and self.settings.harbor_runs_dir.is_dir():
+        if publish_to_harbor_runs:
             source_ns = "harbor_runs"
             out_root = self.settings.harbor_runs_dir
+            if not out_root.is_dir():
+                raise RuntimeError("作业预约的共享发布目录不可用")
         else:
             source_ns = "runner_published"
             assert self.settings.published_batches_dir is not None
@@ -1002,8 +1011,25 @@ class ExecutionService:
             except OSError:
                 pass
 
+        reconciled_batch_id = make_batch_id(f"{source_ns}:{batch_name}")
+        job_row = self.db.fetchone(
+            """
+            SELECT j.project_id, j.owner_id
+            FROM exec_jobs j JOIN exec_batch_reservations r ON r.job_id = j.job_id
+            WHERE j.job_id = ? AND j.batch_name = r.batch_name AND j.status = 'finalizing'
+              AND r.source_namespace = ? AND r.batch_name = ?
+            """,
+            (job_id, source_ns, batch_name),
+        )
+        if job_row is None or job_row["project_id"] != spec["project_id"]:
+            raise RuntimeError("缺少与作业和项目匹配的可信发布预约")
+        eff_proj = job_row["project_id"]
+        eff_owner = job_row["owner_id"]
+        evidence_approval = "approved_restricted"
         out_dir = out_root / batch_name
-        out_dir.mkdir(parents=True, exist_ok=True)
+        if out_dir.is_symlink():
+            raise RuntimeError("发布目录不得为符号链接")
+        out_dir.mkdir(exist_ok=spec.get("resume_mode") == "native")
         now = utcnow_iso()
 
         manifest = {
@@ -1257,6 +1283,7 @@ class ExecutionService:
             "batch-report.json": (json.dumps(batch_report_obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             "run-config.json": (json.dumps(run_config_obj, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
             "trial-digests.jsonl": "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in digest_rows).encode("utf-8"),
+            **scoring_files,
         }
 
         def _atomic_pub_write(dest: Path, data: bytes) -> None:
@@ -1274,7 +1301,9 @@ class ExecutionService:
             fcntl.flock(lock_fh, fcntl.LOCK_EX)
             top_level_meta: dict[str, Any] = {}
             for fn, raw in top_files_bytes.items():
-                _atomic_pub_write(out_dir / fn, raw)
+                path = out_dir / fn
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_pub_write(path, raw)
                 entry: dict[str, Any] = {"sha256": _sha256_bytes(raw), "size": len(raw)}
                 if fn == "episodes.jsonl":
                     entry["lines"] = len(ep_rows)
@@ -1282,17 +1311,28 @@ class ExecutionService:
                     entry["entries"] = len(digest_rows)
                 top_level_meta[fn] = entry
 
-            absent_opt = ["official-result.json", "vlmevalkit/metrics.json", "selection.json"]
+            absent_opt = [fn for fn in (*VLM_SCORING_FILES, "selection.json") if fn not in top_level_meta]
             pub_manifest = {
                 "schema_version": 2,
                 "batch": batch_name,
                 "generation_id": gen_id,
                 "generation_root": f"generations/{gen_id}",
+                "runner_job_id": job_id,
                 "published_at": now,
                 "top_level_files": top_level_meta,
                 "absent_optional_files": absent_opt,
             }
             pub_bytes = (json.dumps(pub_manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            if source_ns == "runner_published":
+                self._record_runner_submission_meta(
+                    batch_name=batch_name,
+                    batch_id=reconciled_batch_id,
+                    job_id=job_id,
+                    project_id=eff_proj,
+                    owner_id=eff_owner,
+                    generation_id=gen_id,
+                    manifest_sha256=_sha256_bytes(pub_bytes),
+                )
             _atomic_pub_write(out_dir / "publish-manifest.json", pub_bytes)
         snap_digest = f"sha256:{_sha256_bytes(pub_bytes)}"
 
@@ -1310,38 +1350,42 @@ class ExecutionService:
             raise RuntimeError(f"Managed report.py verification failed (rc={rp_proc.returncode}): {redact_text(rp_proc.stderr)}")
 
         # ALWAYS trigger single-batch HotIndexer and STRICTLY verify exact (batch_id, generation_id) in SQLite!
-        reconciled_batch_id = make_batch_id(f"{source_ns}:{batch_name}")
-        job_row = self.db.fetchone("SELECT project_id, owner_id FROM exec_jobs WHERE job_id = ?", (job_id,))
-        eff_proj = str(job_row["project_id"]) if job_row else str(spec.get("project_id") or "default")
-        eff_owner = str(job_row["owner_id"]) if job_row else "system"
-        if source_ns == "runner_published":
-            self._record_runner_submission_meta(
-                batch_name=batch_name,
-                batch_id=reconciled_batch_id,
-                job_id=job_id,
-                project_id=eff_proj,
-                owner_id=eff_owner,
-                generation_id=gen_id,
-            )
         scan_status = self.coordinator.hot.scan_single_harbor_batch(
             out_dir,
             force=True,
             source_namespace=source_ns,
             project_override=eff_proj,
             owner_override=eff_owner,
-            approval_override="approved_restricted",
+            approval_override=evidence_approval,
         )
         if scan_status not in ("indexed", "skipped_unchanged"):
             raise RuntimeError(f"HotIndexer 拒绝或未能索引已发布批次 (status={scan_status})，拒绝发出 reconciled")
 
         indexed_row = self.db.fetchone(
-            "SELECT batch_id, generation_id FROM batches WHERE batch_id = ?",
+            """
+            SELECT b.batch_id, b.generation_id, b.project_id, b.owner_id, b.evidence_approval,
+                   b.official_status, o.score, o.denominator
+            FROM batches b LEFT JOIN official_results o ON o.batch_id = b.batch_id
+            WHERE b.batch_id = ?
+            """,
             (reconciled_batch_id,),
         )
         if indexed_row is None or str(indexed_row["generation_id"] or "") != gen_id:
             raise RuntimeError(
                 f"SQLite 对账校验失败: 期望 ({reconciled_batch_id}, {gen_id})，实际 {indexed_row}"
             )
+        if (indexed_row["project_id"], indexed_row["owner_id"], indexed_row["evidence_approval"]) != (
+            eff_proj, eff_owner, evidence_approval
+        ):
+            raise RuntimeError("SQLite 发布项目、属主或审批状态对账失败")
+        if OFFICIAL_RESULT_FILE in scoring_files:
+            official = vlmevalkit_scoring_results[OFFICIAL_RESULT_FILE]
+            if (
+                indexed_row["official_status"] != "official_verified"
+                or indexed_row["score"] != official["score"]
+                or indexed_row["denominator"] != official["denominator"]
+            ):
+                raise RuntimeError("SQLite 正式评分及分母对账失败")
 
         self._emit_trusted_event(
             job_id,
@@ -1380,7 +1424,8 @@ class ExecutionService:
         job_id: str,
         project_id: str,
         owner_id: str,
-        generation_id: str | None = None,
+        generation_id: str,
+        manifest_sha256: str,
     ) -> None:
         """Save the Runner batch binding for indexing and database recovery."""
         state_dir = self.settings.state_dir
@@ -1395,6 +1440,7 @@ class ExecutionService:
             "evidence_approval": "approved_restricted",
             "source_namespace": "runner_published",
             "generation_id": generation_id,
+            "manifest_sha256": manifest_sha256,
             "recorded_at": utcnow_iso(),
         }
         write_runner_submission(state_dir, doc)
@@ -1431,18 +1477,6 @@ class ExecutionService:
             )
 
         batch_name = spec["batch_name"]
-        existing = self.db.fetchone(
-            "SELECT job_id, status FROM exec_jobs WHERE batch_name = ? AND status IN ('queued', 'running', 'finished')",
-            (batch_name,),
-        )
-        if existing is not None and resume_mode != "native":
-            raise AppError(
-                409,
-                "BATCH_ALREADY_EXISTS",
-                f"批次名 `{batch_name}` 已存在运行中或已完成作业（{existing['job_id']}），请更换批次名或走受检续跑",
-                {"existing_job_id": existing["job_id"]},
-            )
-
         want_harbor_publish = bool(payload.get("publish_to_harbor_runs", False))
         if want_harbor_publish:
             if self.settings.production_mode and not self.settings.allow_harbor_runs_publish:
@@ -1451,22 +1485,14 @@ class ExecutionService:
                     "PUBLISH_TARGET_FORBIDDEN",
                     "生产模式默认禁止直接写入共享 harbor-runs 目录（需显式开启 LRM_ALLOW_HARBOR_RUNS_PUBLISH=true）；请使用默认隔离发布区",
                 )
-            if resume_mode != "native" and (self.settings.harbor_runs_dir / batch_name).exists():
-                raise AppError(
-                    409,
-                    "BATCH_ALREADY_EXISTS",
-                    f"目标共享目录已存在同名批次 `{batch_name}`，禁止覆盖历史批次",
-                    {"batch_name": batch_name},
-                )
+            if not self.settings.harbor_runs_dir.is_dir():
+                raise AppError(503, "PUBLISH_TARGET_UNAVAILABLE", "共享发布目录不可用")
+            source_namespace = "harbor_runs"
+            publish_root = self.settings.harbor_runs_dir
         else:
             assert self.settings.published_batches_dir is not None
-            if resume_mode != "native" and (self.settings.published_batches_dir / batch_name).exists():
-                raise AppError(
-                    409,
-                    "BATCH_ALREADY_EXISTS",
-                    f"目标发布目录已存在同名批次 `{batch_name}`，禁止覆盖历史批次",
-                    {"batch_name": batch_name},
-                )
+            source_namespace = "runner_published"
+            publish_root = self.settings.published_batches_dir
 
         if spec["kind"] == "direct" and not spec.get("planned_tasks"):
             raise AppError(
@@ -1533,14 +1559,68 @@ class ExecutionService:
             "publish_to_harbor_runs": want_harbor_publish,
         }
 
-        if not want_harbor_publish:
-            self._record_runner_submission_meta(
-                batch_name=batch_name,
-                batch_id=make_batch_id(f"runner_published:{batch_name}"),
-                job_id=job_id,
-                project_id=spec["project_id"],
-                owner_id=user.user_id,
-            )
+        runner_id = str(rhealth.get("runner_id") or "external-isolated-runner")
+        stored_params = {k: v for k, v in runner_spec.items() if k not in ("dataset_path", "config_path")}
+        try:
+            with self.db.transaction() as conn:
+                existing = conn.execute(
+                    """
+                    SELECT 1 FROM exec_batch_reservations WHERE source_namespace = ? AND batch_name = ?
+                    UNION ALL
+                    SELECT 1 FROM exec_jobs
+                    WHERE batch_name = ?
+                      AND status IN ('queued', 'running', 'cancelling', 'finalizing', 'finished')
+                      AND (CASE WHEN json_valid(params_json)
+                                THEN coalesce(json_extract(params_json, '$.publish_to_harbor_runs'), 0)
+                                ELSE 0 END) = ?
+                    LIMIT 1
+                    """,
+                    (source_namespace, batch_name, batch_name, int(want_harbor_publish)),
+                ).fetchone()
+                target = publish_root / batch_name
+                if existing is not None or (resume_mode != "native" and (target.exists() or target.is_symlink())):
+                    raise AppError(409, "BATCH_ALREADY_EXISTS", "目标发布位置已有作业或历史批次", {"batch_name": batch_name})
+
+                job_owner = user.user_id
+                if resume_mode == "native":
+                    parent = conn.execute(
+                        """
+                        SELECT project_id, owner_id, params_json FROM exec_jobs
+                        WHERE job_id = ? AND batch_name = ? AND kind = 'harbor'
+                          AND status IN ('paused_by_guard', 'interrupted', 'failed')
+                        """,
+                        (parent_job_id, batch_name),
+                    ).fetchone()
+                    if (
+                        parent is None
+                        or parent["project_id"] != spec["project_id"]
+                        or bool(json.loads(parent["params_json"]).get("publish_to_harbor_runs", False)) != want_harbor_publish
+                    ):
+                        raise AppError(409, "RESUME_UNSUPPORTED", "原生续跑必须继承原作业发布位置与项目")
+                    job_owner = parent["owner_id"]
+
+                conn.execute(
+                    """
+                    INSERT INTO exec_jobs (
+                        job_id, kind, project_id, owner_id, batch_name, status,
+                        params_json, command_preview, runner_id, log_ref, notify_json, created_at
+                    ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        job_id, spec["kind"], spec["project_id"], job_owner, batch_name,
+                        json.dumps(stored_params, ensure_ascii=False), spec["command_preview"], runner_id,
+                        f"runner_work:{job_id}/runner_stdio.log",
+                        json.dumps(spec["notify"], ensure_ascii=False), now,
+                    ),
+                )
+                conn.execute(
+                    "INSERT INTO exec_batch_reservations (source_namespace, batch_name, job_id) VALUES (?, ?, ?)",
+                    (source_namespace, batch_name, job_id),
+                )
+        except Exception:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            shutil.rmtree(evidence_dir, ignore_errors=True)
+            raise
 
         # Dispatch to the REAL external Isolated Runner Daemon over authenticated IPC!
         try:
@@ -1552,15 +1632,19 @@ class ExecutionService:
                 }
             )
         except AppError:
+            with self.db.transaction() as conn:
+                conn.execute("DELETE FROM exec_jobs WHERE job_id = ?", (job_id,))
             shutil.rmtree(work_dir, ignore_errors=True)
             shutil.rmtree(evidence_dir, ignore_errors=True)
             raise
-        except OSError as exc:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            shutil.rmtree(evidence_dir, ignore_errors=True)
-            raise AppError(503, "RUNNER_NOT_ATTACHED", f"向独立隔离 Runner 派发作业失败: {type(exc).__name__}") from exc
+        except OSError:
+            # A lost POST reply can leave an accepted job on Runner. Keep its reservation
+            # until the authenticated event monitor establishes a terminal outcome.
+            ipc_status, ipc_body = 202, {}
 
         if ipc_status != 202:
+            with self.db.transaction() as conn:
+                conn.execute("DELETE FROM exec_jobs WHERE job_id = ?", (job_id,))
             shutil.rmtree(work_dir, ignore_errors=True)
             shutil.rmtree(evidence_dir, ignore_errors=True)
             raise AppError(
@@ -1570,32 +1654,11 @@ class ExecutionService:
                 ipc_body.get("detail") if isinstance(ipc_body.get("detail"), dict) else None,
             )
 
-        runner_id = str(ipc_body.get("runner_id") or rhealth.get("runner_id") or "external-isolated-runner")
-        stored_params = {k: v for k, v in runner_spec.items() if k not in ("dataset_path", "config_path")}
-
-        with self.db.transaction() as conn:
-            conn.execute(
-                """
-                INSERT INTO exec_jobs (
-                    job_id, kind, project_id, owner_id, batch_name, batch_id, status,
-                    params_json, command_preview, runner_id, exit_code, last_event_seq,
-                    log_ref, notify_json, created_at
-                ) VALUES (?, ?, ?, ?, ?, NULL, 'queued', ?, ?, ?, NULL, 0, ?, ?, ?)
-                """,
-                (
-                    job_id,
-                    spec["kind"],
-                    spec["project_id"],
-                    user.user_id,
-                    batch_name,
-                    json.dumps(stored_params, ensure_ascii=False),
-                    spec["command_preview"],
-                    runner_id,
-                    f"runner_work:{job_id}/runner_stdio.log",
-                    json.dumps(spec["notify"], ensure_ascii=False),
-                    now,
-                ),
-            )
+        reply_runner_id = str(ipc_body.get("runner_id") or runner_id)
+        if reply_runner_id != runner_id:
+            runner_id = reply_runner_id
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE exec_jobs SET runner_id = ? WHERE job_id = ?", (runner_id, job_id))
 
         planned_total = (len(spec["planned_tasks"]) * spec["attempts"]) if spec["planned_tasks"] else 0
         self._emit_trusted_event(
@@ -1748,7 +1811,7 @@ class ExecutionService:
                         spec["completed_task_ids"] = list(done_tasks)
                         with self.db.transaction() as conn:
                             conn.execute(
-                                "UPDATE exec_jobs SET params_json = ? WHERE job_id = ?",
+                                "UPDATE exec_jobs SET status = 'finalizing', params_json = ? WHERE job_id = ?",
                                 (json.dumps(spec, ensure_ascii=False), job_id),
                             )
                         trial_outcomes = list(payload.get("trial_outcomes") or [])
@@ -1760,6 +1823,7 @@ class ExecutionService:
                             channel_path=channel_path,
                             channel_secret=channel_secret,
                             publish_to_harbor_runs=want_harbor_publish,
+                            vlmevalkit_scoring_results=payload.get("vlmevalkit_scoring_results"),
                         )
                         self._dispatch_terminal_notification(job_id, "finished", rec_info)
                         return

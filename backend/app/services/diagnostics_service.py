@@ -949,7 +949,7 @@ class DiagnosticsService:
         parsed = json.loads(raw_bytes.decode("utf-8", errors="replace"))
         return (parsed if isinstance(parsed, dict) else None), (str(path), st.st_mtime_ns, st.st_size)
 
-    def _scan_batch_trajectories(self, batch_row: dict[str, Any]) -> dict[str, Any]:
+    def _scan_batch_trajectories(self, batch_row: dict[str, Any], *, include_gateway: bool = True) -> dict[str, Any]:
         bname = str(batch_row["source_locator"]).split(":", 1)[1] if ":" in str(batch_row["source_locator"]) else ""
         try:
             bdir = resolve_within_root(self.settings.harbor_runs_dir, bname) if bname else None
@@ -959,7 +959,7 @@ class DiagnosticsService:
         allow_atif = bdir is not None and self.approval_registry.is_evidence_class_approved(
             bdir, "atif_trajectory", ev_approval
         )
-        allow_gw = bdir is not None and self.approval_registry.is_evidence_class_approved(
+        allow_gw = include_gateway and bdir is not None and self.approval_registry.is_evidence_class_approved(
             bdir, "gateway_capture", ev_approval
         )
 
@@ -1000,6 +1000,7 @@ class DiagnosticsService:
             ev = json.loads(ep["evidence_refs_json"] or "{}")
             traj_ref = ev.get("trajectory") if isinstance(ev.get("trajectory"), dict) else None
             gw_ref = ev.get("gateway") if isinstance(ev.get("gateway"), dict) else None
+            gateway_digest_pending = allow_gw and gw_ref is not None and "pending_file_identity" in gw_ref
             ep_gen = str(ep.get("generation_id") or gen_id)
             tracked_stats: list[tuple[str, int, int]] = []
 
@@ -1033,7 +1034,7 @@ class DiagnosticsService:
 
             has_gw_file = False
             gw_clue = None
-            if allow_gw and gw_ref is not None:
+            if allow_gw and gw_ref is not None and not gateway_digest_pending:
                 try:
                     gp = self._resolve_evidence_path(bdir, gw_ref)
                     if gp is not None:
@@ -1071,6 +1072,7 @@ class DiagnosticsService:
                     "max_prompt_tokens": atif_info["max_prompt_tokens"],
                     "tools": atif_info["tools"],
                     "has_gw_file": has_gw_file,
+                    "gateway_digest_pending": gateway_digest_pending,
                     "clues": clues,
                 },
                 tracked_stats,
@@ -1088,8 +1090,9 @@ class DiagnosticsService:
             all_stats.extend(st_list)
 
         summary = {"batch_id": batch_row["batch_id"], "trials": ep_results, "_file_stats": all_stats}
-        with self._tool_cache_lock:
-            self._batch_tool_cache[key] = summary
+        if not any(trial["gateway_digest_pending"] for trial in ep_results):
+            with self._tool_cache_lock:
+                self._batch_tool_cache[key] = summary
         return summary
 
     # 4. Tool Call Ecosystem Profile
@@ -1146,7 +1149,7 @@ class DiagnosticsService:
                 excluded_harnesses[label] += rec
                 continue
 
-            scanned = self._scan_batch_trajectories(b)
+            scanned = self._scan_batch_trajectories(b, include_gateway=False)
             h_name = str(b["harness"] or "unknown")
             h_label = f"{h_name}@{b['harness_version']}" if b["harness_version"] else h_name
             batch_has_tools = False

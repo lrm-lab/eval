@@ -98,6 +98,16 @@ def test_private_submission_boundary(tmp_path, isolated_settings, unsafe):
     state = isolated_settings.state_dir
     doc = submission()
     write_runner_submission(state, doc)
+    batch = isolated_settings.published_batches_dir / doc["batch_name"]
+    batch.mkdir(parents=True)
+    (batch / "manifest.json").write_text(json.dumps({"dataset": "deepswe-1.1", "harness": "pi"}))
+    (batch / "episodes.jsonl").write_text(json.dumps({
+        "trial_id": "cccccccc-cccc-cccc-cccc-cccccccccccc", "task_id": "t1", "status": "scored", "reward": 1,
+    }) + "\n")
+    scan = ctx.coordinator.hot.scan_single_harbor_batch
+    assert scan(batch, source_namespace="runner_published") == "indexed"
+    assert_binding(ctx.db, doc["batch_id"], "science", "researcher", "approved_restricted")
+
     ledger = state / "runner-submissions"
     path = ledger / "team-run.json"
     assert stat.S_IMODE(ledger.stat().st_mode) == 0o700
@@ -115,7 +125,11 @@ def test_private_submission_boundary(tmp_path, isolated_settings, unsafe):
     if unsafe != "wrong_batch":
         with pytest.raises(OSError):
             write_runner_submission(state, doc)
-    with pytest.raises((OSError, ValueError)):
-        ctx.coordinator.hot._resolve_runner_published_ownership(
-            doc["batch_name"], doc["batch_id"], "runner_published:team-run",
-        )
+    assert scan(batch, source_namespace="runner_published") == "rejected"
+    for sql in (
+        "SELECT 1 FROM batches WHERE batch_id=?",
+        "SELECT 1 FROM trial_protocol_scores WHERE batch_id=?",
+        "SELECT 1 FROM search_fts WHERE entity_type='batch' AND entity_id=?",
+    ):
+        assert ctx.db.fetchone(sql, (doc["batch_id"],)) is None
+    assert (batch / "manifest.json").is_file()

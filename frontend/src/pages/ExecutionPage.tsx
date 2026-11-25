@@ -1432,6 +1432,16 @@ export function ExecutionPage() {
   const isHarborFamily = kind === 'harbor' || kind === 'harbor_gateway';
   const notifications = notificationsQ.data?.items ?? [];
 
+  if (capsQ.isPending || notificationsQ.isPending || jobsQ.isPending) {
+    return (
+      <PageTransition className="max-w-7xl mx-auto px-5 py-6">
+        <p role="status" className="m-0 text-sm text-[var(--text-secondary)]">
+          正在加载评测执行配置与作业…
+        </p>
+      </PageTransition>
+    );
+  }
+
   return (
     <PageTransition className="max-w-7xl mx-auto px-5 py-6 space-y-5">
       {/* Page Header */}
