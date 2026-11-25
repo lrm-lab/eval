@@ -1594,9 +1594,18 @@ export function ExecutionPage() {
                     aria-label="选择已登记评测题库"
                     value={suiteId}
                     onChange={(e) => {
-                      setSuiteId(e.target.value);
+                      const nextSuiteId = e.target.value;
+                      setSuiteId(nextSuiteId);
                       setKind(null);
-                      setTasksInput('');
+                      if (nextSuiteId === 'gaia') {
+                        // Use the native configuration that has completed grading on this host.
+                        setAgent('pi');
+                        setHarnessVersion('0.87.1');
+                        setSelectionMode('tasks');
+                        setTasksInput('076c8171-9b3b-49b9-a477-244d2a532826');
+                      } else {
+                        setTasksInput('');
+                      }
                       setPlanResult(null);
                       setEnvironmentNotice(false);
                     }}
