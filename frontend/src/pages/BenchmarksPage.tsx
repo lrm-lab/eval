@@ -2,7 +2,7 @@ import React, { useMemo, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type * as echarts from 'echarts';
-import { ArrowLeft, BarChart3, Flame, Search } from 'lucide-react';
+import { ArrowLeft, BarChart3, Crosshair, Flame, Layers3, ListChecks, Search } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { fmtDuration, fmtPct, runScopeLabel, trackDisplayName } from '../lib/format';
 import { useAppStore } from '../lib/store';
@@ -140,15 +140,17 @@ function BenchmarkDirectoryView() {
         </div>
       </div>
 
-      <div className="overflow-x-auto pb-1">
-        <SlidingTabs
-          layoutId="bm-dir-tracks"
-          size="sm"
-          value={trackFilter}
-          onChange={setTrackFilter}
-          options={tracks.map((t) => ({ id: t, label: t === 'all' ? '全部轨道' : trackDisplayName(t) }))}
-        />
-      </div>
+      <SlidingTabs
+        layoutId="bm-dir-tracks"
+        className="max-w-full flex-wrap [&_[role=tab]]:min-h-8"
+        value={trackFilter}
+        onChange={setTrackFilter}
+        options={tracks.map((track) => ({
+          id: track,
+          label: track === 'all' ? '全部轨道' : trackDisplayName(track),
+          badge: (listQ.data?.items || []).filter((benchmark) => track === 'all' || benchmark.track_slug === track).length,
+        }))}
+      />
 
       {listQ.isLoading ? (
         <CardGridSkeleton count={8} />
@@ -254,15 +256,15 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
 
       <SlidingTabs
         layoutId="bm-profile-tabs"
-        size="sm"
+        className="max-w-full flex-wrap [&_[role=tab]]:min-h-8"
         value={tab}
         onChange={setTab}
         options={[
-          { id: 'leaderboard', label: '基准分榜', badge: data?.mini_leaderboard.length },
-          { id: 'scatter', label: '效率前沿散点' },
-          { id: 'hardest', label: '最难题目榜 (Hardest)' },
-          { id: 'tasks', label: '题目分布', badge: data?.task_summary.indexed_tasks },
-          { id: 'properties', label: '发行版与属性', badge: data?.releases.length },
+          { id: 'leaderboard', label: '基准分榜', badge: data?.mini_leaderboard.length, icon: <BarChart3 size={14} /> },
+          { id: 'scatter', label: '效率前沿散点', icon: <Crosshair size={14} /> },
+          { id: 'hardest', label: '最难题目榜 (Hardest)', icon: <Flame size={14} /> },
+          { id: 'tasks', label: '题目分布', badge: data?.task_summary.indexed_tasks, icon: <ListChecks size={14} /> },
+          { id: 'properties', label: '发行版与属性', badge: data?.releases.length, icon: <Layers3 size={14} /> },
         ]}
       />
 
