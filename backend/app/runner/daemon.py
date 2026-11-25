@@ -269,6 +269,24 @@ class IsolatedRunnerManager:
             },
         }
 
+    def _original_work(self, spec: dict[str, Any]) -> Path:
+        root = self.settings.runner_work_dir
+        assert root is not None
+        work = Path(spec.get("harbor_work_dir") or "")
+        validate_safe_id(work.name, "original_job_id")
+        if (work.parent != root or work.is_symlink() or not work.is_dir()
+                or (work.stat().st_mode & 0o777) != 0o700):
+            raise ValueError("Missing or unsafe original Harbor work directory")
+        parent = str(spec.get("parent_job_id") or "")
+        validate_safe_id(parent, "parent_job_id")
+        parent_lock = root / parent / ".resume-lock.json"
+        if parent_lock.parent.is_symlink() or parent_lock.is_symlink() or not parent_lock.is_file():
+            raise ValueError("Missing original Harbor dispatch lock")
+        doc = json.loads(parent_lock.read_bytes())
+        if not isinstance(doc, dict) or doc.get("harbor_work_dir") != str(work) or doc.get("kind") != "harbor":
+            raise ValueError("Parent job does not reference this Harbor work directory")
+        return work
+
     def submit_job(self, req: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         job_id = str(req.get("job_id") or "").strip()
         validate_safe_id(job_id, "job_id")
@@ -279,6 +297,14 @@ class IsolatedRunnerManager:
         channel_secret = str(req.get("channel_secret") or "")
         if len(channel_secret) < 16:
             return 422, {"code": "SCHEMA_VALIDATION_FAILED", "message": "Missing channel_secret"}
+
+        if spec.get("resume_mode") == "native":
+            if kind != "harbor":
+                return 409, {"code": "RESUME_UNSUPPORTED", "message": "Only standard Harbor supports native resume"}
+            try:
+                materialize_managed_run_config(self.settings, spec, self._original_work(spec))
+            except (AppError, OSError, ValueError, KeyError, TypeError):
+                return 409, {"code": "RESUME_UNSUPPORTED", "message": "Missing or mismatched original Harbor inputs"}
 
         h = self.health()
         if not h["ok"]:
@@ -408,6 +434,7 @@ class IsolatedRunnerManager:
         if not dataset_path or not Path(dataset_path).is_file():
             raise RuntimeError(f"Direct suite cases.jsonl missing: {dataset_path}")
 
+        materialize_managed_run_config(self.settings, spec, work_dir)
         worker_script = Path(__file__).resolve().parent / "direct_worker.py"
         cfg_file = work_dir / ".direct_worker_cfg.json"
         worker_cfg = {
@@ -574,17 +601,7 @@ class IsolatedRunnerManager:
         - Captures child stdout/stderr strictly into bounded `BoundedJobStdioWriter` (<= 2 MiB/job,
           <= 20 MiB cumulative across all jobs) and NEVER parses stdout for progress!"""
         assert self.settings.runner_work_dir is not None
-        effective_work_dir = work_dir
-        if spec.get("resume_mode") == "native" and spec.get("harbor_work_dir"):
-            cand_work = Path(str(spec["harbor_work_dir"]))
-            if cand_work.is_symlink() or not cand_work.is_dir():
-                raise RuntimeError("Harbor native --resume target --work directory is missing or symlinked")
-            resolved_cand = cand_work.resolve()
-            try:
-                resolved_cand.relative_to(self.settings.runner_work_dir.resolve())
-            except ValueError as exc:
-                raise RuntimeError("Harbor native --resume target --work escapes runner_work_dir") from exc
-            effective_work_dir = resolved_cand
+        effective_work_dir = self._original_work(spec) if spec.get("resume_mode") == "native" else work_dir
 
         run_py = resolve_verified_managed_script(self.settings, "run.py")
         resolved_toml = materialize_managed_run_config(self.settings, spec, effective_work_dir)
