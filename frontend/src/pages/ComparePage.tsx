@@ -24,6 +24,7 @@ import type { CompareQueryResponse, CompareSubjectRef, TrialDetailDTO } from '..
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { CompositeScoreCell } from '../components/ui/CompositeScoreCell';
 import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
+import { LegacyCompareEvidence, type LegacyCompareSample } from '../components/ui/LegacyCompareEvidence';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
@@ -353,6 +354,7 @@ export function ComparePage() {
   const [saveProjectId, setSaveProjectId] = useState<string>('');
 
   const taskDiffSectionRef = useRef<HTMLDivElement | null>(null);
+  const splitActionRef = useRef<HTMLButtonElement | null>(null);
   const activeCmpIdRef = useRef<string | null>(null);
   const initTriggeredRef = useRef<string | null>(null);
 
@@ -393,6 +395,30 @@ export function ComparePage() {
     );
   };
 
+  function openSplitPair(row: TaskDiffResp['items'][number], diff: TaskDiffResp) {
+    const pair: SplitPairState = {
+      kind: diff.kind === 'legacy_sample_diff' ? 'legacy' : 'batch',
+      taskId: row.task_id,
+      aBatch: row.a.batch_id,
+      aTrial: row.a.trial_id,
+      bBatch: row.b.batch_id,
+      bTrial: row.b.trial_id,
+      aModelFile: row.a.model_file || diff.model_file_a,
+      bModelFile: row.b.model_file || diff.model_file_b,
+    };
+    setSplitPair(pair);
+    syncCompareUrl({
+      split_kind: pair.kind,
+      split_task: pair.taskId,
+      split_ab: pair.aBatch,
+      split_at: pair.aTrial,
+      split_bb: pair.bBatch,
+      split_bt: pair.bTrial,
+      split_ma: pair.aModelFile ?? null,
+      split_mb: pair.bModelFile ?? null,
+    });
+  }
+
   const optsQ = useQuery({
     queryKey: ['compare-options'],
     queryFn: () => apiFetch<CompareOptionsResp>('/api/v1/compare/options'),
@@ -421,24 +447,24 @@ export function ComparePage() {
     queryFn: () => apiFetch<SavedOpenResp>(`/api/v1/compare/s/${encodeURIComponent(openId!)}`),
   });
 
-  const splitAQ = useQuery<TrialDetailDTO | Record<string, unknown>>({
+  const splitAQ = useQuery<TrialDetailDTO | LegacyCompareSample>({
     queryKey: ['split-a', splitPair?.kind, splitPair?.aBatch, splitPair?.aModelFile, splitPair?.aTrial],
     enabled: Boolean(splitPair),
     queryFn: () =>
       splitPair!.kind === 'legacy'
-        ? apiFetch<Record<string, unknown>>(
+        ? apiFetch<LegacyCompareSample>(
             `/api/v1/legacy/${encodeURIComponent(splitPair!.aBatch)}/samples/${encodeURIComponent(splitPair!.aModelFile || '')}/${encodeURIComponent(splitPair!.aTrial)}`
           )
         : apiFetch<TrialDetailDTO>(
             `/api/v1/batches/${encodeURIComponent(splitPair!.aBatch)}/trials/${encodeURIComponent(splitPair!.aTrial)}`
           ),
   });
-  const splitBQ = useQuery<TrialDetailDTO | Record<string, unknown>>({
+  const splitBQ = useQuery<TrialDetailDTO | LegacyCompareSample>({
     queryKey: ['split-b', splitPair?.kind, splitPair?.bBatch, splitPair?.bModelFile, splitPair?.bTrial],
     enabled: Boolean(splitPair),
     queryFn: () =>
       splitPair!.kind === 'legacy'
-        ? apiFetch<Record<string, unknown>>(
+        ? apiFetch<LegacyCompareSample>(
             `/api/v1/legacy/${encodeURIComponent(splitPair!.bBatch)}/samples/${encodeURIComponent(splitPair!.bModelFile || '')}/${encodeURIComponent(splitPair!.bTrial)}`
           )
         : apiFetch<TrialDetailDTO>(
@@ -853,6 +879,10 @@ export function ComparePage() {
       alias: subjects.find((s) => s.id === b.subject_id)?.alias || b.batch_id,
     }));
   }, [result, subjects]);
+  const splitLabelA = subjectMetaList.find((subject) => subject.id === diffSubjectA)?.alias
+    || subjectMetaList[0]?.alias || splitPair?.aModelFile || splitPair?.aBatch || 'A';
+  const splitLabelB = subjectMetaList.find((subject) => subject.id === diffSubjectB)?.alias
+    || subjectMetaList[1]?.alias || splitPair?.bModelFile || splitPair?.bBatch || 'B';
 
   const chartRows = useMemo(() => result?.rows.filter((row) => row.comparable).slice(0, 14) ?? [], [result]);
   const presets = optsQ.data?.presets ?? [];
@@ -1558,37 +1588,15 @@ export function ComparePage() {
                       <th className="py-2 px-3">
                         B ({subjectMetaList.find((s) => s.id === diffSubjectB)?.alias || subjectMetaList[1]?.alias})
                       </th>
-                      <th className="py-2 px-3.5 text-right">同屏 Split Diff</th>
+                      <th className="sticky right-0 bg-[var(--bg-surface)] py-2 px-3.5 text-center whitespace-nowrap sm:static">同屏对比</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-subtle)]">
                     {taskDiff.items.map((row) => (
                       <tr
                         key={row.task_id}
-                        onClick={() => {
-                          const nextPair: SplitPairState = {
-                            kind: taskDiff.kind === 'legacy_sample_diff' ? 'legacy' : 'batch',
-                            taskId: row.task_id,
-                            aBatch: row.a.batch_id,
-                            aTrial: row.a.trial_id,
-                            bBatch: row.b.batch_id,
-                            bTrial: row.b.trial_id,
-                            aModelFile: row.a.model_file || taskDiff.model_file_a,
-                            bModelFile: row.b.model_file || taskDiff.model_file_b,
-                          };
-                          setSplitPair(nextPair);
-                          syncCompareUrl({
-                            split_kind: nextPair.kind,
-                            split_task: nextPair.taskId,
-                            split_ab: nextPair.aBatch,
-                            split_at: nextPair.aTrial,
-                            split_bb: nextPair.bBatch,
-                            split_bt: nextPair.bTrial,
-                            split_ma: nextPair.aModelFile || null,
-                            split_mb: nextPair.bModelFile || null,
-                          });
-                        }}
-                        className="hover:bg-[var(--bg-elevated)]/65 cursor-pointer"
+                        onClick={() => openSplitPair(row, taskDiff)}
+                        className="group/row-action hover:bg-[var(--bg-elevated)]/65 cursor-pointer"
                       >
                         <td className="py-2 px-3.5 font-mono font-medium">{row.task_id}</td>
                         <td className="py-2 px-3">
@@ -1612,7 +1620,17 @@ export function ComparePage() {
                           Reward {row.b.reward ?? '—'}
                           {row.b.duration_sec !== null ? ` · ${fmtDuration(row.b.duration_sec)}` : ''}
                         </td>
-                        <td className="py-2 px-3.5 text-right text-[var(--brand-primary)] font-medium">左右分屏对比</td>
+                        <td className="sticky right-0 bg-[var(--bg-surface)] px-3.5 py-1.5 text-center group-hover/row-action:bg-[var(--bg-elevated)] sm:static sm:bg-transparent">
+                          <RowActionIcon
+                            variant="compare"
+                            label={`打开同题对比 · ${row.task_id}`}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              splitActionRef.current = event.currentTarget;
+                              openSplitPair(row, taskDiff);
+                            }}
+                          />
+                        </td>
                       </tr>
                     ))}
                   </tbody>
@@ -1677,16 +1695,36 @@ export function ComparePage() {
             split_ma: null,
             split_mb: null,
           });
+          splitActionRef.current?.focus({ preventScroll: true });
+          splitActionRef.current = null;
         }}
         wide
-        title={splitPair ? `左右分屏 Split Diff · ${splitPair.taskId}` : ''}
+        manageFocus
+        title={splitPair ? `同题对比 · ${splitPair.taskId}` : ''}
         subtitle={
           splitPair?.kind === 'legacy'
-            ? '2026-11-20 历史同题双栏证据 · 按权限脱敏展示模型回答与判分'
+            ? splitPair.aBatch
             : '保留底层对比矩阵与滚动位置 · 支持双栏 ATIF 轨迹对照与直入任一侧 Trial 显微镜'
         }
       >
-        {splitPair && (() => {
+        {splitPair?.kind === 'legacy' && (
+          <LegacyCompareEvidence
+            key={splitPair.taskId}
+            a={{
+              label: splitLabelA,
+              data: splitAQ.isSuccess && 'sample' in splitAQ.data ? splitAQ.data : undefined,
+              isLoading: splitAQ.isLoading,
+              error: splitAQ.error,
+            }}
+            b={{
+              label: splitLabelB,
+              data: splitBQ.isSuccess && 'sample' in splitBQ.data ? splitBQ.data : undefined,
+              isLoading: splitBQ.isLoading,
+              error: splitBQ.error,
+            }}
+          />
+        )}
+        {splitPair?.kind === 'batch' && (() => {
           const returnQp = new URLSearchParams(location.search);
           if (result && !shortId) returnQp.set('cmp', result.comparison_id);
           returnQp.set('diff_filter', diffFilter);
@@ -1706,33 +1744,31 @@ export function ComparePage() {
 
           return (
             <div className="space-y-4 text-xs">
-              {splitPair.kind === 'batch' && (
-                <div className="flex items-center justify-between">
-                  <span className="text-[var(--text-secondary)]">按权限惰性加载两侧 ATIF 工具轨迹对比：</span>
-                  <button
-                    type="button"
-                    onClick={() => setShowSplitTrace((v) => !v)}
-                    className={`rounded-lg border px-3 py-1 font-medium cursor-pointer ${
-                      showSplitTrace
-                        ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
-                        : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
-                    }`}
-                  >
-                    {showSplitTrace ? '隐藏双栏轨迹' : '展开双栏 ATIF 轨迹 Diff'}
-                  </button>
-                </div>
-              )}
+              <div className="flex items-center justify-between">
+                <span className="text-[var(--text-secondary)]">按权限惰性加载两侧 ATIF 工具轨迹对比：</span>
+                <button
+                  type="button"
+                  onClick={() => setShowSplitTrace((v) => !v)}
+                  className={`rounded-lg border px-3 py-1 font-medium cursor-pointer ${
+                    showSplitTrace
+                      ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
+                      : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
+                  }`}
+                >
+                  {showSplitTrace ? '隐藏双栏轨迹' : '展开双栏 ATIF 轨迹 Diff'}
+                </button>
+              </div>
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {[
                   {
-                    label: `A · ${subjectMetaList.find((s) => s.id === diffSubjectA)?.alias || subjectMetaList[0]?.alias || splitPair.aBatch}`,
+                    label: `A · ${splitLabelA}`,
                     q: splitAQ,
                     tq: splitTrajAQ,
                     batch: splitPair.aBatch,
                     trial: splitPair.aTrial,
                   },
                   {
-                    label: `B · ${subjectMetaList.find((s) => s.id === diffSubjectB)?.alias || subjectMetaList[1]?.alias || splitPair.bBatch}`,
+                    label: `B · ${splitLabelB}`,
                     q: splitBQ,
                     tq: splitTrajBQ,
                     batch: splitPair.bBatch,
@@ -1742,34 +1778,15 @@ export function ComparePage() {
                   <div key={side.label} className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-4 space-y-3">
                     <div className="group/row-action flex items-center justify-between gap-2 pb-2 border-b border-[var(--border-subtle)]">
                       <span className="font-bold text-[var(--text-primary)] truncate">{side.label}</span>
-                      {splitPair.kind === 'batch' && (
-                        <RowActionIcon
-                          variant="microscope"
-                          to={`/eval/batches/${encodeURIComponent(side.batch)}/trials/${encodeURIComponent(side.trial)}?returnTo=${encodeURIComponent(returnToUrl)}`}
-                        />
-                      )}
+                      <RowActionIcon
+                        variant="microscope"
+                        to={`/eval/batches/${encodeURIComponent(side.batch)}/trials/${encodeURIComponent(side.trial)}?returnTo=${encodeURIComponent(returnToUrl)}`}
+                      />
                     </div>
                     {side.q.isLoading ? (
                       <TableSkeleton rows={4} cols={1} />
                     ) : side.q.isError ? (
                       <div className="text-[var(--text-muted)]">{(side.q.error as Error).message}</div>
-                    ) : side.q.data && splitPair.kind === 'legacy' ? (
-                      (() => {
-                        const leg = side.q.data as { status?: string; reward?: number | null; sample?: Record<string, unknown> };
-                        return (
-                          <div className="space-y-2">
-                            <div className="flex justify-between">
-                              <span className="text-[var(--text-muted)]">状态 / Reward</span>
-                              <span className="font-mono font-bold">
-                                {leg.status || '—'} · {leg.reward ?? '—'}
-                              </span>
-                            </div>
-                            <pre className="m-0 rounded bg-[var(--bg-surface)] p-2.5 text-[11px] font-mono whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
-                              {JSON.stringify(leg.sample || {}, null, 2)}
-                            </pre>
-                          </div>
-                        );
-                      })()
                     ) : side.q.data ? (
                       (() => {
                         const td = side.q.data as TrialDetailDTO;

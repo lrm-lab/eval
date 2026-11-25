@@ -1,8 +1,23 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, type KeyboardEvent as ReactKeyboardEvent } from 'react';
 import { AnimatePresence, m } from 'motion/react';
 import { Maximize2, X } from 'lucide-react';
 import { useAppStore } from '../../lib/store';
 import { EASE_OUT_EXPO } from '../motion/primitives';
+
+function keepDialogFocus(event: ReactKeyboardEvent<HTMLDivElement>) {
+  if (event.key !== 'Tab') return;
+  const controls = Array.from(event.currentTarget.querySelectorAll<HTMLElement>(
+    'button:not(:disabled), a[href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]',
+  )).filter((element) => element.getClientRects().length > 0);
+  const first = controls[0];
+  const last = controls.at(-1);
+  const next = event.shiftKey && event.target === first ? last
+    : !event.shiftKey && event.target === last ? first : undefined;
+  if (next) {
+    event.preventDefault();
+    next.focus();
+  }
+}
 
 /**
  * L2 Slide-Over Drawer (v2.2.1 01-1 §2.1.5 & 01-2 §2.4)
@@ -17,6 +32,7 @@ export function SlideOverDrawer({
   fullPageHref,
   onOpenFullPage,
   wide = false,
+  manageFocus = false,
   children,
 }: {
   open: boolean;
@@ -26,6 +42,7 @@ export function SlideOverDrawer({
   fullPageHref?: string;
   onOpenFullPage?: () => void;
   wide?: boolean;
+  manageFocus?: boolean;
   children: React.ReactNode;
 }) {
   const reduced = useAppStore((s) => s.reducedMotion);
@@ -42,7 +59,13 @@ export function SlideOverDrawer({
   return (
     <AnimatePresence>
       {open && (
-        <div className="fixed inset-0 z-50 flex justify-end" role="dialog" aria-modal="true" aria-label={title}>
+        <div
+          className="fixed inset-0 z-50 flex justify-end"
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          onKeyDown={manageFocus ? keepDialogFocus : undefined}
+        >
           <m.div
             initial={reduced ? false : { opacity: 0 }}
             animate={{ opacity: 1 }}
@@ -83,6 +106,7 @@ export function SlideOverDrawer({
                   type="button"
                   onClick={onClose}
                   aria-label="关闭抽屉"
+                  autoFocus={manageFocus}
                   className="rounded-lg p-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] hover:text-[var(--text-primary)] cursor-pointer"
                 >
                   <X className="w-4 h-4" />
