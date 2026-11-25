@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -490,6 +491,44 @@ def handoff_command(args, dataset, bundle, profile):
     return cmd
 
 
+def validated_wildclaw_snapshot(source, bundle):
+    if source != (bundle / "datasets" / "wildclaw-harbor").resolve():
+        return None
+    prepared = source.with_name("wildclaw-run")
+    if not prepared.exists() and not prepared.is_symlink():
+        return None
+    info = prepared.lstat()
+    if not stat.S_ISDIR(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("The prepared WildClaw snapshot must be a private operator directory")
+
+    receipt = prepared / "normalization-receipt.json"
+    if receipt.is_symlink() or not receipt.is_file():
+        raise ValueError("The prepared WildClaw snapshot is missing its normalization receipt")
+    changed = json.loads(receipt.read_text(encoding="utf-8"))
+    if not isinstance(changed, list) or not all(isinstance(name, str) for name in changed):
+        raise ValueError("The prepared WildClaw normalization receipt is invalid")
+    normalized = {Path(name) for name in changed}
+    original_paths = {path.relative_to(source) for path in source.rglob("*")}
+    prepared_paths = {path.relative_to(prepared) for path in prepared.rglob("*") if path != receipt}
+    if original_paths != prepared_paths or not normalized <= original_paths:
+        raise ValueError("The prepared WildClaw snapshot no longer matches the installed release")
+    for relative in original_paths:
+        original, snapshot = source / relative, prepared / relative
+        if original.is_symlink() or snapshot.is_symlink():
+            raise ValueError(f"Unexpected symlink in WildClaw snapshot: {relative}")
+        if original.is_dir() and snapshot.is_dir() and relative not in normalized:
+            continue
+        if original.is_file() and snapshot.is_file():
+            if relative not in normalized and original.samefile(snapshot):
+                continue
+            if relative in normalized and relative.suffix == ".sh":
+                raw = original.read_bytes()
+                if b"\r\n" in raw and snapshot.read_bytes() == raw.replace(b"\r\n", b"\n"):
+                    continue
+        raise ValueError(f"The prepared WildClaw snapshot has changed: {relative}")
+    return prepared
+
+
 def prepare_wildclaw(source, bundle, work, suite_id, tasks):
     source = source.resolve()
     selected = set(tasks)
@@ -508,6 +547,11 @@ def prepare_wildclaw(source, bundle, work, suite_id, tasks):
 
     working_root = work / "prepared" / suite_id
     destination = working_root / "datasets" / "wildclaw-run"
+    # Existing native jobs keep their original private dataset path for resume.
+    if not selected and not destination.exists():
+        snapshot = validated_wildclaw_snapshot(source, bundle)
+        if snapshot is not None:
+            return snapshot
     working_root.mkdir(parents=True, exist_ok=True)
     with (working_root / ".prepare.lock").open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)

@@ -41,6 +41,8 @@ for path in target.glob("*/setup.sh"):
     subprocess.run(
         [sys.executable, "-c", """
 import sys
+import os
+import shutil
 from pathlib import Path
 
 sys.path.insert(0, sys.argv[1])
@@ -55,6 +57,25 @@ assert prepare_wildclaw(source, bundle, work, "wildclaw", ["first", "second"]) =
 
 all_tasks = prepare_wildclaw(source, bundle, work / "all", "wildclaw", [])
 assert {path.name for path in all_tasks.iterdir()} == {"first", "second", "unselected"}
+
+cache = shutil.copytree(source, source.with_name("wildclaw-run"), copy_function=os.link)
+cache.chmod(0o700)
+normalization = cache / "first" / "setup.normalized"
+normalization.write_bytes(b"#!/bin/sh\\n")
+normalization.replace(cache / "first" / "setup.sh")
+(cache / "normalization-receipt.json").write_text('["first/setup.sh"]')
+assert prepare_wildclaw(source, bundle, work / "cached-all", "wildclaw", []) == cache
+assert not (work / "cached-all").exists()
+assert prepare_wildclaw(source, bundle, work / "all", "wildclaw", []) == all_tasks
+assert (source / "first" / "setup.sh").read_bytes() == b"#!/bin/sh\\r\\n"
+
+(cache / "first" / "setup.sh").write_bytes(b"changed")
+try:
+    prepare_wildclaw(source, bundle, work / "bad-cache", "wildclaw", [])
+except ValueError as exc:
+    assert "snapshot has changed" in str(exc)
+else:
+    raise AssertionError("Modified normalized input was accepted")
 """, str(managed_dir), str(source), str(bundle), str(tmp_path / "work")],
         check=True,
     )
