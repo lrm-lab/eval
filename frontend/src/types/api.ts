@@ -445,6 +445,7 @@ export interface CompareQueryResponse {
     track_slug?: string;
     goal_type?: string;
     scoring_protocol: string;
+    legacy_metric?: string | null;
     comparable: boolean;
     version_drift?: { drifted_task_count: number };
     intersection: {

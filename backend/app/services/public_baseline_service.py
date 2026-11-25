@@ -163,6 +163,9 @@ class PublicBaselineService:
                 "label": source.label,
                 "benchmark_slug": source.benchmark_slug,
                 "url": source.url,
+                "release_id": source.release_id,
+                "legacy_release_id": source.legacy_release_id,
+                "legacy_metric": source.legacy_metric,
                 "dataset_version": source.dataset_version,
                 "split": source.split,
                 "task_count": source.task_count,
@@ -278,6 +281,7 @@ class PublicBaselineService:
                 items.append({
                     "batch_id": batch_id,
                     "local_score_pct": local_pct,
+                    "generation_id": batch["generation_id"],
                     "dataset_version": batch["dataset_version"],
                     "split": batch["split"],
                     "task_count": batch["unique_tasks"],

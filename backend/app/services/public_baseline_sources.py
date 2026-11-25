@@ -49,6 +49,8 @@ class PublicSource:
     task_ids_sha256: str | None
     runner: str | None
     fetch: Callable[[], tuple[list[PublicScore], str | None]]
+    legacy_release_id: str | None = None
+    legacy_metric: str | None = None
 
 
 def _read_json(url: str, *, headers: dict[str, str] | None = None) -> dict[str, Any]:

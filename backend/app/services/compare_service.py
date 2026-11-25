@@ -1886,12 +1886,14 @@ class CompareService:
 
         for rel_id in all_rel_ids:
             meta = rel_info[rel_id]
+            metrics: set[str] = set()
             raw_scores: dict[str, float] = {}
             cells: dict[str, dict[str, Any]] = {}
             for s in subjects:
                 sid = str(s["id"])
                 entry = subj_scores_map[sid].get(rel_id)
                 if entry is not None:
+                    metrics.add(entry["metric"])
                     sc = float(entry["norm_score_100"])
                     raw_scores[sid] = sc
                     cells[sid] = {
@@ -1948,6 +1950,7 @@ class CompareService:
                     "track_slug": meta["track_slug"],
                     "goal_type": meta["goal_type"],
                     "scoring_protocol": "legacy-20261120-csv",
+                    "legacy_metric": next(iter(metrics)) if len(metrics) == 1 else None,
                     "comparable": comparable,
                     "intersection": {
                         "common_covered_tasks": None,
