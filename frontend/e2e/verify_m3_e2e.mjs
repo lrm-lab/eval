@@ -159,13 +159,9 @@ async function verify(browser) {
   await page.waitForSelector('[aria-label="未接入评测题库列表"]', { timeout: 15000 });
   await recordCls('/eval/execution');
 
-  // 2a) Zero docker group badge & live external isolated runner badge (with PID)
-  const dockerBadge = page.locator('[aria-label="docker_group_attached: false"]');
-  await dockerBadge.waitFor({ timeout: 15000 });
-  assert((await dockerBadge.innerText()).includes('docker_group_attached: false'), 'Expected docker_group_attached: false badge');
-  const runnerBadge = page.locator('[aria-label="isolated_runner_ready: true"]');
-  await runnerBadge.waitFor({ timeout: 15000 });
-  assert((await runnerBadge.innerText()).includes('PID'), `Expected live external Runner PID in badge, got: ${await runnerBadge.innerText()}`);
+  // 2a) The evaluation form only displays operational readiness.
+  await page.getByText('评测可启动', { exact: true }).waitFor({ timeout: 15000 });
+  assert(await page.locator('[aria-label^="docker_group_attached:"]').count() === 0, 'Execution form must omit host diagnostics');
 
   // 2b) All 4 runner modes + disabled unintegrated suites
   const runnerRadios = page.locator('[role="radiogroup"][aria-label="评测运行器模式选择"] [role="radio"]');
