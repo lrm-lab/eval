@@ -1,9 +1,13 @@
 import React, { useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
-import { Boxes, Lock, LogIn, Moon, Sun, User } from 'lucide-react';
+import { ArrowRight, Boxes, Lock, Moon, Sun, User } from 'lucide-react';
 import { apiFetch, ApiError } from '../lib/api';
 import { useAppStore } from '../lib/store';
 import type { AuthUser } from '../types/api';
+import './login-page.css';
+
+const backdrop = new URL('./assets/login-datacenter.webp', import.meta.url).href;
+const mobileBackdrop = new URL('./assets/login-datacenter-mobile.webp', import.meta.url).href;
 
 export function LoginPage() {
   const navigate = useNavigate();
@@ -17,6 +21,7 @@ export function LoginPage() {
   const [password, setPassword] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [focusUsername] = useState(() => window.matchMedia('(pointer: fine)').matches);
 
   const returnToRaw = searchParams.get('returnTo') || '/';
   const safeReturnTo = returnToRaw.startsWith('/') && !returnToRaw.startsWith('//') ? returnToRaw : '/';
@@ -47,92 +52,80 @@ export function LoginPage() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col items-center justify-center px-4 py-12 bg-[var(--bg-canvas)] relative overflow-hidden">
-      <div className="lrm-hero-ambient pointer-events-none" />
+    <main className="login-page" aria-labelledby="login-title">
+      <picture className="login-backdrop" aria-hidden="true">
+        <source media="(max-width: 760px)" srcSet={mobileBackdrop} />
+        <img src={backdrop} alt="" width={1672} height={941} fetchPriority="high" />
+      </picture>
 
-      <button
-        type="button"
-        onClick={toggleTheme}
-        aria-label="切换主题"
-        className="fixed top-4 right-4 z-20 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2 text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
-      >
-        {theme === 'light' ? <Moon className="w-4 h-4" /> : <Sun className="w-4 h-4" />}
-      </button>
+      <header className="login-header">
+        <div className="login-brand">
+          <span className="login-brand-icon"><Boxes size={21} aria-hidden="true" /></span>
+          <span>LRM Eval</span>
+        </div>
+        <button type="button" onClick={toggleTheme} aria-label="切换主题" className="login-theme">
+          {theme === 'light' ? <Moon size={19} aria-hidden="true" /> : <Sun size={19} aria-hidden="true" />}
+        </button>
+      </header>
 
-      <div className="relative z-10 w-full max-w-md rounded-2xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-7 shadow-xl">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="inline-flex items-center justify-center w-10 h-10 rounded-xl bg-[var(--brand-primary)] text-white shadow-sm">
-            <Boxes className="w-5 h-5" />
-          </div>
-          <div>
-            <h1 className="m-0 text-lg font-bold tracking-tight text-[var(--text-primary)]">LRM Eval 分析平台</h1>
-            <p className="m-0 text-xs text-[var(--text-secondary)]">
-              Harbor · Direct · VLMEvalKit · 2026-11-20 三线评测平台
-            </p>
-          </div>
+      <div className="login-layout">
+        <div className="login-intro">
+          <h1 id="login-title">大模型与 Agent<br />评测平台</h1>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label htmlFor="login-username" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
-              用户名
-            </label>
-            <div className="relative">
-              <User className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                id="login-username"
-                type="text"
-                autoComplete="username"
-                autoFocus
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="输入内网账号"
-                className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] pl-9 pr-3 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--brand-primary)] outline-none"
-              />
-            </div>
+        <section className="login-panel" aria-labelledby="login-form-title">
+          <div className="login-panel-heading">
+            <h2 id="login-form-title">登录</h2>
+            <p>使用内网账号继续</p>
           </div>
 
-          <div>
-            <label htmlFor="login-password" className="block text-xs font-medium text-[var(--text-secondary)] mb-1.5">
-              密码
-            </label>
-            <div className="relative">
-              <Lock className="w-4 h-4 text-[var(--text-muted)] absolute left-3 top-1/2 -translate-y-1/2" />
-              <input
-                id="login-password"
-                type="password"
-                autoComplete="current-password"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                placeholder="输入登录密码"
-                className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] pl-9 pr-3 py-2 text-sm text-[var(--text-primary)] focus:border-[var(--brand-primary)] outline-none"
-              />
+          <form onSubmit={handleSubmit} aria-busy={submitting} className="login-form">
+            <div className="login-field">
+              <label htmlFor="login-username">用户名</label>
+              <div className="login-input">
+                <User size={17} aria-hidden="true" />
+                <input
+                  id="login-username"
+                  name="username"
+                  type="text"
+                  autoComplete="username"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  autoFocus={focusUsername}
+                  aria-describedby={errorMsg ? 'login-error' : undefined}
+                  value={username}
+                  onChange={(e) => setUsername(e.target.value)}
+                />
+              </div>
             </div>
-          </div>
 
-          {errorMsg && (
-            <div
-              role="alert"
-              className="rounded-lg border border-[var(--sem-err-border)] bg-[var(--sem-err-bg)] px-3 py-2 text-xs text-[var(--sem-err-fg)]"
-            >
-              {errorMsg}
+            <div className="login-field">
+              <label htmlFor="login-password">密码</label>
+              <div className="login-input">
+                <Lock size={17} aria-hidden="true" />
+                <input
+                  id="login-password"
+                  name="password"
+                  type="password"
+                  autoComplete="current-password"
+                  aria-describedby={errorMsg ? 'login-error' : undefined}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                />
+              </div>
             </div>
-          )}
 
-          <button
-            type="submit"
-            disabled={submitting}
-            className="w-full inline-flex items-center justify-center gap-2 rounded-lg bg-[var(--brand-primary)] hover:bg-[var(--brand-hover)] disabled:opacity-60 px-4 py-2.5 text-sm font-semibold text-white lrm-press cursor-pointer"
-          >
-            <LogIn className="w-4 h-4" />
-            <span>{submitting ? '正在验证会话...' : '登录平台'}</span>
-          </button>
-        </form>
+            {errorMsg && (
+              <p id="login-error" role="alert" className="login-error">{errorMsg}</p>
+            )}
 
-        <div className="mt-5 pt-4 border-t border-[var(--border-subtle)] text-[11px] text-[var(--text-muted)] leading-relaxed">
-          本平台采用全站认证 + 项目级授权（RBAC）+ 细粒度证据 Scope（ATIF 轨迹、网关抓包、Holdout 题面、标准答案按角色隔离）。
-        </div>
+            <button type="submit" disabled={submitting} className="login-submit">
+              <span>{submitting ? '正在验证会话…' : '登录平台'}</span>
+              <ArrowRight size={18} aria-hidden="true" />
+            </button>
+          </form>
+        </section>
       </div>
-    </div>
+    </main>
   );
 }
