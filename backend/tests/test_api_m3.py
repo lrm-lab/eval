@@ -17,6 +17,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
+import pytest
 import yaml
 from fastapi.testclient import TestClient
 
@@ -1512,7 +1513,7 @@ def test_m3_s02_reserves_publication_before_dispatch_until_finalization(
             assert submit("team_beta", batch_name).status_code == 409
 
             # A confirmed dispatch rejection releases the location for another team's retry.
-            monkeypatch.setattr(ctx.execution.ipc, "submit_job", lambda _: (503, {"code": "RUNNER_CAPACITY_UNAVAILABLE"}))
+            monkeypatch.setattr(ctx.execution.ipc, "submit_job", lambda _: (503, {"code": "RUNNER_STDIO_CAPACITY_EXHAUSTED"}))
             assert submit("team_alpha", "team-retry-publication").status_code == 503
             assert ctx.db.fetchone("SELECT 1 FROM exec_batch_reservations WHERE batch_name = 'team-retry-publication'") is None
             assert ctx.db.fetchone("SELECT 1 FROM exec_jobs WHERE batch_name = 'team-retry-publication'") is None
@@ -1521,6 +1522,159 @@ def test_m3_s02_reserves_publication_before_dispatch_until_finalization(
             assert retry.status_code == 202, retry.text
             beta, _, _ = clients["team_beta"]
             assert _wait_job_terminal(beta, retry.json()["job_id"])["status"] == "finished"
+
+
+@pytest.mark.parametrize("crash_at", [
+    "before_dispatch_intent", "before_dispatch", "after_acceptance", "after_trial_event", "after_publish",
+])
+def test_m3_s02_web_restart_recovers_runner_reservation(
+    crash_at: str, tmp_path: Path, isolated_settings: Settings, monkeypatch,
+) -> None:
+    def completion(_path, _headers, body):
+        return 200, {
+            "id": "restart-fixture", "model": body["model"],
+            "choices": [{"message": {"role": "assistant", "content": "4"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 2, "completion_tokens": 1, "total_tokens": 3},
+        }
+
+    batch_name = "restart-publication"
+    job_request = {"kind": "direct", "suite_id": "direct-smoke-v1", "selection_mode": "all",
+                   "batch_name": batch_name, "project_id": "team_restart"}
+    crash_code = '''
+import json
+import os
+from pathlib import Path
+import sys
+import time
+
+from fastapi.testclient import TestClient
+from app.config import Settings
+from app.main import create_app
+from tests.conftest import login_client
+
+crash_at, config, request, wire_path = sys.argv[1:]
+settings = Settings(**{name: Path(value) for name, value in json.loads(config).items()},
+                    enable_background_indexer=False, cookie_secure=False)
+app = create_app(settings, run_startup_scan=False)
+service = app.state.ctx.execution
+if crash_at == 'after_publish':
+    def crash_before_reconcile(**kwargs):
+        os._exit(57)
+    service._reconcile_published_job = crash_before_reconcile
+elif crash_at in ('before_dispatch_intent', 'after_trial_event'):
+    emit = service._emit_trusted_event
+    crash_event = 'job_queued' if crash_at == 'before_dispatch_intent' else 'trial_finished'
+    def crash_after_event(job_id, event_type, payload, **kwargs):
+        result = emit(job_id, event_type, payload, **kwargs)
+        if event_type == crash_event:
+            os._exit(57)
+        return result
+    service._emit_trusted_event = crash_after_event
+else:
+    send = service.ipc.submit_job
+    def crash_during_dispatch(payload):
+        if crash_at == 'after_acceptance':
+            assert send(payload)[0] == 202
+        else:
+            fd = os.open(wire_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, 'w', encoding='utf-8') as stream:
+                json.dump(payload, stream)
+        os._exit(57)
+    service.ipc.submit_job = crash_during_dispatch
+with TestClient(app) as client:
+    csrf = login_client(client, 'restart_admin', 'RestartFixture!2026')
+    response = client.post('/api/v1/execution/jobs', headers={'X-CSRF-Token': csrf}, json=json.loads(request))
+    assert response.status_code == 202, response.text
+    time.sleep(12)
+'''
+
+    with _MockChatGatewayServer(completion) as gateway:
+        isolated_settings.config_dir = tmp_path / "config"
+        isolated_settings.tianxi_root = tmp_path / "tianxi"
+        _write_test_config(isolated_settings.config_dir, approval_entries=[], gateway_base_url=gateway.base_url)
+        with _start_external_runner_daemon(isolated_settings):
+            app = create_app(isolated_settings, run_startup_scan=False)
+            owner = create_user(app.state.ctx.db, username="restart_admin", password="RestartFixture!2026",
+                                role="researcher", projects=["team_restart"], scopes=list(ALL_SCOPES))
+            paths = {name: str(getattr(isolated_settings, name)) for name in (
+                "runtime_dir", "config_dir", "tianxi_root", "runner_ipc_socket", "runner_ipc_token_file",
+            )}
+            wire_path = tmp_path / "delayed-submission.json"
+            backend_root = Path(__file__).resolve().parents[1]
+            child = subprocess.run(
+                [sys.executable, "-c", crash_code, crash_at, json.dumps(paths), json.dumps(job_request), str(wire_path)],
+                cwd=backend_root, env={**os.environ, "PYTHONPATH": str(backend_root)},
+                capture_output=True, text=True, timeout=20,
+            )
+            assert child.returncode == 57, child.stderr
+            job = app.state.ctx.db.fetchone("SELECT job_id, status FROM exec_jobs WHERE batch_name = ?", (batch_name,))
+            assert job is not None
+            old_job_id = job["job_id"]
+            published_manifest = isolated_settings.published_batches_dir / batch_name / "publish-manifest.json"
+            manifest_before = published_manifest.read_bytes() if crash_at == "after_publish" else None
+
+            restarted = create_app(isolated_settings, run_startup_scan=False)
+            ctx = restarted.state.ctx
+            if crash_at == "before_dispatch":
+                recover = ctx.execution.ipc.recover_job
+                unavailable, wrong_runner, allow_recovery = threading.Event(), threading.Event(), threading.Event()
+                simulate_wrong_runner = threading.Event()
+
+                def retrying_recovery(job_id):
+                    if not allow_recovery.is_set():
+                        if simulate_wrong_runner.is_set():
+                            wrong_runner.set()
+                            return 404, {"code": "JOB_DISPATCH_ABANDONED", "job_id": job_id,
+                                         "runner_instance_id": "different-instance"}
+                        unavailable.set()
+                        raise OSError("Runner unavailable in fixture")
+                    return recover(job_id)
+
+                monkeypatch.setattr(ctx.execution.ipc, "recover_job", retrying_recovery)
+
+            with TestClient(restarted) as client:
+                csrf = login_client(client, "restart_admin", "RestartFixture!2026")
+                if crash_at == "before_dispatch":
+                    try:
+                        assert unavailable.wait(5)
+                        blocked = client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json=job_request)
+                        assert blocked.status_code == 409
+                        simulate_wrong_runner.set()
+                        assert wrong_runner.wait(5)
+                        blocked = client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json=job_request)
+                        assert blocked.status_code == 409
+                    finally:
+                        allow_recovery.set()
+                if crash_at in ("before_dispatch_intent", "before_dispatch"):
+                    detail = _wait_job_terminal(client, old_job_id)
+                    assert detail["status"] == "interrupted", detail
+                if crash_at == "before_dispatch":
+                    delayed = ctx.execution.ipc.submit_job(json.loads(wire_path.read_text()))
+                    assert delayed == (409, {"code": "JOB_DISPATCH_ABANDONED", "job_id": old_job_id})
+                if crash_at in ("before_dispatch_intent", "before_dispatch"):
+                    retry = client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json=job_request)
+                    assert retry.status_code == 202, retry.text
+                    new_job_id = retry.json()["job_id"]
+                    assert new_job_id != old_job_id
+                    detail = _wait_job_terminal(client, new_job_id)
+                else:
+                    detail = _wait_job_terminal(client, old_job_id)
+
+                assert detail["status"] == "finished", detail
+                events = detail["events"]
+                assert [event["seq_id"] for event in events] == list(range(1, len(events) + 1))
+                event_types = [event["event_type"] for event in events]
+                assert event_types.count("job_started") == event_types.count("reconciled") == 1
+                snapshot = detail["shared_snapshot"]
+                assert event_types.count("trial_finished") == snapshot["totals"]["recorded"]
+                if manifest_before is not None:
+                    assert published_manifest.read_bytes() == manifest_before
+                    assert snapshot["snapshot_digest"] == f"sha256:{hashlib.sha256(manifest_before).hexdigest()}"
+                row = ctx.db.fetchone("SELECT project_id, owner_id, generation_id FROM batches WHERE batch_id = ?",
+                                      (snapshot["batch_id"],))
+                assert row == {"project_id": "team_restart", "owner_id": owner,
+                               "generation_id": snapshot["generation_id"]}
+                assert not ctx.db.fetchall("SELECT job_id FROM exec_batch_reservations")
 
 
 def test_m3_e02_training_opd_empty_prod_state_contract_fixture_and_holdout_guardrail(

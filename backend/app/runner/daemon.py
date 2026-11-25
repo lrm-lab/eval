@@ -14,6 +14,7 @@ for:
                                           `trial_finished`, `paused_by_guard`, `job_interrupted`, `job_failed`,
                                           `runner_completed`).
   - `POST /v1/jobs/<id>/cancel`         : sends graceful SIGTERM to the active child worker.
+  - `POST /v1/jobs/<id>/recover`        : identifies a live job or rejects future dispatches for an absent job ID.
 """
 from __future__ import annotations
 
@@ -33,6 +34,7 @@ import sys
 import threading
 import time
 import urllib.parse
+import uuid
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
@@ -190,9 +192,11 @@ class IsolatedRunnerManager:
         self.logger = logger
         self.gateway_profiles = GatewayProfileRegistry(settings)
         self.runner_id = os.environ.get("LRM_RUNNER_ID", f"isolated-runner-{os.getpid()}")
+        self.instance_id = uuid.uuid4().hex
         self._jobs: dict[str, RunnerJobState] = {}
         # Stdio reservations end when the writer closes, even if IPC status stays finalizing.
         self._stdio_jobs: set[str] = set()
+        self._abandoned_jobs: set[str] = set()
         self._lock = threading.Lock()
         # Bounded per-job (<= 2 MiB) and cumulative (<= 20 MiB) stdio log caps (S-05);
         # non-prod tests may tighten these downward to verify rotation & pruning rapidly.
@@ -243,6 +247,7 @@ class IsolatedRunnerManager:
         return {
             "ok": ok,
             "runner_id": self.runner_id,
+            "runner_instance_id": self.instance_id,
             "runner_pid": os.getpid(),
             "runner_uid": os.getuid(),
             "runner_user": runner_user,
@@ -343,6 +348,8 @@ class IsolatedRunnerManager:
             daemon=True,
         )
         with self._lock:
+            if job_id in self._abandoned_jobs:
+                return 409, {"code": "JOB_DISPATCH_ABANDONED", "job_id": job_id}
             if job_id in self._jobs:
                 return 409, {"code": "JOB_ALREADY_EXISTS", "message": f"Job already submitted: {job_id}"}
             active_jobs = self._stdio_jobs | {job_id}
@@ -376,7 +383,8 @@ class IsolatedRunnerManager:
                 del self._jobs[job_id]
                 raise
         self.logger.info("Accepted isolated job %s kind=%s suite=%s batch=%s", job_id, kind, spec.get("suite_id"), spec.get("batch_name"))
-        return 202, {"ok": True, "job_id": job_id, "runner_id": self.runner_id, "runner_pid": os.getpid()}
+        return 202, {"ok": True, "job_id": job_id, "runner_id": self.runner_id,
+                     "runner_instance_id": self.instance_id, "runner_pid": os.getpid()}
 
     def _execute_job(
         self,
@@ -829,6 +837,15 @@ class IsolatedRunnerManager:
             exit_code=0,
         )
 
+    def recover_job(self, job_id: str) -> tuple[int, dict[str, Any]]:
+        """Check the live registry and prevent any delayed submit for an absent job."""
+        validate_safe_id(job_id, "job_id")
+        with self._lock:
+            if job_id in self._jobs:
+                return 200, {"job_id": job_id}
+            self._abandoned_jobs.add(job_id)
+        return 404, {"code": "JOB_DISPATCH_ABANDONED", "job_id": job_id, "runner_instance_id": self.instance_id}
+
     def get_events(self, job_id: str, after_seq: int) -> tuple[int, dict[str, Any]]:
         with self._lock:
             st = self._jobs.get(job_id)
@@ -925,6 +942,10 @@ def _make_handler(manager: IsolatedRunnerManager, expected_token: str) -> type[h
                     self._send_json(code, body)
                     return
                 parts = [p for p in path.split("/") if p]
+                if len(parts) == 4 and parts[0] == "v1" and parts[1] == "jobs" and parts[3] == "recover":
+                    code, body = manager.recover_job(parts[2])
+                    self._send_json(code, body)
+                    return
                 if len(parts) == 4 and parts[0] == "v1" and parts[1] == "jobs" and parts[3] == "cancel":
                     code, body = manager.cancel_job(parts[2])
                     self._send_json(code, body)

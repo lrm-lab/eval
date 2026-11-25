@@ -10,14 +10,15 @@ import os
 import re
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
 import threading
-import time
 import tomllib
 import uuid
 from datetime import datetime, timezone
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Callable
 
@@ -208,7 +209,110 @@ class ExecutionService:
         self.ipc = RunnerIPCClient(settings)
         self._lock = threading.Lock()
         self._event_cond = threading.Condition()
+        self._stopping = threading.Event()
         self._webhook_dispatch_fn: Callable[[str, dict[str, Any]], None] | None = None
+
+    def start_recovery(self) -> None:
+        if not self.ipc.is_configured or self.db.read_only_mode:
+            return
+        for row in self.db.fetchall("SELECT job_id FROM exec_batch_reservations"):
+            job_id = row["job_id"]
+            threading.Thread(target=self._recover_reserved_job, args=(job_id,), daemon=True,
+                             name=f"lrm-recover-{job_id}").start()
+
+    def stop(self) -> None:
+        self._stopping.set()
+
+    @staticmethod
+    def _check_private_job_file(fd: int) -> None:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600
+                or info.st_uid != os.geteuid() or info.st_nlink != 1):
+            raise PermissionError("Expected private Runner job file")
+
+    def _load_channel_key(self, work_dir: Path) -> str | None:
+        try:
+            fd = os.open(work_dir / ".web-channel.key", os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            with os.fdopen(fd, "r", encoding="ascii") as stream:
+                self._check_private_job_file(stream.fileno())
+                key = stream.read(65)
+            return key if HEX64_RE.fullmatch(key) else None
+        except (OSError, UnicodeError):
+            return None
+
+    def _recover_reserved_job(self, job_id: str) -> None:
+        assert self.settings.runner_work_dir is not None
+        work_dir = self.settings.runner_work_dir / job_id
+        channel_path = work_dir / ".web-events.ndjson"
+        try:
+            validate_safe_id(job_id, "job_id")
+            while not self._stopping.is_set():
+                try:
+                    fd = os.open(channel_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+                    with os.fdopen(fd, "r+b") as lease:
+                        self._check_private_job_file(lease.fileno())
+                        fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        # Load the latest checkpoint only after the previous owner released its lease.
+                        row = self.db.fetchone(
+                            """
+                            SELECT j.params_json FROM exec_jobs j JOIN exec_batch_reservations r USING (job_id)
+                            WHERE j.job_id = ?
+                            """,
+                            (job_id,),
+                        )
+                        if row is None:
+                            return
+                        spec = json.loads(row["params_json"])
+                        key = self._load_channel_key(work_dir)
+                        if spec.get("dispatch_started") is False:
+                            self._interrupt_missing_runner_job(job_id, channel_path, key, never_dispatched=True)
+                            return
+                        status, body = self.ipc.recover_job(job_id)
+                        if status == 404 and body.get("code") == "NOT_FOUND":
+                            # A Runner from before the recovery protocol can still replay accepted jobs.
+                            status, body = self.ipc.get_events(job_id)
+                        if body.get("job_id") == job_id:
+                            if self._confirmed_runner_absence(status, body, job_id, spec):
+                                self._interrupt_missing_runner_job(job_id, channel_path, key)
+                                return
+                            if status == 200:
+                                if key is None:
+                                    self._emit_trusted_event(job_id, "job_recovery_pending", {
+                                        "source": "control_plane",
+                                        "reason": "Runner 已接收作业，但缺少恢复所需的私有事件密钥",
+                                    })
+                                    return
+                                self._sync_runner_job_events(job_id, spec, channel_path, key)
+                                return
+                except (OSError, HTTPException, AppError):
+                    # A held lease or unavailable Runner gives no evidence that a job is absent.
+                    if self.db.fetchone("SELECT 1 FROM exec_batch_reservations WHERE job_id = ?", (job_id,)) is None:
+                        return
+                self._stopping.wait(0.5)
+        finally:
+            self.db.close_thread_connection()
+
+    @staticmethod
+    def _confirmed_runner_absence(status: int, body: dict[str, Any], job_id: str, spec: dict[str, Any]) -> bool:
+        instance = spec.get("runner_instance_id")
+        return bool(instance and status == 404 and body.get("code") == "JOB_DISPATCH_ABANDONED"
+                    and body.get("job_id") == job_id and body.get("runner_instance_id") == instance)
+
+    def _interrupt_missing_runner_job(
+        self, job_id: str, channel_path: Path, channel_secret: str | None, *, never_dispatched: bool = False,
+    ) -> None:
+        if never_dispatched:
+            reason = "Web 进程在开始派发前中断"
+            reason_code = "runner_dispatch_not_started"
+        else:
+            reason = "隔离 Runner 已确认该作业不存在并拒绝迟到的派发"
+            reason_code = "runner_job_absent"
+        self._emit_trusted_event(
+            job_id, "job_interrupted",
+            {"source": "control_plane", "reason": reason, "exit_code": 1},
+            channel_path=channel_path, channel_secret=channel_secret, new_status="interrupted", exit_code=1,
+        )
+        self._dispatch_terminal_notification(job_id, "interrupted", {"reason": reason_code})
 
     # ------------------------------------------------------------------
     # Live External Runner Health Probe (NEVER fakes readiness!)
@@ -257,6 +361,7 @@ class ExecutionService:
             "runner_configured": bool(ipc_health.get("configured")),
             "runner_mode": "external_ipc" if ready else "disconnected_readonly",
             "runner_id": ipc_health.get("runner_id"),
+            "runner_instance_id": ipc_health.get("runner_instance_id"),
             "runner_pid": runner_pid if separate_process else None,
             "runner_user": ipc_health.get("runner_user"),
             "docker_available": bool(ipc_health.get("docker_available", False)),
@@ -1029,6 +1134,18 @@ class ExecutionService:
         out_dir = out_root / batch_name
         if out_dir.is_symlink():
             raise RuntimeError("发布目录不得为符号链接")
+        official = vlmevalkit_scoring_results[OFFICIAL_RESULT_FILE] if OFFICIAL_RESULT_FILE in scoring_files else None
+        pending = spec.get("pending_publication")
+        if pending is not None:
+            published = out_dir / "publish-manifest.json"
+            if (published.is_symlink() or not published.is_file()
+                    or _sha256_bytes(published.read_bytes()) != pending["manifest_sha256"]):
+                raise RuntimeError("重启恢复时未找到已提交的同代发布清单，发布需要对账")
+            return self._reconcile_published_job(
+                job_id=job_id, out_dir=out_dir, source_namespace=source_ns,
+                ownership=(eff_proj, eff_owner, evidence_approval), publication=pending,
+                official=official, channel_path=channel_path, channel_secret=channel_secret,
+            )
         out_dir.mkdir(exist_ok=spec.get("resume_mode") == "native")
         now = utcnow_iso()
 
@@ -1323,6 +1440,11 @@ class ExecutionService:
                 "absent_optional_files": absent_opt,
             }
             pub_bytes = (json.dumps(pub_manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+            publication = {
+                "generation_id": gen_id,
+                "manifest_sha256": _sha256_bytes(pub_bytes),
+                "totals": batch_report_obj["totals"],
+            }
             if source_ns == "runner_published":
                 self._record_runner_submission_meta(
                     batch_name=batch_name,
@@ -1331,10 +1453,30 @@ class ExecutionService:
                     project_id=eff_proj,
                     owner_id=eff_owner,
                     generation_id=gen_id,
-                    manifest_sha256=_sha256_bytes(pub_bytes),
+                    manifest_sha256=publication["manifest_sha256"],
                 )
+            with self.db.transaction() as conn:
+                spec["pending_publication"] = publication
+                conn.execute("UPDATE exec_jobs SET params_json = ? WHERE job_id = ?",
+                             (json.dumps(spec, ensure_ascii=False), job_id))
             _atomic_pub_write(out_dir / "publish-manifest.json", pub_bytes)
-        snap_digest = f"sha256:{_sha256_bytes(pub_bytes)}"
+        return self._reconcile_published_job(
+            job_id=job_id, out_dir=out_dir, source_namespace=source_ns,
+            ownership=(eff_proj, eff_owner, evidence_approval), publication=publication,
+            official=official, channel_path=channel_path, channel_secret=channel_secret,
+        )
+
+    def _reconcile_published_job(
+        self, *, job_id: str, out_dir: Path, source_namespace: str,
+        ownership: tuple[str, str, str], publication: dict[str, Any], official: dict[str, Any] | None,
+        channel_path: Path, channel_secret: str,
+    ) -> dict[str, Any]:
+        batch_name = out_dir.name
+        batch_id = make_batch_id(f"{source_namespace}:{batch_name}")
+        generation_id = publication["generation_id"]
+        manifest_sha256 = publication["manifest_sha256"]
+        snapshot_digest = f"sha256:{manifest_sha256}"
+        project_id, owner_id, evidence_approval = ownership
 
         # Verify published public DTO via managed report.py before indexing (05-1 / I-05)
         report_py = resolve_verified_managed_script(self.settings, "report.py")
@@ -1353,9 +1495,9 @@ class ExecutionService:
         scan_status = self.coordinator.hot.scan_single_harbor_batch(
             out_dir,
             force=True,
-            source_namespace=source_ns,
-            project_override=eff_proj,
-            owner_override=eff_owner,
+            source_namespace=source_namespace,
+            project_override=project_id,
+            owner_override=owner_id,
             approval_override=evidence_approval,
         )
         if scan_status not in ("indexed", "skipped_unchanged"):
@@ -1364,22 +1506,21 @@ class ExecutionService:
         indexed_row = self.db.fetchone(
             """
             SELECT b.batch_id, b.generation_id, b.project_id, b.owner_id, b.evidence_approval,
+                   json_extract(b.checks_json, '$.publish_manifest_sha256') AS manifest_sha256,
                    b.official_status, o.score, o.denominator
             FROM batches b LEFT JOIN official_results o ON o.batch_id = b.batch_id
             WHERE b.batch_id = ?
             """,
-            (reconciled_batch_id,),
+            (batch_id,),
         )
-        if indexed_row is None or str(indexed_row["generation_id"] or "") != gen_id:
+        if (indexed_row is None or indexed_row["generation_id"] != generation_id
+                or indexed_row["manifest_sha256"] != manifest_sha256):
             raise RuntimeError(
-                f"SQLite 对账校验失败: 期望 ({reconciled_batch_id}, {gen_id})，实际 {indexed_row}"
+                f"SQLite 对账校验失败: 批次 {batch_id} 的发布代或清单摘要不一致"
             )
-        if (indexed_row["project_id"], indexed_row["owner_id"], indexed_row["evidence_approval"]) != (
-            eff_proj, eff_owner, evidence_approval
-        ):
+        if (indexed_row["project_id"], indexed_row["owner_id"], indexed_row["evidence_approval"]) != ownership:
             raise RuntimeError("SQLite 发布项目、属主或审批状态对账失败")
-        if OFFICIAL_RESULT_FILE in scoring_files:
-            official = vlmevalkit_scoring_results[OFFICIAL_RESULT_FILE]
+        if official is not None:
             if (
                 indexed_row["official_status"] != "official_verified"
                 or indexed_row["score"] != official["score"]
@@ -1392,25 +1533,25 @@ class ExecutionService:
             "reconciled",
             {
                 "source": "shared_snapshot",
-                "source_namespace": source_ns,
-                "batch_id": reconciled_batch_id,
+                "source_namespace": source_namespace,
+                "batch_id": batch_id,
                 "batch_name": batch_name,
-                "generation_id": gen_id,
+                "generation_id": generation_id,
                 "status": "finished",
-                "snapshot_digest": snap_digest,
-                "totals": batch_report_obj["totals"],
+                "snapshot_digest": snapshot_digest,
+                "totals": publication["totals"],
             },
             channel_path=channel_path,
             channel_secret=channel_secret,
             new_status="finished",
             exit_code=0,
-            batch_id=reconciled_batch_id,
+            batch_id=batch_id,
         )
         return {
-            "batch_id": reconciled_batch_id,
-            "generation_id": gen_id,
-            "source_namespace": source_ns,
-            "snapshot_digest": snap_digest,
+            "batch_id": batch_id,
+            "generation_id": generation_id,
+            "source_namespace": source_namespace,
+            "snapshot_digest": snapshot_digest,
         }
 
     # ------------------------------------------------------------------
@@ -1559,196 +1700,224 @@ class ExecutionService:
             "publish_to_harbor_runs": want_harbor_publish,
         }
 
-        runner_id = str(rhealth.get("runner_id") or "external-isolated-runner")
-        stored_params = {k: v for k, v in runner_spec.items() if k not in ("dataset_path", "config_path")}
-        try:
-            with self.db.transaction() as conn:
-                existing = conn.execute(
-                    """
-                    SELECT 1 FROM exec_batch_reservations WHERE source_namespace = ? AND batch_name = ?
-                    UNION ALL
-                    SELECT 1 FROM exec_jobs
-                    WHERE batch_name = ?
-                      AND status IN ('queued', 'running', 'cancelling', 'finalizing', 'finished')
-                      AND (CASE WHEN json_valid(params_json)
-                                THEN coalesce(json_extract(params_json, '$.publish_to_harbor_runs'), 0)
-                                ELSE 0 END) = ?
-                    LIMIT 1
-                    """,
-                    (source_namespace, batch_name, batch_name, int(want_harbor_publish)),
-                ).fetchone()
-                target = publish_root / batch_name
-                if existing is not None or (resume_mode != "native" and (target.exists() or target.is_symlink())):
-                    raise AppError(409, "BATCH_ALREADY_EXISTS", "目标发布位置已有作业或历史批次", {"batch_name": batch_name})
+        key_path = work_dir / ".web-channel.key"
+        key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(key_fd, "w", encoding="ascii") as key_file:
+            key_file.write(channel_secret)
+            key_file.flush()
+            os.fsync(key_file.fileno())
 
-                job_owner = user.user_id
-                if resume_mode == "native":
-                    parent = conn.execute(
+        lease_fd = os.open(channel_path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        with os.fdopen(lease_fd, "r+b") as lease:
+            self._check_private_job_file(lease.fileno())
+            fcntl.flock(lease, fcntl.LOCK_EX)
+            runner_id = str(rhealth.get("runner_id") or "external-isolated-runner")
+            stored_params = {k: v for k, v in runner_spec.items() if k not in ("dataset_path", "config_path")}
+            stored_params["runner_instance_id"] = rhealth.get("runner_instance_id")
+            stored_params["dispatch_started"] = False
+            try:
+                with self.db.transaction() as conn:
+                    existing = conn.execute(
                         """
-                        SELECT project_id, owner_id, params_json FROM exec_jobs
-                        WHERE job_id = ? AND batch_name = ? AND kind = 'harbor'
-                          AND status IN ('paused_by_guard', 'interrupted', 'failed')
+                        SELECT 1 FROM exec_batch_reservations WHERE source_namespace = ? AND batch_name = ?
+                        UNION ALL
+                        SELECT 1 FROM exec_jobs
+                        WHERE batch_name = ?
+                          AND status IN ('queued', 'running', 'cancelling', 'finalizing', 'finished')
+                          AND (CASE WHEN json_valid(params_json)
+                                    THEN coalesce(json_extract(params_json, '$.publish_to_harbor_runs'), 0)
+                                    ELSE 0 END) = ?
+                        LIMIT 1
                         """,
-                        (parent_job_id, batch_name),
+                        (source_namespace, batch_name, batch_name, int(want_harbor_publish)),
                     ).fetchone()
-                    if (
-                        parent is None
-                        or parent["project_id"] != spec["project_id"]
-                        or bool(json.loads(parent["params_json"]).get("publish_to_harbor_runs", False)) != want_harbor_publish
-                    ):
-                        raise AppError(409, "RESUME_UNSUPPORTED", "原生续跑必须继承原作业发布位置与项目")
-                    job_owner = parent["owner_id"]
+                    target = publish_root / batch_name
+                    if existing is not None or (resume_mode != "native" and (target.exists() or target.is_symlink())):
+                        raise AppError(409, "BATCH_ALREADY_EXISTS", "目标发布位置已有作业或历史批次", {"batch_name": batch_name})
 
-                conn.execute(
-                    """
-                    INSERT INTO exec_jobs (
-                        job_id, kind, project_id, owner_id, batch_name, status,
-                        params_json, command_preview, runner_id, log_ref, notify_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        job_id, spec["kind"], spec["project_id"], job_owner, batch_name,
-                        json.dumps(stored_params, ensure_ascii=False), spec["command_preview"], runner_id,
-                        f"runner_work:{job_id}/runner_stdio.log",
-                        json.dumps(spec["notify"], ensure_ascii=False), now,
-                    ),
-                )
-                conn.execute(
-                    "INSERT INTO exec_batch_reservations (source_namespace, batch_name, job_id) VALUES (?, ?, ?)",
-                    (source_namespace, batch_name, job_id),
-                )
-        except Exception:
-            shutil.rmtree(work_dir, ignore_errors=True)
-            shutil.rmtree(evidence_dir, ignore_errors=True)
-            raise
+                    job_owner = user.user_id
+                    if resume_mode == "native":
+                        parent = conn.execute(
+                            """
+                            SELECT project_id, owner_id, params_json FROM exec_jobs
+                            WHERE job_id = ? AND batch_name = ? AND kind = 'harbor'
+                              AND status IN ('paused_by_guard', 'interrupted', 'failed')
+                            """,
+                            (parent_job_id, batch_name),
+                        ).fetchone()
+                        if (
+                            parent is None
+                            or parent["project_id"] != spec["project_id"]
+                            or bool(json.loads(parent["params_json"]).get("publish_to_harbor_runs", False)) != want_harbor_publish
+                        ):
+                            raise AppError(409, "RESUME_UNSUPPORTED", "原生续跑必须继承原作业发布位置与项目")
+                        job_owner = parent["owner_id"]
 
-        # Dispatch to the REAL external Isolated Runner Daemon over authenticated IPC!
-        try:
-            ipc_status, ipc_body = self.ipc.submit_job(
+                    conn.execute(
+                        """
+                        INSERT INTO exec_jobs (
+                            job_id, kind, project_id, owner_id, batch_name, status,
+                            params_json, command_preview, runner_id, log_ref, notify_json, created_at
+                        ) VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            job_id, spec["kind"], spec["project_id"], job_owner, batch_name,
+                            json.dumps(stored_params, ensure_ascii=False), spec["command_preview"], runner_id,
+                            f"runner_work:{job_id}/runner_stdio.log",
+                            json.dumps(spec["notify"], ensure_ascii=False), now,
+                        ),
+                    )
+                    conn.execute(
+                        "INSERT INTO exec_batch_reservations (source_namespace, batch_name, job_id) VALUES (?, ?, ?)",
+                        (source_namespace, batch_name, job_id),
+                    )
+            except Exception:
+                shutil.rmtree(work_dir, ignore_errors=True)
+                shutil.rmtree(evidence_dir, ignore_errors=True)
+                raise
+
+            planned_total = (len(spec["planned_tasks"]) * spec["attempts"]) if spec["planned_tasks"] else 0
+            self._emit_trusted_event(
+                job_id,
+                "job_queued",
                 {
-                    "job_id": job_id,
-                    "channel_secret": channel_secret,
-                    "spec": runner_spec,
+                    "source": "runner_live",
+                    "runner_id": runner_id,
+                    "kind": spec["kind"],
+                    "batch_name": batch_name,
+                    "run_scope": spec["effective_run_scope"],
+                    "vlmevalkit_mode": spec.get("vlmevalkit_mode"),
+                    "forced_infer_by_task_selection": spec.get("forced_infer_by_task_selection", False),
+                    "progress": {"planned": planned_total, "completed": 0, "scored": 0, "errors": 0},
+                },
+                channel_path=channel_path,
+                channel_secret=channel_secret,
+            )
+
+            # Persist the dispatch intent before sending anything to Runner.
+            stored_params["dispatch_started"] = True
+            with self.db.transaction() as conn:
+                conn.execute("UPDATE exec_jobs SET params_json = ? WHERE job_id = ?",
+                             (json.dumps(stored_params, ensure_ascii=False), job_id))
+            try:
+                ipc_status, ipc_body = self.ipc.submit_job(
+                    {
+                        "job_id": job_id,
+                        "channel_secret": channel_secret,
+                        "spec": runner_spec,
+                    }
+                )
+            except AppError:
+                with self.db.transaction() as conn:
+                    conn.execute("DELETE FROM exec_jobs WHERE job_id = ?", (job_id,))
+                shutil.rmtree(work_dir, ignore_errors=True)
+                shutil.rmtree(evidence_dir, ignore_errors=True)
+                raise
+            except (OSError, HTTPException):
+                # A lost POST reply can leave an accepted job on Runner. Keep its reservation
+                # until the authenticated event monitor establishes a terminal outcome.
+                ipc_status, ipc_body = 202, {}
+
+            definite_rejection = (
+                ipc_body.get("code") in {
+                    "AUTH_REQUIRED", "GATEWAY_KEY_MISSING", "INVALID_JSON", "JOB_DISPATCH_ABANDONED",
+                    "RESOURCE_NOT_FOUND", "RESUME_UNSUPPORTED", "RUNNER_CAPABILITY_UNAVAILABLE",
+                    "RUNNER_STDIO_CAPACITY_EXHAUSTED", "SCHEMA_VALIDATION_FAILED", "STAGING_PERMISSION_UNSAFE",
                 }
             )
-        except AppError:
-            with self.db.transaction() as conn:
-                conn.execute("DELETE FROM exec_jobs WHERE job_id = ?", (job_id,))
-            shutil.rmtree(work_dir, ignore_errors=True)
-            shutil.rmtree(evidence_dir, ignore_errors=True)
-            raise
-        except OSError:
-            # A lost POST reply can leave an accepted job on Runner. Keep its reservation
-            # until the authenticated event monitor establishes a terminal outcome.
-            ipc_status, ipc_body = 202, {}
+            if definite_rejection:
+                with self.db.transaction() as conn:
+                    conn.execute("DELETE FROM exec_jobs WHERE job_id = ?", (job_id,))
+                shutil.rmtree(work_dir, ignore_errors=True)
+                shutil.rmtree(evidence_dir, ignore_errors=True)
+                raise AppError(
+                    ipc_status if 400 <= ipc_status < 600 else 503,
+                    str(ipc_body.get("code") or "RUNNER_REJECTED"),
+                    str(ipc_body.get("message") or f"隔离 Runner 拒绝执行作业 (HTTP {ipc_status})"),
+                    ipc_body.get("detail") if isinstance(ipc_body.get("detail"), dict) else None,
+                )
 
-        if ipc_status != 202:
-            with self.db.transaction() as conn:
-                conn.execute("DELETE FROM exec_jobs WHERE job_id = ?", (job_id,))
-            shutil.rmtree(work_dir, ignore_errors=True)
-            shutil.rmtree(evidence_dir, ignore_errors=True)
-            raise AppError(
-                ipc_status if 400 <= ipc_status < 600 else 503,
-                str(ipc_body.get("code") or "RUNNER_REJECTED"),
-                str(ipc_body.get("message") or f"隔离 Runner 拒绝执行作业 (HTTP {ipc_status})"),
-                ipc_body.get("detail") if isinstance(ipc_body.get("detail"), dict) else None,
+            reply_runner_id = str(ipc_body.get("runner_id") or runner_id)
+            reply_instance = ipc_body.get("runner_instance_id") or stored_params["runner_instance_id"]
+            if reply_runner_id != runner_id or reply_instance != stored_params["runner_instance_id"]:
+                runner_id = reply_runner_id
+                stored_params["runner_instance_id"] = reply_instance
+                with self.db.transaction() as conn:
+                    conn.execute("UPDATE exec_jobs SET runner_id = ?, params_json = ? WHERE job_id = ?",
+                                 (runner_id, json.dumps(stored_params, ensure_ascii=False), job_id))
+
+            # The monitor retains the same flock after this request closes its descriptor.
+            monitor_fd = os.dup(lease.fileno())
+            t = threading.Thread(
+                target=self._monitor_runner_job,
+                args=(monitor_fd, job_id, stored_params, channel_path, channel_secret),
+                name=f"lrm-ipc-sync-{job_id}", daemon=True,
             )
+            try:
+                t.start()
+            except BaseException:
+                os.close(monitor_fd)
+                raise
 
-        reply_runner_id = str(ipc_body.get("runner_id") or runner_id)
-        if reply_runner_id != runner_id:
-            runner_id = reply_runner_id
-            with self.db.transaction() as conn:
-                conn.execute("UPDATE exec_jobs SET runner_id = ? WHERE job_id = ?", (runner_id, job_id))
-
-        planned_total = (len(spec["planned_tasks"]) * spec["attempts"]) if spec["planned_tasks"] else 0
-        self._emit_trusted_event(
-            job_id,
-            "job_queued",
-            {
-                "source": "runner_live",
+            return {
+                "job_id": job_id,
+                "status": "queued",
                 "runner_id": runner_id,
                 "kind": spec["kind"],
                 "batch_name": batch_name,
-                "run_scope": spec["effective_run_scope"],
                 "vlmevalkit_mode": spec.get("vlmevalkit_mode"),
                 "forced_infer_by_task_selection": spec.get("forced_infer_by_task_selection", False),
-                "progress": {"planned": planned_total, "completed": 0, "scored": 0, "errors": 0},
-            },
-            channel_path=channel_path,
-            channel_secret=channel_secret,
-        )
+                "effective_run_scope": spec["effective_run_scope"],
+                "effective_official_status": spec["effective_official_status"],
+                "command_preview": spec["command_preview"],
+                "stream_url": f"/api/v1/execution/jobs/{job_id}/stream",
+                "warnings": spec["warnings"],
+            }
 
-        # Start IPC event synchronization monitor for this job
-        t = threading.Thread(
-            target=self._sync_runner_job_events,
-            args=(job_id, stored_params, work_dir, evidence_dir, channel_path, channel_secret, want_harbor_publish),
-            name=f"lrm-ipc-sync-{job_id}",
-            daemon=True,
-        )
-        t.start()
-
-        return {
-            "job_id": job_id,
-            "status": "queued",
-            "runner_id": runner_id,
-            "kind": spec["kind"],
-            "batch_name": batch_name,
-            "vlmevalkit_mode": spec.get("vlmevalkit_mode"),
-            "forced_infer_by_task_selection": spec.get("forced_infer_by_task_selection", False),
-            "effective_run_scope": spec["effective_run_scope"],
-            "effective_official_status": spec["effective_official_status"],
-            "command_preview": spec["command_preview"],
-            "stream_url": f"/api/v1/execution/jobs/{job_id}/stream",
-            "warnings": spec["warnings"],
-        }
+    def _monitor_runner_job(
+        self, lease_fd: int, job_id: str, spec: dict[str, Any], channel_path: Path, channel_secret: str,
+    ) -> None:
+        try:
+            self._sync_runner_job_events(job_id, spec, channel_path, channel_secret)
+        finally:
+            os.close(lease_fd)
 
     def _sync_runner_job_events(
         self,
         job_id: str,
         spec: dict[str, Any],
-        work_dir: Path,
-        evidence_dir: Path,
         channel_path: Path,
         channel_secret: str,
-        want_harbor_publish: bool,
     ) -> None:
         """Consume ONLY HMAC-authenticated events from the external Isolated Runner Daemon via IPC,
         persist monotonic seq_ids into SQLite, and invoke Common Finalizer upon completion."""
-        runner_cursor = 0
-        consecutive_ipc_errors = 0
+        runner_done = False
+        assert self.settings.evidence_store_dir is not None
         try:
-            while True:
+            row = self.db.fetchone(
+                """
+                SELECT coalesce(max(json_extract(payload_json, '$.runner_seq')), 0) AS runner_cursor
+                FROM exec_job_events WHERE job_id = ?
+                """,
+                (job_id,),
+            )
+            runner_cursor = int(row["runner_cursor"]) if row is not None else 0
+            while not self._stopping.is_set():
                 try:
                     code, body = self.ipc.get_events(job_id, after_seq=runner_cursor, timeout=5.0)
-                    consecutive_ipc_errors = 0
-                except (AppError, OSError) as exc:
-                    consecutive_ipc_errors += 1
-                    if consecutive_ipc_errors >= 25:
-                        self._emit_trusted_event(
-                            job_id,
-                            "job_failed",
-                            {"source": "control_plane", "reason": f"隔离 Runner IPC 失联: {type(exc).__name__}", "exit_code": 1},
-                            channel_path=channel_path,
-                            channel_secret=channel_secret,
-                            new_status="failed",
-                            exit_code=1,
-                        )
-                        self._dispatch_terminal_notification(job_id, "failed", {"reason": "runner_ipc_lost"})
-                        return
-                    time.sleep(0.1)
+                    if code == 404:
+                        fence_status, fence_body = self.ipc.recover_job(job_id)
+                        if self._confirmed_runner_absence(fence_status, fence_body, job_id, spec):
+                            self._interrupt_missing_runner_job(job_id, channel_path, channel_secret)
+                            return
+                except (AppError, OSError, HTTPException):
+                    self._stopping.wait(0.5)
                     continue
 
-                if code != 200:
-                    self._emit_trusted_event(
-                        job_id,
-                        "job_failed",
-                        {"source": "control_plane", "reason": f"隔离 Runner 状态查询异常 (HTTP {code})", "exit_code": 1},
-                        channel_path=channel_path,
-                        channel_secret=channel_secret,
-                        new_status="failed",
-                        exit_code=1,
-                    )
-                    self._dispatch_terminal_notification(job_id, "failed", {"http_status": code})
+                if code != 200 or body.get("job_id") != job_id:
+                    self._stopping.wait(0.5)
+                    continue
+                if self._stopping.is_set():
                     return
 
                 events = body.get("events") or []
@@ -1761,7 +1930,6 @@ class ExecutionService:
                     runner_cursor = rseq
                     etype = str(rec["event_type"])
                     payload = dict(rec["payload"])
-                    payload.pop("runner_seq", None)
 
                     if etype == "job_started":
                         self._emit_trusted_event(
@@ -1781,6 +1949,7 @@ class ExecutionService:
                             channel_secret=channel_secret,
                         )
                     elif etype in ("paused_by_guard", "job_interrupted", "job_failed"):
+                        runner_done = True
                         done_tasks = payload.get("completed_task_ids") or []
                         if done_tasks:
                             spec["completed_task_ids"] = list(done_tasks)
@@ -1807,6 +1976,7 @@ class ExecutionService:
                         self._dispatch_terminal_notification(job_id, new_st, {"exit_code": rc})
                         return
                     elif etype == "runner_completed":
+                        runner_done = True
                         done_tasks = payload.get("completed_task_ids") or []
                         spec["completed_task_ids"] = list(done_tasks)
                         with self.db.transaction() as conn:
@@ -1819,22 +1989,31 @@ class ExecutionService:
                             job_id=job_id,
                             spec=spec,
                             trial_outcomes=trial_outcomes,
-                            evidence_dir=evidence_dir,
+                            evidence_dir=self.settings.evidence_store_dir / job_id,
                             channel_path=channel_path,
                             channel_secret=channel_secret,
-                            publish_to_harbor_runs=want_harbor_publish,
+                            publish_to_harbor_runs=bool(spec.get("publish_to_harbor_runs")),
                             vlmevalkit_scoring_results=payload.get("vlmevalkit_scoring_results"),
                         )
                         self._dispatch_terminal_notification(job_id, "finished", rec_info)
                         return
 
-                time.sleep(0.05)
+                self._stopping.wait(0.05)
         except Exception as exc:
             try:
+                if self.db.fetchone("SELECT 1 FROM exec_batch_reservations WHERE job_id = ?", (job_id,)) is None:
+                    return
+                reason = redact_text(str(exc)) or "Runner reconciliation error"
+                if not runner_done:
+                    self._emit_trusted_event(
+                        job_id, "job_recovery_pending", {"source": "control_plane", "reason": reason},
+                        channel_path=channel_path, channel_secret=channel_secret,
+                    )
+                    return
                 self._emit_trusted_event(
                     job_id,
                     "job_failed",
-                    {"source": "control_plane", "reason": redact_text(str(exc)) or "finalizer error", "exit_code": 1},
+                    {"source": "control_plane", "reason": reason, "exit_code": 1},
                     channel_path=channel_path,
                     channel_secret=channel_secret,
                     new_status="failed",
