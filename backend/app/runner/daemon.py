@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 import urllib.parse
+from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -189,6 +190,8 @@ class IsolatedRunnerManager:
         self.gateway_profiles = GatewayProfileRegistry(settings)
         self.runner_id = os.environ.get("LRM_RUNNER_ID", f"isolated-runner-{os.getpid()}")
         self._jobs: dict[str, RunnerJobState] = {}
+        # Stdio reservations end when the writer closes, even if IPC status stays finalizing.
+        self._stdio_jobs: set[str] = set()
         self._lock = threading.Lock()
         # Bounded per-job (<= 2 MiB) and cumulative (<= 20 MiB) stdio log caps (S-05);
         # non-prod tests may tighten these downward to verify rotation & pruning rapidly.
@@ -202,23 +205,8 @@ class IsolatedRunnerManager:
             if raw_tot.isdigit():
                 tot_bytes = max(4096, min(MAX_TOTAL_JOB_STDIO_BYTES, int(raw_tot)))
         self._job_stdio_segment_bytes = seg_bytes
+        self._job_stdio_reservation_bytes = seg_bytes * (1 + MAX_JOB_STDIO_BACKUP_COUNT)
         self._job_stdio_max_total_bytes = tot_bytes
-
-    def _active_job_ids(self) -> set[str]:
-        with self._lock:
-            return {
-                jid
-                for jid, st in self._jobs.items()
-                if st.status in ("queued", "running", "cancelling", "finalizing")
-            }
-
-    def _prune_job_stdio_logs(self) -> None:
-        if self.settings.runner_work_dir is not None:
-            enforce_job_stdio_retention_cap(
-                self.settings.runner_work_dir,
-                max_total_bytes=self._job_stdio_max_total_bytes,
-                active_job_ids=self._active_job_ids(),
-            )
 
     def health(self) -> dict[str, Any]:
         try:
@@ -326,18 +314,8 @@ class IsolatedRunnerManager:
         assert self.settings.runner_work_dir is not None and self.settings.evidence_store_dir is not None
         work_dir = self.settings.runner_work_dir / job_id
         evidence_dir = self.settings.evidence_store_dir / job_id
-        work_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(work_dir, 0o700)
-        evidence_dir.mkdir(parents=True, exist_ok=True)
-        os.chmod(evidence_dir, 0o700)
-
         channel_path = work_dir / ".trusted-events.ndjson"
-        channel_path.touch(exist_ok=True)
-        os.chmod(channel_path, 0o600)
         log_path = work_dir / "runner_stdio.log"
-        log_path.touch(exist_ok=True)
-        os.chmod(log_path, 0o600)
-        self._prune_job_stdio_logs()
 
         # Resolve gateway credentials strictly on Runner side (0600 gateways.env / Runner env)
         self.gateway_profiles.reload()
@@ -357,18 +335,45 @@ class IsolatedRunnerManager:
             return exc.status_code, {"code": code, "message": exc.message, "detail": exc.detail}
 
         state = RunnerJobState(job_id, channel_path, channel_secret)
-        with self._lock:
-            if job_id in self._jobs:
-                return 409, {"code": "JOB_ALREADY_EXISTS", "message": f"Job already submitted: {job_id}"}
-            self._jobs[job_id] = state
-
         t = threading.Thread(
             target=self._execute_job,
             args=(state, spec, work_dir, evidence_dir, log_path, gw_pub, gw_key or ""),
             name=f"runner-job-{job_id}",
             daemon=True,
         )
-        t.start()
+        with self._lock:
+            if job_id in self._jobs:
+                return 409, {"code": "JOB_ALREADY_EXISTS", "message": f"Job already submitted: {job_id}"}
+            active_jobs = self._stdio_jobs | {job_id}
+            stdio_capacity_error = {
+                "code": "RUNNER_STDIO_CAPACITY_EXHAUSTED",
+                "message": "隔离 Runner 暂无可预留的作业日志额度，请在运行中的作业结束后重试",
+            }
+            if len(active_jobs) * self._job_stdio_reservation_bytes > self._job_stdio_max_total_bytes:
+                return 503, stdio_capacity_error
+            retention = enforce_job_stdio_retention_cap(
+                self.settings.runner_work_dir,
+                max_total_bytes=self._job_stdio_max_total_bytes,
+                active_job_ids=active_jobs,
+                reserve_per_active_job=self._job_stdio_reservation_bytes,
+            )
+            if retention["committed_bytes_after"] > self._job_stdio_max_total_bytes:
+                return 503, stdio_capacity_error
+
+            work_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(work_dir, 0o700)
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            os.chmod(evidence_dir, 0o700)
+            channel_path.touch(exist_ok=True)
+            os.chmod(channel_path, 0o600)
+            self._jobs[job_id] = state
+            self._stdio_jobs.add(job_id)
+            try:
+                t.start()
+            except RuntimeError:
+                self._stdio_jobs.remove(job_id)
+                del self._jobs[job_id]
+                raise
         self.logger.info("Accepted isolated job %s kind=%s suite=%s batch=%s", job_id, kind, spec.get("suite_id"), spec.get("batch_name"))
         return 202, {"ok": True, "job_id": job_id, "runner_id": self.runner_id, "runner_pid": os.getpid()}
 
@@ -382,33 +387,40 @@ class IsolatedRunnerManager:
         gw_pub: dict[str, Any],
         gw_key: str,
     ) -> None:
-        kind = str(spec["kind"])
-        planned_tasks: list[str] = list(spec.get("planned_tasks") or [])
-        attempts = int(spec.get("attempts") or 1)
-        total_planned = len(planned_tasks) * attempts
-
-        state.emit(
-            "job_started",
-            {
-                "source": "runner_live",
-                "runner_id": self.runner_id,
-                "runner_pid": os.getpid(),
-                "kind": kind,
-                "cgroup_telemetry": _read_cgroup_telemetry(),
-                "progress": {"planned": total_planned, "completed": 0, "scored": 0, "errors": 0},
-            },
-            new_status="running",
-        )
-
         try:
-            if kind == "direct":
-                self._run_real_direct(state, spec, work_dir, evidence_dir, log_path, gw_pub, gw_key, total_planned)
-            elif kind in ("harbor", "harbor_gateway"):
-                self._run_real_framework_cli(state, spec, work_dir, evidence_dir, log_path, gw_pub, gw_key, total_planned, is_vlm=False)
-            elif kind == "vlmevalkit":
-                self._run_real_framework_cli(state, spec, work_dir, evidence_dir, log_path, gw_pub, gw_key, total_planned, is_vlm=True)
-            else:
-                raise RuntimeError(f"Unsupported runner kind: {kind}")
+            kind = str(spec["kind"])
+            planned_tasks: list[str] = list(spec.get("planned_tasks") or [])
+            attempts = int(spec.get("attempts") or 1)
+            total_planned = len(planned_tasks) * attempts
+            state.emit(
+                "job_started",
+                {
+                    "source": "runner_live",
+                    "runner_id": self.runner_id,
+                    "runner_pid": os.getpid(),
+                    "kind": kind,
+                    "cgroup_telemetry": _read_cgroup_telemetry(),
+                    "progress": {"planned": total_planned, "completed": 0, "scored": 0, "errors": 0},
+                },
+                new_status="running",
+            )
+            stdio_writer = BoundedJobStdioWriter(
+                log_path,
+                max_segment_bytes=self._job_stdio_segment_bytes,
+                backup_count=MAX_JOB_STDIO_BACKUP_COUNT,
+            )
+            with closing(stdio_writer):
+                if kind == "direct":
+                    self._run_real_direct(
+                        state, spec, work_dir, evidence_dir, stdio_writer, gw_pub, gw_key, total_planned,
+                    )
+                elif kind in ("harbor", "harbor_gateway", "vlmevalkit"):
+                    self._run_real_framework_cli(
+                        state, spec, work_dir, evidence_dir, stdio_writer, gw_pub, gw_key, total_planned,
+                        is_vlm=(kind == "vlmevalkit"),
+                    )
+                else:
+                    raise RuntimeError(f"Unsupported runner kind: {kind}")
         except Exception as exc:
             self.logger.exception("Runner job %s failed", state.job_id)
             state.emit(
@@ -417,6 +429,9 @@ class IsolatedRunnerManager:
                 new_status="failed",
                 exit_code=1,
             )
+        finally:
+            with self._lock:
+                self._stdio_jobs.remove(state.job_id)
 
     def _run_real_direct(
         self,
@@ -424,7 +439,7 @@ class IsolatedRunnerManager:
         spec: dict[str, Any],
         work_dir: Path,
         evidence_dir: Path,
-        log_path: Path,
+        stdio_writer: BoundedJobStdioWriter,
         gw_pub: dict[str, Any],
         gw_key: str,
         total_planned: int,
@@ -460,11 +475,6 @@ class IsolatedRunnerManager:
                 "LRM_TRUSTED_EVENT_FD": str(write_fd),
                 "OPENAI_API_KEY": gw_key,
             }
-        )
-        stdio_writer = BoundedJobStdioWriter(
-            log_path,
-            max_segment_bytes=self._job_stdio_segment_bytes,
-            backup_count=MAX_JOB_STDIO_BACKUP_COUNT,
         )
         proc = subprocess.Popen(
             [sys.executable, str(worker_script), str(cfg_file)],
@@ -535,12 +545,6 @@ class IsolatedRunnerManager:
             rc = proc.wait(timeout=30)
         finally:
             drain_thread.join(timeout=10)
-            stdio_writer.close()
-            try:
-                os.chmod(log_path, 0o600)
-            except OSError:
-                pass
-            self._prune_job_stdio_logs()
         if state.cancel_event.is_set() or rc in (-signal.SIGTERM, 143):
             state.emit(
                 "job_interrupted",
@@ -587,7 +591,7 @@ class IsolatedRunnerManager:
         spec: dict[str, Any],
         work_dir: Path,
         evidence_dir: Path,
-        log_path: Path,
+        stdio_writer: BoundedJobStdioWriter,
         gw_pub: dict[str, Any],
         gw_key: str,
         total_planned: int,
@@ -630,11 +634,6 @@ class IsolatedRunnerManager:
             extra_env["PYTHONPATH"] = os.environ["LRM_RUNNER_OPENENV_PYTHONPATH"]
 
         child_env = build_sanitized_subprocess_env(extra_env)
-        stdio_writer = BoundedJobStdioWriter(
-            log_path,
-            max_segment_bytes=self._job_stdio_segment_bytes,
-            backup_count=MAX_JOB_STDIO_BACKUP_COUNT,
-        )
         proc = subprocess.Popen(
             cmd,
             cwd=str(effective_work_dir),
@@ -765,12 +764,6 @@ class IsolatedRunnerManager:
             _harvest_results()
         finally:
             drain_thread.join(timeout=10)
-            stdio_writer.close()
-            try:
-                os.chmod(log_path, 0o600)
-            except OSError:
-                pass
-            self._prune_job_stdio_logs()
 
         done_tasks = sorted({t["task_id"] for t in trial_outcomes if t.get("status") in ("scored", "unscored")})
         if state.cancel_event.is_set() or rc in (-signal.SIGTERM, 143):

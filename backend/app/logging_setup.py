@@ -161,6 +161,13 @@ class BoundedJobStdioWriter:
         self._cur_size = 0
         self._dir = os.open(log_path.parent, os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
+            for idx in range(1, self.backup_count + 1):
+                try:
+                    st = os.stat(f"{log_path.name}.{idx}", dir_fd=self._dir, follow_symlinks=False)
+                except FileNotFoundError:
+                    continue
+                if stat.S_ISREG(st.st_mode) and st.st_size > self.max_segment_bytes:
+                    raise OSError("Existing rotated stdio segment exceeds quota")
             self._open_active()
         except BaseException:
             os.close(self._dir)
