@@ -37,6 +37,7 @@ interface CompareOptionsResp {
     batch_id: string;
     batch_name: string;
     benchmark_slug: string | null;
+    dataset_release_id: string | null;
     model_canonical: string | null;
     harness: string | null;
     scoring_protocol: string;
@@ -132,6 +133,13 @@ interface TaskDiffResp {
   total: number;
 }
 
+interface ComparisonScope {
+  sample_set_id?: string;
+  dataset_release_ids?: string[];
+  legacy_metric?: string;
+  legacy_scale_type?: string;
+}
+
 interface SavedOpenResp {
   short_id: string;
   name: string;
@@ -142,7 +150,7 @@ interface SavedOpenResp {
       baseline_subject_id?: string;
       scoring_protocol?: string;
       regression_threshold_pp?: number;
-      scope?: { sample_set_id?: string };
+      scope?: ComparisonScope;
     };
     bound_batches?: Array<{ subject_id: string; alias: string; batch_id: string; generation_id: string }>;
   };
@@ -303,6 +311,9 @@ export function ComparePage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const location = useLocation();
   const navigate = useNavigate();
+  const groupedReturnTo = location.state?.groupedReturnTo;
+  const groupedReturn = typeof groupedReturnTo === 'string' && groupedReturnTo.startsWith('/benchmarks/')
+    ? groupedReturnTo : null;
 
   const user = useAppStore((s) => s.user);
   const compareBasket = useAppStore((s) => s.compareBasket);
@@ -324,6 +335,9 @@ export function ComparePage() {
   });
   const [enableFaultsAsZero, setEnableFaultsAsZero] = useState<boolean>(true);
   const [sampleSetId, setSampleSetId] = useState<string>('');
+  const [comparisonScope, setComparisonScope] = useState<ComparisonScope>();
+  const scopedReleaseIds = comparisonScope?.dataset_release_ids;
+  const hasFixedRelease = Boolean(scopedReleaseIds?.length);
   const [presetsExpanded, setPresetsExpanded] = useState(false);
   const [diffFilter, setDiffFilter] = useState<DiffFilterKind>(() => parseDiffFilter(searchParams.get('diff_filter')));
   const [diffSubjectA, setDiffSubjectA] = useState<string>(() => searchParams.get('diff_a') || '');
@@ -375,7 +389,7 @@ export function ComparePage() {
         }
         return next;
       },
-      { replace: true }
+      { replace: true, state: location.state }
     );
   };
 
@@ -400,6 +414,7 @@ export function ComparePage() {
   const savedOpenQ = useQuery({
     queryKey: ['compare-saved-open', openId],
     enabled: Boolean(openId) && activeCmpIdRef.current !== openId,
+    retry: (count, error) => !(error instanceof ApiError && error.status < 500) && count < 1,
     queryFn: () => apiFetch<SavedOpenResp>(`/api/v1/compare/s/${encodeURIComponent(openId!)}`),
   });
 
@@ -456,7 +471,7 @@ export function ComparePage() {
     },
     onError: (err: Error) => {
       setTaskDiff(null);
-      if (err instanceof ApiError && (err.status === 403 || err.code === 'INCOMPARABLE_PROTOCOL')) {
+      if (err instanceof ApiError && ([403, 404, 409].includes(err.status) || err.code === 'INCOMPARABLE_PROTOCOL')) {
         setTaskDiffRestrictedMsg(err.message || '当前对比对象或账号不满足逐题明细展示条件，上方保留聚合指标。');
         return;
       }
@@ -554,7 +569,7 @@ export function ComparePage() {
         const compRow =
           (focusDatasetParam ? data.rows.find((r) => r.dataset_release_id === focusDatasetParam && r.comparable) : null) ||
           data.rows.find((r) => r.comparable);
-        if (compRow) {
+        if (compRow && compRow.intersection.common_valid_scored_tasks !== 0) {
           triggerTaskDiff(data, {
             filter: diffFilter,
             subjectA: data.bound_snapshot.batches[0].subject_id,
@@ -564,7 +579,8 @@ export function ComparePage() {
             syncUrl: true,
           });
         } else {
-          setTaskDiffRestrictedMsg('当前对比双方不属于同一可比数据集版本或协议不一致，无法生成跨版本逐题胜负明细。');
+          setTaskDiffRestrictedMsg(compRow ? '所选批次没有共同有效题。请查看上方的共同覆盖和故障排除。'
+            : '当前对比的数据集版本或协议未对齐，逐题对照不可用。');
         }
       } else if (focusBenchmarkParam || focusDatasetParam) {
         triggerTaskDiff(data, {
@@ -585,7 +601,7 @@ export function ComparePage() {
         method: 'POST',
         body: JSON.stringify({
           name: saveName.trim(),
-          mode: saveMode,
+          mode: hasFixedRelease ? 'snapshot' : saveMode,
           project_id: effectiveSaveProject,
           comparison_id: result!.comparison_id,
         }),
@@ -642,6 +658,9 @@ export function ComparePage() {
     activeCmpIdRef.current = data.comparison_id;
     setResult(data);
     const cfgPayload = savedOpenQ.data.config?.payload;
+    setTaskDiff(null);
+    setTaskDiffRestrictedMsg(null);
+    setComparisonScope(cfgPayload?.scope);
     if (cfgPayload?.subjects && cfgPayload.subjects.length > 0) {
       setSubjects(cfgPayload.subjects);
       setModeKind(cfgPayload.subjects[0]?.kind === 'legacy_model' ? 'legacy_model' : 'batch');
@@ -666,7 +685,7 @@ export function ComparePage() {
       setScoringProtocol(data.bound_snapshot.scoring_protocol || '');
     }
 
-    const restoredFilter = parseDiffFilter(searchParams.get('diff_filter'));
+    const restoredFilter = parseDiffFilter(searchParams.get('diff_filter') ?? (cfgPayload?.scope?.legacy_metric ? 'all' : null));
     const restoredA = searchParams.get('diff_a') || undefined;
     const restoredB = searchParams.get('diff_b') || undefined;
     const restoredDs = searchParams.get('diff_ds') || focusDatasetParam || data.rows[0]?.dataset_release_id || '';
@@ -676,7 +695,7 @@ export function ComparePage() {
       const compRow =
         (restoredDs ? data.rows.find((r) => r.dataset_release_id === restoredDs && r.comparable) : null) ||
         data.rows.find((r) => r.comparable);
-      if (compRow) {
+      if (compRow && compRow.intersection.common_valid_scored_tasks !== 0) {
         triggerTaskDiff(data, {
           filter: restoredFilter,
           subjectA: restoredA || data.bound_snapshot.batches[0].subject_id,
@@ -685,7 +704,8 @@ export function ComparePage() {
           syncUrl: false,
         });
       } else {
-        setTaskDiffRestrictedMsg('当前对比双方不属于同一可比数据集版本或协议不一致，无法生成跨版本逐题胜负明细。');
+        setTaskDiffRestrictedMsg(compRow ? '所选批次没有共同有效题。请查看上方的共同覆盖和故障排除。'
+          : '当前对比的数据集版本或协议未对齐，逐题对照不可用。');
       }
     } else if (restoredBm || restoredDs) {
       triggerTaskDiff(data, {
@@ -782,6 +802,7 @@ export function ComparePage() {
     setScoringProtocol(p.payload.scoring_protocol || '');
     setThresholdPp(effThr);
     setSampleSetId('');
+    setComparisonScope(undefined);
     setSplitPair(null);
     runCompareMut.mutate({
       ...p.payload,
@@ -803,8 +824,8 @@ export function ComparePage() {
       scoring_protocol: scoringProtocol || undefined,
       regression_threshold_pp: thresholdPp,
       enable_faults_as_zero_protocol: enableFaultsAsZero,
-      include_verdict: true,
-      scope: sampleSetId ? { sample_set_id: sampleSetId } : undefined,
+      include_verdict: !hasFixedRelease,
+      scope: hasFixedRelease || sampleSetId ? { ...comparisonScope, sample_set_id: sampleSetId || undefined } : undefined,
     });
   };
 
@@ -833,7 +854,7 @@ export function ComparePage() {
   const chartRows = useMemo(() => result?.rows.filter((row) => row.comparable).slice(0, 14) ?? [], [result]);
   const presets = optsQ.data?.presets ?? [];
   const selectedPreset = presets.find(({ payload }) =>
-    !sampleSetId &&
+    !sampleSetId && !hasFixedRelease &&
     baselineId === payload.baseline_subject_id &&
     scoringProtocol === (payload.scoring_protocol || '') &&
     subjects.length === payload.subjects.length &&
@@ -864,6 +885,11 @@ export function ComparePage() {
           </p>
         </div>
 
+        {groupedReturn && (
+          <Link to={groupedReturn} className="text-xs font-semibold text-[var(--brand-primary)] hover:underline">
+            返回分组选择
+          </Link>
+        )}
         {result && (
           <div className="flex flex-wrap items-center gap-1.5 text-xs">
             {(['csv', 'json', 'markdown', 'html'] as const).map((fmt) => (
@@ -946,6 +972,8 @@ export function ComparePage() {
             onChange={(v) => {
               setModeKind(v as 'batch' | 'legacy_model');
               setSubjects([]);
+              setComparisonScope(undefined);
+              setSampleSetId('');
             }}
             options={[
               { id: 'batch', label: '评测批次对照（含逐题 Split Diff）' },
@@ -983,7 +1011,10 @@ export function ComparePage() {
             >
               <option value="">+ 添加{modeKind === 'batch' ? '授权批次' : '历史模型列'}...</option>
               {modeKind === 'batch'
-                ? (optsQ.data?.batch_subjects || []).map((b) => (
+                ? (optsQ.data?.batch_subjects || []).filter((batch) =>
+                    !scopedReleaseIds?.length ||
+                    (scopedReleaseIds.includes(batch.dataset_release_id ?? '') && batch.scoring_protocol === scoringProtocol)
+                  ).map((b) => (
                     <option key={b.batch_id} value={b.batch_id}>
                       [{b.benchmark_slug || 'unmapped'}] {b.batch_name} ({b.scored}/{b.planned || b.recorded})
                     </option>
@@ -1086,8 +1117,15 @@ export function ComparePage() {
       />
 
       {/* Results Area */}
-      {runCompareMut.isPending ? (
+      {runCompareMut.isPending || (openId && savedOpenQ.isFetching && !result) ? (
         <TableSkeleton rows={8} cols={5} />
+      ) : openId && savedOpenQ.isError && !result ? (
+        <StateNoticeCard
+          kind="error"
+          title="无法打开对比"
+          description={savedOpenQ.error.message}
+          onRetry={() => savedOpenQ.refetch()}
+        />
       ) : result ? (
         <div className="space-y-5">
           {/* Auto Insights & Save Short Link Bar */}
@@ -1126,7 +1164,8 @@ export function ComparePage() {
                 </select>
                 <select
                   aria-label="保存模式"
-                  value={saveMode}
+                  value={hasFixedRelease ? 'snapshot' : saveMode}
+                  disabled={hasFixedRelease}
                   onChange={(e) => setSaveMode(e.target.value as 'snapshot' | 'live')}
                   className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2 py-1.5 text-xs"
                 >
@@ -1228,7 +1267,12 @@ export function ComparePage() {
                       <div className="text-[10px] font-mono text-[var(--text-muted)]">{row.scoring_protocol}</div>
                     </td>
                     <td className="py-2.5 px-3 tabular-nums text-[11px] text-[var(--text-secondary)]">
-                      {row.intersection.common_valid_scored_tasks !== null ? (
+                      {row.intersection.common_valid_scored_tasks === 0 ? (
+                        <div>
+                          <strong>没有共同有效题</strong>
+                          <div>覆盖 {row.intersection.common_covered_tasks} · 故障排除 {row.intersection.fault_excluded_tasks}</div>
+                        </div>
+                      ) : row.intersection.common_valid_scored_tasks !== null ? (
                         <button
                           type="button"
                           aria-label={`查看全部 ${row.intersection.common_valid_scored_tasks} 道共同有效题`}
@@ -1353,7 +1397,7 @@ export function ComparePage() {
             <div className="rounded-xl border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] p-4 text-xs flex items-start gap-2.5">
               <Lock className="w-4 h-4 text-[var(--sem-zero-fg)] shrink-0 mt-0.5" />
               <div>
-                <div className="font-semibold text-[var(--text-primary)]">逐题明细受权限保护（仅保留上方聚合指标）</div>
+                <div className="font-semibold text-[var(--text-primary)]">逐题明细暂不可用</div>
                 <div className="mt-1 text-[var(--text-secondary)]">{taskDiffRestrictedMsg}</div>
               </div>
             </div>
@@ -1370,7 +1414,7 @@ export function ComparePage() {
                     {taskDiff.intersection.common_covered_tasks}）
                   </span>
                   {subjectMetaList.length >= 3 && result.bound_snapshot.batches.length >= 3 && (
-                    <div className="inline-flex items-center gap-1 text-[11px]">
+                    <div className="flex min-w-0 flex-wrap items-center gap-1 text-[11px]">
                       <select
                         aria-label="选择 A 方对比对象"
                         value={diffSubjectA || subjectMetaList[0]?.id}
@@ -1382,9 +1426,9 @@ export function ComparePage() {
                             datasetReleaseId: diffDataset,
                           })
                         }
-                        className="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[11px]"
+                        className="max-w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[11px]"
                       >
-                        {subjectMetaList.map((sm) => (
+                        {subjectMetaList.filter((subject) => subject.id !== (diffSubjectB || subjectMetaList[1]?.id)).map((sm) => (
                           <option key={sm.id} value={sm.id}>
                             A: {sm.alias}
                           </option>
@@ -1402,9 +1446,9 @@ export function ComparePage() {
                             datasetReleaseId: diffDataset,
                           })
                         }
-                        className="rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[11px]"
+                        className="max-w-full rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-1.5 py-0.5 text-[11px]"
                       >
-                        {subjectMetaList.map((sm) => (
+                        {subjectMetaList.filter((subject) => subject.id !== (diffSubjectA || subjectMetaList[0]?.id)).map((sm) => (
                           <option key={sm.id} value={sm.id}>
                             B: {sm.alias}
                           </option>

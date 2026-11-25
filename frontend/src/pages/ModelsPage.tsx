@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Link, useNavigate, useParams } from 'react-router-dom';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type * as echarts from 'echarts';
 import { ArrowLeft, Cpu, GitCompareArrows, Layers, Plus, Search, ShieldCheck } from 'lucide-react';
@@ -9,6 +9,7 @@ import { useAppStore } from '../lib/store';
 import type { BatchDTO } from '../types/api';
 import { PageTransition, SlidingTabs, SpotlightCard } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
+import { DatasetPerformancePanel, type DatasetPerformanceRow } from '../components/ui/DatasetPerformancePanel';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
 
@@ -47,6 +48,7 @@ interface ModelProfileScore {
 }
 
 interface ModelProfileResp {
+  dataset_performance?: DatasetPerformanceRow[];
   header: {
     model_canonical: string;
     model_routes: string[];
@@ -181,7 +183,15 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
   const navigate = useNavigate();
   const theme = useAppStore((s) => s.theme);
   const addToCompare = useAppStore((s) => s.addToCompare);
-  const [tab, setTab] = useState('scorecard');
+  const [params, setParams] = useSearchParams();
+  const requestedTab = params.get('tab');
+  const tab = requestedTab && ['harness', 'dataset-performance', 'checkpoints', 'batches'].includes(requestedTab) ? requestedTab : 'scorecard';
+  const setTab = (next: string) => setParams((previous) => {
+    const search = new URLSearchParams(previous);
+    if (next === 'scorecard') search.delete('tab');
+    else search.set('tab', next);
+    return search;
+  });
 
   const profQ = useQuery({
     queryKey: ['model-profile', modelCanonical],
@@ -304,11 +314,13 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
 
       <SlidingTabs
         layoutId="model-profile-tabs"
+        className="max-w-full flex-wrap"
         size="sm"
         value={tab}
         onChange={setTab}
         options={[
           { id: 'scorecard', label: '三线成绩单 & 雷达' },
+          { id: 'dataset-performance', label: '跨数据集表现', badge: data?.dataset_performance?.length },
           { id: 'harness', label: '跨 Harness 矩阵', badge: data?.harness_matrix.length },
           { id: 'checkpoints', label: '已验证 Checkpoint 趋势', badge: data?.checkpoint_trends.length },
           { id: 'batches', label: '全部批次', badge: data?.batches.length },
@@ -385,6 +397,8 @@ function ModelProfileView({ modelCanonical }: { modelCanonical: string }) {
             ))}
           </div>
         </div>
+      ) : tab === 'dataset-performance' ? (
+        <DatasetPerformancePanel axis="model" rows={data.dataset_performance} />
       ) : tab === 'harness' ? (
         data.harness_matrix.length === 0 ? (
           <StateNoticeCard kind="empty" title="该模型暂无可按 Harness 拆分的原生去重成绩" />

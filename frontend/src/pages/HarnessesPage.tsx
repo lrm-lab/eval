@@ -10,6 +10,7 @@ import type { BatchDTO } from '../types/api';
 import { PageTransition, SpotlightCard } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
+import { DatasetPerformancePanel, type DatasetPerformanceRow } from '../components/ui/DatasetPerformancePanel';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
 interface HarnessSummary {
@@ -26,6 +27,7 @@ interface HarnessSummary {
 }
 
 interface HarnessProfileResp {
+  dataset_performance?: DatasetPerformanceRow[];
   harness: string;
   runners: string[];
   versions: string[];
@@ -137,7 +139,7 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
 
   return (
     <PageTransition className="max-w-7xl mx-auto px-5 py-6 space-y-5">
-      <div className="flex items-center gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Link
           to="/harnesses"
           className="inline-flex items-center gap-1 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] hover:text-[var(--text-primary)] no-underline"
@@ -147,8 +149,9 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
         <div>
           <h1 className="m-0 text-xl font-bold text-[var(--text-primary)]">{harnessName}</h1>
           {data && (
-            <div className="mt-0.5 text-xs text-[var(--text-secondary)]">
-              Runners: {data.runners.join(', ')} · 版本: {data.versions.join(', ') || '未标明'}
+            <div className="mt-0.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-secondary)]">
+              <span>Runners: {data.runners.join(', ')} · 版本: {data.versions.join(', ') || '未标明'}</span>
+              <a href="#dataset-performance" className="text-[var(--brand-primary)] hover:underline">跨数据集表现</a>
             </div>
           )}
         </div>
@@ -160,6 +163,8 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
         <StateNoticeCard kind="error" title="Harness 档案加载失败" description={(q.error as Error).message} onRetry={() => q.refetch()} />
       ) : data ? (
         <>
+          <DatasetPerformancePanel axis="harness" rows={data.dataset_performance} />
+
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 flex items-start gap-3">
             <Info className="w-4 h-4 text-[var(--brand-primary)] shrink-0 mt-0.5" />
             <div className="text-xs leading-relaxed">
