@@ -4,9 +4,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.api.deps import enforce_csrf, get_current_user, require_researcher
+from app.api.errors import AppError
 from app.security.auth import AuthUser
 
 router = APIRouter(prefix="/api/v1", tags=["compare"])
@@ -22,6 +23,23 @@ class SaveComparisonRequest(BaseModel):
 class ExportComparisonRequest(BaseModel):
     comparison_id: str
     format: str = "markdown"
+
+
+class PreviewBatch(BaseModel):
+    batch_id: str
+    generation_id: str
+
+
+class PreviewPair(BaseModel):
+    id: str
+    baseline: PreviewBatch
+    candidate: PreviewBatch
+    dataset_release_id: str
+    scoring_protocol: str
+
+
+class PreviewComparisons(BaseModel):
+    pairs: list[PreviewPair] = Field(min_length=1, max_length=18)
 
 
 @router.get("/compare/options")
@@ -80,6 +98,62 @@ def query_compare(
     user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     return request.app.state.ctx.compare.query_compare(user, body)
+
+
+@router.post("/compare/preview", dependencies=[Depends(enforce_csrf)])
+def preview_batch_comparisons(
+    body: PreviewComparisons,
+    request: Request,
+    user: AuthUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    """Compute short, generation-bound summaries without creating saved comparison sessions."""
+    service = request.app.state.ctx.compare
+    items = []
+    for pair in body.pairs:
+        subjects = [
+            {
+                "id": side, "kind": "batch", "batch_id": batch.batch_id,
+                "expected_generation_id": batch.generation_id,
+            }
+            for side, batch in (("baseline", pair.baseline), ("candidate", pair.candidate))
+        ]
+        try:
+            result = service.query_compare(
+                user,
+                {
+                    "subjects": subjects,
+                    "baseline_subject_id": "baseline",
+                    "scoring_protocol": pair.scoring_protocol,
+                    "scope": {"dataset_release_ids": [pair.dataset_release_id]},
+                    "include_verdict": False,
+                    "enable_faults_as_zero_protocol": False,
+                },
+                persist_ephemeral=False,
+                exact_batch_context=(pair.dataset_release_id, pair.scoring_protocol),
+            )
+        except AppError as exc:
+            if exc.status_code >= 500:
+                raise
+            items.append({"id": pair.id, "reason": exc.code, "message": exc.message})
+            continue
+        row = next(iter(result["rows"]), None)
+        if row is None or not row["comparable"]:
+            items.append({"id": pair.id, "reason": "INCOMPARABLE_RELEASE"})
+            continue
+        intersection = row["intersection"]
+        baseline = row["cells"]["baseline"]["common_valid"]
+        candidate = row["cells"]["candidate"]["common_valid"]
+        items.append({
+            "id": pair.id,
+            "reason": None if intersection["common_valid_scored_tasks"] else "NO_COMMON_VALID_TASKS",
+            "common_valid": intersection["common_valid_scored_tasks"],
+            "common_covered": intersection["common_covered_tasks"],
+            "baseline_score": baseline["score"],
+            "candidate_score": candidate["score"],
+            "delta_pp": candidate["delta_pp"],
+            "metric_name": row["metric_name"],
+        })
+    return {"items": items}
 
 
 @router.post("/compare/task-diff", dependencies=[Depends(enforce_csrf)])

@@ -23,6 +23,7 @@ import {
   StaggerItem,
 } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
+import { HomeEvaluationExplorer } from '../components/ui/HomeEvaluationExplorer';
 import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
 import { StateNoticeCard } from '../components/ui/Skeletons';
@@ -141,14 +142,22 @@ export function HomePage() {
     return `/eval/compare?${qp.toString()}`;
   };
 
+  const historicalTrend = activePreset?.payload.subjects.every((subject) => subject.kind === 'legacy_model')
+    && verdict && !verdictQ.isPlaceholderData ? {
+      models: activePreset.payload.subjects.flatMap((subject) => subject.model_cols ?? []),
+      title: activePreset.title,
+      verdict,
+      evidence: buildEvidenceUrl,
+    } : undefined;
+
   return (
     <PageTransition>
       <section aria-labelledby="home-hero-title" className="lrm-hero-bg">
         <div aria-hidden="true" className="lrm-hero-grid" />
-        <div className="relative mx-auto max-w-7xl px-5 py-12 text-center sm:px-8 sm:py-16 lg:py-20">
+        <div className="relative mx-auto max-w-7xl px-5 py-8 text-center sm:px-8 sm:py-11 lg:py-12">
           <h1
             id="home-hero-title"
-            className="m-0 text-[clamp(2rem,5.6vw,4.75rem)] leading-[1.12] font-bold tracking-[-0.045em] text-[var(--text-primary)]"
+            className="m-0 text-[clamp(2rem,5.6vw,3.75rem)] leading-[1.12] font-bold tracking-[-0.045em] text-[var(--text-primary)]"
           >
             <span className="inline-block">大模型与 <span className="text-[var(--brand-primary)]">Agent</span></span>{' '}
             <span className="inline-block">评测平台</span>
@@ -183,6 +192,8 @@ export function HomePage() {
       </section>
 
       <div className="max-w-7xl mx-auto px-5 py-7 space-y-8">
+        <HomeEvaluationExplorer trend={historicalTrend} />
+
         {/* 1. KPI Overview Band */}
         <section className="min-h-[110px]">
           {overviewQ.isLoading ? (

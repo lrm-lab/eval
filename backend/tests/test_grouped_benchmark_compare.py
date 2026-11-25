@@ -172,6 +172,53 @@ def test_compare_reports_why_batches_cannot_produce_a_verdict(case) -> None:
             assert result["rows"][0]["intersection"]["common_valid_scored_tasks"] == 1
 
 
+def test_home_preview_keeps_context_generation_and_project_bound(case) -> None:
+    _, db, client, headers, _ = case
+    _insert_batch(db, "baseline", {"common": (0, "same"), "other": (1, "same")})
+    _insert_batch(db, "candidate", {"common": (1, "same")})
+    _insert_batch(db, "wrong_protocol", {"common": (1, "same")}, protocol="other")
+    _insert_batch(db, "wrong_release", {"common": (1, "same")}, release=NEXT)
+    _insert_batch(db, "private", {"common": (1, "same")}, project="team-other")
+    _insert_batch(db, "disjoint", {"new-task": (1, "same")})
+    _insert_batch(db, "holdout", {"common": (1, "same")}, release=HOLDOUT)
+    _insert_batch(db, "holdout_other", {"common": (0, "same")}, release=HOLDOUT)
+
+    def pair(name: str, batch_id: str, generation: str = "gen_old", **context) -> dict:
+        return {
+            "id": name,
+            "baseline": {"batch_id": "baseline", "generation_id": "gen_old"},
+            "candidate": {"batch_id": batch_id, "generation_id": generation},
+            "dataset_release_id": RELEASE,
+            "scoring_protocol": PROTOCOL,
+            **context,
+        }
+
+    response = client.post("/api/v1/compare/preview", headers=headers, json={"pairs": [
+        pair("aligned", "candidate"),
+        pair("stale", "candidate", "gen_stale"),
+        pair("mismatch", "wrong_protocol"),
+        pair("release", "wrong_release"),
+        pair("forbidden", "private"),
+        pair("disjoint", "disjoint"),
+        pair("holdout", "holdout_other", dataset_release_id=HOLDOUT,
+             baseline={"batch_id": "holdout", "generation_id": "gen_old"}),
+    ]})
+    assert response.status_code == 200, response.text
+    items = {item["id"]: item for item in response.json()["items"]}
+    aligned = items.pop("aligned")
+    assert (aligned["reason"], aligned["common_valid"], aligned["common_covered"], aligned["delta_pp"]) == (None, 1, 1, 100.0)
+    assert {key: value["reason"] for key, value in items.items()} == {
+        "stale": "GENERATION_MISMATCH",
+        "mismatch": "INCOMPARABLE_PROTOCOL",
+        "release": "INCOMPARABLE_RELEASE",
+        "forbidden": "PROJECT_FORBIDDEN",
+        "disjoint": "NO_COMMON_VALID_TASKS",
+        "holdout": "SCOPE_FORBIDDEN",
+    }
+    assert "common_valid" not in items["forbidden"]
+    assert db.fetchone("SELECT COUNT(*) AS n FROM saved_comparisons")["n"] == 0
+
+
 def test_grouped_profile_and_cross_dataset_matrix_use_exact_authorized_batches(case) -> None:
     _, db, client, _, uid = case
     _insert_batch(db, "a_current", {"ordinary": (1, "same"), "fault": (None, "same")})
