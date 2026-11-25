@@ -120,15 +120,15 @@ def _training_ref_needs_backfill(ev_refs_json: str | None) -> bool:
     return True
 
 
-def _batch_needs_digest_backfill(
+def _batch_needs_backfill(
     checks_json_str: str | None,
     generation_id: str | None,
     is_running_placeholder: int | bool,
     *,
+    runner: str,
     has_unbackfilled_training: bool = False,
 ) -> bool:
-    """Return True if a committed harbor_runs batch row predates top-level / manifest / training
-    SHA-256 binding and must be targeted for automatic upgrade backfill on startup/poll (I-01)."""
+    """Identify committed batches that need digest or legacy VLMEvalKit media backfill."""
     if is_running_placeholder:
         return False
     if has_unbackfilled_training:
@@ -151,9 +151,8 @@ def _batch_needs_digest_backfill(
     )
     if is_v2:
         pm_sha = checks.get("publish_manifest_sha256")
-        if not isinstance(pm_sha, str) or not pm_sha:
-            return True
-    return False
+        return not isinstance(pm_sha, str) or not pm_sha
+    return runner == "vlmevalkit" and checks.get("legacy_vlm_media_indexed") is not True
 
 
 def _dir_content_digest(batch_dir: Path) -> str:
@@ -1051,7 +1050,7 @@ class HotIndexer:
             else:
                 existing = self.db.fetchone(
                     """
-                    SELECT batch_id, content_digest, generation_id, checks_json, is_running_placeholder,
+                    SELECT batch_id, content_digest, generation_id, checks_json, is_running_placeholder, runner,
                            project_id, owner_id, evidence_approval
                     FROM batches WHERE source_locator = ?
                     """,
@@ -1071,10 +1070,11 @@ class HotIndexer:
                         (existing["batch_id"],),
                     )
                     needs_tr = any(_training_ref_needs_backfill(r["evidence_refs_json"]) for r in tr_rows)
-                    if not _batch_needs_digest_backfill(
+                    if not _batch_needs_backfill(
                         existing["checks_json"],
                         existing["generation_id"],
                         existing["is_running_placeholder"],
+                        runner=existing["runner"],
                         has_unbackfilled_training=needs_tr,
                     ):
                         return "skipped_unchanged"
@@ -1503,6 +1503,7 @@ class HotIndexer:
         # Derive identity fields
         raw_dataset_name = meta.get("dataset") or (rows[0].get("dataset") if rows else None)
         runner = str(meta.get("runner") or (rows[0].get("runner") if rows else None) or "harbor")
+        index_legacy_vlm_media = not using_manifest and runner == "vlmevalkit"
         harness = meta.get("harness") or (rows[0].get("harness") if rows else None)
         harness_version = next((r.get("harness_version") for r in rows if r.get("harness_version")), None)
         model_route = meta.get("model") or next((r.get("model_route") for r in rows if r.get("model_route")), None)
@@ -1559,7 +1560,19 @@ class HotIndexer:
         batch_started_at: str | None = None
         batch_finished_at: str | None = None
 
-        for r in rows:
+        legacy_vlm_results: list[dict[str, Any]] = []
+        if index_legacy_vlm_media and rows:
+            # Legacy VLMEvalKit publications have no media digest manifest. Read their
+            # results and sidecar media in parallel before committing the hot index.
+            with ThreadPoolExecutor(max_workers=12) as pool:
+                legacy_vlm_results = list(
+                    pool.map(
+                        lambda row: _inspect_trial_result_and_media(batch_dir, row.get("result"), str(row["trial_id"])),
+                        rows,
+                    )
+                )
+
+        for row_index, r in enumerate(rows):
             tid = str(r["trial_id"])
             task_id = str(r["task_id"])
             attempt_counters[task_id] += 1
@@ -1609,6 +1622,8 @@ class HotIndexer:
                 )
                 if isinstance(td_entry.get("verifier_output"), dict) and td_entry["verifier_output"].get("sha256"):
                     res_info["has_verifier_output"] = True
+            elif index_legacy_vlm_media:
+                res_info = legacy_vlm_results[row_index]
             elif deep_trial_enrich:
                 res_info = _inspect_trial_result_and_media(batch_dir, r.get("result"), tid)
             else:
@@ -2014,6 +2029,8 @@ class HotIndexer:
                     "verified_payload_sha256": verified_payload_sha256,
                     "generation_digests": gen_digests_hist,
                 }
+                if index_legacy_vlm_media:
+                    checks_payload_doc["legacy_vlm_media_indexed"] = True
             checks_payload_json = json.dumps(checks_payload_doc, ensure_ascii=False)
 
             bm_slug, release_id, identity_status, inferred_scope = resolve_dataset_identity(
@@ -2749,17 +2766,18 @@ class HotIndexer:
             existing_digests: dict[str, str] = {}
             for r in self.db.fetchall(
                 """
-                SELECT batch_id, source_locator, content_digest, generation_id, checks_json, is_running_placeholder
+                SELECT batch_id, source_locator, content_digest, generation_id, checks_json, is_running_placeholder, runner
                 FROM batches WHERE source_namespace = 'harbor_runs'
                 """
             ):
-                if not force and _batch_needs_digest_backfill(
+                if not force and _batch_needs_backfill(
                     r["checks_json"],
                     r["generation_id"],
                     r["is_running_placeholder"],
+                    runner=r["runner"],
                     has_unbackfilled_training=str(r["batch_id"]) in unbackfilled_tr_batches,
                 ):
-                    # Omit from skip map so startup / normal hot scan performs targeted same-generation backfill!
+                    # Revisit older rows even when the source files have not changed.
                     continue
                 existing_digests[str(r["source_locator"])] = str(r["content_digest"])
             try:
