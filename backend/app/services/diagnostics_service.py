@@ -220,6 +220,7 @@ def _evidence_file_identity(st: os.stat_result) -> tuple[int, int, int, int]:
 
 
 GATEWAY_CLUE_SUMMARY_VERSION = 1
+ATIF_CLUE_SUMMARY_VERSION = 1
 
 
 class _GatewayDigestReader:
@@ -238,7 +239,7 @@ class _GatewayDigestReader:
 
 def read_gateway_clue_for_index(
     path: Path, expected_identity: tuple[int, int, int] | None, expected_digest: str | None,
-) -> tuple[str, dict[str, Any] | None] | None:
+) -> tuple[str, dict[str, Any]] | None:
     """Derive a bounded summary while binding the capture in the background indexer."""
     with path.open("rb") as fh:
         identity = _evidence_file_identity(os.fstat(fh.fileno()))
@@ -260,13 +261,12 @@ def read_gateway_clue_for_index(
     digest = reader.digest.hexdigest()
     if expected_digest is not None and digest != expected_digest:
         return None
-    if not valid_json or reader.root_token != b"{":
-        return digest, None
     return digest, {
         "source": "gateway_capture",
         "version": GATEWAY_CLUE_SUMMARY_VERSION,
         "sha256": digest,
         "file_identity": list(identity),
+        "valid_json": valid_json and reader.root_token == b"{",
         "clue": clue,
     }
 
@@ -986,7 +986,7 @@ class DiagnosticsService:
         kind: str,
         digest: str,
         generation_id: str,
-        indexed_gateway: dict[str, Any] | None = None,
+        indexed_summary: dict[str, Any] | None = None,
     ) -> dict[str, Any] | None:
         def mismatch() -> AppError:
             return AppError(
@@ -999,15 +999,20 @@ class DiagnosticsService:
         try:
             file_id = _evidence_file_identity(path.stat())
             if (
-                indexed_gateway is not None
-                and indexed_gateway.get("version") == GATEWAY_CLUE_SUMMARY_VERSION
-                and indexed_gateway.get("sha256") == digest
-                and indexed_gateway.get("file_identity") == list(file_id)
-                and "clue" in indexed_gateway
+                indexed_summary
+                and indexed_summary.get("sha256") == digest
+                and indexed_summary.get("file_identity") == list(file_id)
             ):
-                clue = indexed_gateway["clue"]
-                if clue is None or (isinstance(clue, dict) and clue.get("code") == "gateway_discarded_or_msg_drop"):
-                    return {"clue": clue}
+                if kind == "atif" and indexed_summary.get("version") == ATIF_CLUE_SUMMARY_VERSION:
+                    summary = indexed_summary.get("tool_summary")
+                    if "tool_summary" in indexed_summary and (summary is None or isinstance(summary, dict)):
+                        return summary
+                if kind == "gateway" and indexed_summary.get("version") == GATEWAY_CLUE_SUMMARY_VERSION:
+                    clue = indexed_summary.get("clue")
+                    if "clue" in indexed_summary and (
+                        clue is None or (isinstance(clue, dict) and clue.get("code") == "gateway_discarded_or_msg_drop")
+                    ):
+                        return {"clue": clue} if indexed_summary.get("valid_json", True) else None
             key = (kind, path, generation_id, digest, file_id)
             with self._tool_cache_lock:
                 if key in self._evidence_cache:
@@ -1086,7 +1091,7 @@ class DiagnosticsService:
             eps = [ep for ep in eps if (rel, str(ep["task_id"])) not in holdout_pairs]
 
         def summarize(
-            ref: Any, kind: str, indexed_gateway: dict[str, Any] | None = None,
+            ref: Any, kind: str, indexed_summary: dict[str, Any] | None = None,
         ) -> tuple[str, dict[str, Any] | None]:
             if not isinstance(ref, dict) or not ref.get("rel_path"):
                 return "absent", None
@@ -1102,7 +1107,7 @@ class DiagnosticsService:
                 if path is None:
                     return "unavailable", None
                 summary = self._verified_evidence_summary(
-                    path, kind=kind, digest=digest.lower(), generation_id=gen_id, indexed_gateway=indexed_gateway,
+                    path, kind=kind, digest=digest.lower(), generation_id=gen_id, indexed_summary=indexed_summary,
                 )
                 return ("verified" if summary is not None else "unavailable"), summary
             except AppError as exc:
@@ -1114,18 +1119,23 @@ class DiagnosticsService:
 
         def inspect_ep(ep: dict[str, Any]) -> dict[str, Any]:
             refs = json.loads(ep["evidence_refs_json"] or "{}") if allow_atif or allow_gw else {}
-            atif_state, atif = summarize(refs.get("trajectory"), "atif") if allow_atif else ("absent", None)
-            gw_state, gw = "absent", None
-            if allow_gw and refs.get("gateway"):
+            indexed_by_source = {}
+            if (allow_atif and refs.get("trajectory")) or (allow_gw and refs.get("gateway")):
                 try:
                     indexed_rows = json.loads(ep["observable_clues_json"] or "[]")
                 except ValueError:
                     indexed_rows = []
-                indexed = next((
-                    row for row in indexed_rows
-                    if isinstance(row, dict) and row.get("source") == "gateway_capture"
-                ), None) if isinstance(indexed_rows, list) else None
-                gw_state, gw = summarize(refs["gateway"], "gateway", indexed)
+                if isinstance(indexed_rows, list):
+                    indexed_by_source = {
+                        row["source"]: row for row in indexed_rows
+                        if isinstance(row, dict) and isinstance(row.get("source"), str)
+                    }
+            atif_state, atif = ("absent", None)
+            if allow_atif:
+                atif_state, atif = summarize(refs.get("trajectory"), "atif", indexed_by_source.get("atif_trajectory"))
+            gw_state, gw = ("absent", None)
+            if allow_gw:
+                gw_state, gw = summarize(refs.get("gateway"), "gateway", indexed_by_source.get("gateway_capture"))
             clues = list(atif["clues"]) if atif else []
             if gw and gw["clue"]:
                 clues.append(gw["clue"])

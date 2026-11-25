@@ -298,11 +298,17 @@ def _reports_agree(published: dict[str, Any], recomputed: dict[str, Any]) -> boo
 
 
 def _extract_atif_metrics(
-    traj_path: Path, rel_traj: str, *, raw_bytes: bytes | None = None
+    traj_path: Path,
+    rel_traj: str,
+    *,
+    raw_bytes: bytes | None = None,
+    summarize_clues: bool = False,
+    expected_clue_digest: str | None = None,
 ) -> dict[str, Any]:
     """Extract reasoning_tokens / reasoning_output_tokens dual keys, cached tokens, tool_call_count,
     and inline media SHA-256 digests without storing blobs (A-12, I-01).
-    Accepts pre-verified `raw_bytes` to guarantee zero double-read TOCTOU."""
+    Accepts pre-verified bytes for manifest ingest. Legacy diagnostic backfill
+    binds the summary to the digest and identity of the bytes read for metrics."""
     out: dict[str, Any] = {
         "reasoning_tokens": None,
         "reasoning_key_source": None,
@@ -311,14 +317,33 @@ def _extract_atif_metrics(
         "has_inline_media": False,
         "inline_media_meta": [],
         "file_sha256": None,
+        "atif_clue": None,
     }
-    if raw_bytes is None:
+    identity = None
+    if summarize_clues:
+        from app.services.diagnostics_service import (
+            ATIF_CLUE_SUMMARY_VERSION, _evidence_file_identity, compute_atif_tool_and_clues,
+        )
+
+        try:
+            with traj_path.open("rb") as fh:
+                identity = _evidence_file_identity(os.fstat(fh.fileno()))
+                raw_bytes = fh.read()
+                if _evidence_file_identity(os.fstat(fh.fileno())) != identity:
+                    return out
+            if _evidence_file_identity(traj_path.stat()) != identity:
+                return out
+        except OSError:
+            return out
+    elif raw_bytes is None:
         try:
             raw_bytes = traj_path.read_bytes()
         except OSError:
             return out
 
     file_sha = _sha256_bytes(raw_bytes)
+    if isinstance(expected_clue_digest, str) and expected_clue_digest and file_sha != expected_clue_digest.lower():
+        return out
     out["file_sha256"] = file_sha
     raw_text = raw_bytes.decode("utf-8", errors="replace")
 
@@ -339,9 +364,20 @@ def _extract_atif_metrics(
         )
 
     try:
-        data = json.loads(raw_text)
+        data = json.loads(raw_bytes if summarize_clues else raw_text)
     except Exception:
-        return out
+        data = None
+    if summarize_clues:
+        summary = None
+        if isinstance(data, dict) and isinstance(data.get("steps"), list):
+            summary = compute_atif_tool_and_clues(data, min_repeat=2, min_consec_errors=2)
+        out["atif_clue"] = {
+            "source": "atif_trajectory",
+            "version": ATIF_CLUE_SUMMARY_VERSION,
+            "sha256": file_sha,
+            "file_identity": list(identity),
+            "tool_summary": summary,
+        }
     if not isinstance(data, dict):
         return out
 
@@ -2676,7 +2712,10 @@ class HotIndexer:
         for legacy harbor-runs batches (without publish-manifest.json).
         Manifest-v2 batches (trial_digests_sha256 IS NOT NULL) are already enriched from verified in-memory bytes
         during atomic ingest and are strictly skipped here to eliminate any second unverified disk read."""
-        from app.services.diagnostics_service import GATEWAY_CLUE_SUMMARY_VERSION, read_gateway_clue_for_index
+        from app.services.diagnostics_service import (
+            ATIF_CLUE_SUMMARY_VERSION, GATEWAY_CLUE_SUMMARY_VERSION,
+            _evidence_file_identity, read_gateway_clue_for_index,
+        )
 
         if batch_ids:
             ph = ",".join("?" for _ in batch_ids)
@@ -2694,10 +2733,19 @@ class HotIndexer:
             cache_key = f"trial_enrich:{b['batch_id']}"
             bname = str(b["source_locator"]).split(":", 1)[1]
             bdir = self.settings.harbor_runs_dir / bname
-            summarize_gateway = bool(b["has_gateway"]) and self.approval_registry.is_evidence_class_approved(
-                bdir, "gateway_capture", b["evidence_approval"],
+            _, _, source_approval, classes = self.approval_registry.lookup_full(bdir)
+            approved = (
+                source_approval in ("approved_public", "approved_restricted")
+                and b["evidence_approval"] in ("approved_public", "approved_restricted")
             )
+            summarize_atif = approved and "atif_trajectory" in classes
+            summarize_gateway = bool(b["has_gateway"]) and approved and "gateway_capture" in classes
+            # Invalidate old ready rows that could have been written after a failed read.
             cache_revision = b["content_digest"]
+            if b["has_gateway"]:
+                cache_revision = f"{cache_revision}:retry-gateway"
+            if summarize_atif:
+                cache_revision = f"{cache_revision}:atif-clue-v{ATIF_CLUE_SUMMARY_VERSION}"
             if summarize_gateway:
                 cache_revision = f"{cache_revision}:gateway-clue-v{GATEWAY_CLUE_SUMMARY_VERSION}"
             cached = self.db.fetchone("SELECT error_message, status FROM cold_file_cache WHERE file_path = ?", (cache_key,))
@@ -2719,17 +2767,34 @@ class HotIndexer:
             def _enrich_one(ep_row: dict[str, Any]) -> tuple[str, dict[str, Any]]:
                 tid = ep_row["trial_id"]
                 ev = json.loads(ep_row["evidence_refs_json"] or "{}")
+                clues = json.loads(ep_row["observable_clues_json"] or "[]")
                 rel_res = (ev.get("result") or {}).get("rel_path")
-                rel_traj = (ev.get("trajectory") or {}).get("rel_path")
+                traj_ref = ev.get("trajectory") or {}
+                rel_traj = traj_ref.get("rel_path")
                 r_info = _inspect_trial_result_and_media(bdir, rel_res, tid)
                 t_info = None
+                needs_retry = False
                 if isinstance(rel_traj, str) and rel_traj:
+                    index_atif_clue = (
+                        summarize_atif
+                        and traj_ref.get("storage_tier") != "evidence_store_0700"
+                        and traj_ref.get("generation_id") in (None, b["generation_id"])
+                    )
+                    expected_atif_digest = traj_ref.get("sha256") if index_atif_clue else None
                     try:
                         tp = resolve_within_root(bdir, rel_traj)
                         if tp.is_file():
-                            t_info = _extract_atif_metrics(tp, rel_traj)
+                            t_info = _extract_atif_metrics(
+                                tp, rel_traj, summarize_clues=index_atif_clue,
+                                expected_clue_digest=expected_atif_digest,
+                            )
+                            needs_retry = index_atif_clue and t_info["atif_clue"] is None
+                        elif expected_atif_digest:
+                            needs_retry = True
                     except AppError:
-                        t_info = None
+                        pass
+                    except OSError:
+                        needs_retry = index_atif_clue
                 gateway = ev.get("gateway")
                 gateway_summary = None
                 if (
@@ -2743,10 +2808,23 @@ class HotIndexer:
                     try:
                         if summarize_gateway and (pending or (indexed_digest and "pending_file_identity" not in gateway)):
                             gateway_path = resolve_within_root(bdir, gateway["rel_path"])
-                            measured = read_gateway_clue_for_index(
-                                gateway_path, tuple(pending) if pending else None, indexed_digest,
-                            )
-                            if measured is not None:
+                            existing = next((
+                                clue for clue in clues if isinstance(clue, dict)
+                                and clue.get("source") == "gateway_capture"
+                                and clue.get("version") == GATEWAY_CLUE_SUMMARY_VERSION
+                                and clue.get("sha256") == indexed_digest
+                            ), None)
+                            if not pending and existing and existing.get("file_identity") == list(
+                                _evidence_file_identity(gateway_path.stat())
+                            ):
+                                measured = (indexed_digest, existing)
+                            else:
+                                measured = read_gateway_clue_for_index(
+                                    gateway_path, tuple(pending) if pending else None, indexed_digest,
+                                )
+                            if measured is None:
+                                needs_retry = True
+                            else:
                                 gateway["sha256"], gateway_summary = measured
                                 gateway.pop("pending_file_identity", None)
                         elif pending:
@@ -2757,9 +2835,20 @@ class HotIndexer:
                                 if _stat_tuple(gateway_path) == expected_identity:
                                     gateway["sha256"] = gateway_digest
                                     del gateway["pending_file_identity"]
-                    except (AppError, OSError):
+                            needs_retry = needs_retry or "pending_file_identity" in gateway
+                    except AppError:
                         pass
-                return tid, {"ep": ep_row, "ev": ev, "res": r_info, "traj": t_info, "gateway_clue": gateway_summary}
+                    except OSError:
+                        needs_retry = True
+                updated_clues = [clue for clue in (t_info and t_info["atif_clue"], gateway_summary) if clue is not None]
+                if updated_clues:
+                    sources = {clue["source"] for clue in updated_clues}
+                    clues = [clue for clue in clues if not isinstance(clue, dict) or clue.get("source") not in sources]
+                    clues.extend(updated_clues)
+                return tid, {
+                    "ep": ep_row, "ev": ev, "res": r_info, "traj": t_info,
+                    "clues": json.dumps(clues, ensure_ascii=False), "needs_retry": needs_retry,
+                }
 
             with ThreadPoolExecutor(max_workers=12) as pool:
                 results = list(pool.map(_enrich_one, eps))
@@ -2816,12 +2905,6 @@ class HotIndexer:
                         output_tokens=ep_row["output_tokens"],
                         reasoning_tokens=reason_tok,
                     )
-                    clues_json = ep_row["observable_clues_json"]
-                    if bundle["gateway_clue"] is not None:
-                        clues = json.loads(clues_json or "[]")
-                        clues = [clue for clue in clues if not isinstance(clue, dict) or clue.get("source") != "gateway_capture"]
-                        clues.append(bundle["gateway_clue"])
-                        clues_json = json.dumps(clues, ensure_ascii=False)
                     conn.execute(
                         """
                         UPDATE episodes
@@ -2851,7 +2934,7 @@ class HotIndexer:
                             1 if r_info["has_verifier_output"] else 0,
                             has_media,
                             json.dumps(ev, ensure_ascii=False),
-                            clues_json,
+                            bundle["clues"],
                             b["batch_id"],
                             b["generation_id"],
                             tid,
@@ -2861,14 +2944,18 @@ class HotIndexer:
                 conn.execute(
                     """
                     INSERT INTO cold_file_cache (file_path, cache_kind, mtime_ns, size_bytes, item_count, status, error_message, updated_at)
-                    VALUES (?, 'trial_enrich', 0, 0, ?, 'ready', ?, ?)
+                    VALUES (?, 'trial_enrich', 0, 0, ?, ?, ?, ?)
                     ON CONFLICT(file_path) DO UPDATE SET
                         item_count = excluded.item_count,
-                        status = 'ready',
+                        status = excluded.status,
                         error_message = excluded.error_message,
                         updated_at = excluded.updated_at
                     """,
-                    (cache_key, len(results), cache_revision, utcnow_iso()),
+                    (
+                        cache_key, len(results),
+                        "pending" if any(bundle["needs_retry"] for _, bundle in results) else "ready",
+                        cache_revision, utcnow_iso(),
+                    ),
                 )
             enriched_batches += 1
         return {"batches": enriched_batches, "trials": enriched_trials}
