@@ -8,6 +8,7 @@ import { fmtDuration, fmtPct, runScopeLabel, trackDisplayName } from '../lib/for
 import { useAppStore } from '../lib/store';
 import type { BatchDTO, DatasetReleaseDTO } from '../types/api';
 import { PageTransition, SlidingTabs, SpotlightCard } from '../components/motion/primitives';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
 import { EfficiencyScatterChart } from '../components/charts/EfficiencyScatterChart';
@@ -342,12 +343,12 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
                   <th className="py-2.5 px-3 text-right">均分</th>
                   <th className="py-2.5 px-3 text-right">通过 / 有效 / 故障</th>
                   <th className="py-2.5 px-3 text-right">平均耗时</th>
-                  <th className="py-2.5 px-3.5 text-right">显微镜</th>
+                  <th scope="col" className="w-12 whitespace-nowrap py-2.5 px-2 text-center">定位</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-[var(--border-subtle)]">
                 {hardestQ.data!.items.map((t) => (
-                  <tr key={t.task_id} className="hover:bg-[var(--bg-elevated)]/65">
+                  <tr key={t.task_id} className="group/row-action hover:bg-[var(--bg-elevated)]/65">
                     <td className="py-2 px-3.5 font-mono text-[var(--text-primary)] flex items-center gap-1.5">
                       <Flame className="w-3.5 h-3.5 text-[var(--sem-err-fg)] shrink-0" />
                       <span>{t.task_id}</span>
@@ -362,13 +363,11 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
                     <td className="py-2 px-3 text-right tabular-nums text-[var(--text-muted)]">
                       {fmtDuration(t.avg_duration_sec)}
                     </td>
-                    <td className="py-2 px-3.5 text-right">
-                      <Link
-                        to={`/eval/batches/${t.sample_batch_id}/trials/${t.sample_trial_id}`}
-                        className="text-[var(--brand-primary)] no-underline hover:underline"
-                      >
-                        查看样例 Trial
-                      </Link>
+                    <td className="w-12 py-2 px-2 text-center">
+                      <RowActionIcon
+                        variant="microscope"
+                        to={`/eval/batches/${encodeURIComponent(t.sample_batch_id)}/trials/${encodeURIComponent(t.sample_trial_id)}`}
+                      />
                     </td>
                   </tr>
                 ))}

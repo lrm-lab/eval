@@ -1,5 +1,4 @@
 import React, { useMemo, useState } from 'react';
-import { Link } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
 import type * as echarts from 'echarts';
 import {
@@ -18,6 +17,7 @@ import { escapeHtml, fmtPct } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
+import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
 type DiagTab = 'failures' | 'submetrics' | 'efficiency' | 'tools' | 'clues';
@@ -549,12 +549,12 @@ export function DiagnosticsPage() {
                       <th className="py-2 px-3">批次 / Harness</th>
                       <th className="py-2 px-3">Task ID</th>
                       <th className="py-2 px-3">脱敏摘要</th>
-                      <th className="py-2 px-3 text-right">定位</th>
+                      <th scope="col" className="w-12 whitespace-nowrap py-2 px-2 text-center">定位</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-[var(--border-subtle)]">
                     {failuresQ.data.trials.slice(0, 60).map((t) => (
-                      <tr key={`${t.batch_id}-${t.trial_id}`} className="hover:bg-[var(--bg-elevated)]/60">
+                      <tr key={`${t.batch_id}-${t.trial_id}`} className="group/row-action hover:bg-[var(--bg-elevated)]/60">
                         <td className="py-2 px-3 font-mono text-[var(--sem-err-fg)]">
                           {t.failure_kind}
                           {t.http_status ? ` (HTTP ${t.http_status})` : ''}
@@ -567,13 +567,11 @@ export function DiagnosticsPage() {
                         <td className="py-2 px-3 text-[var(--text-secondary)] max-w-md truncate">
                           {t.failure_summary || t.exception_type || '—'}
                         </td>
-                        <td className="py-2 px-3 text-right">
-                          <Link
+                        <td className="w-12 py-2 px-2 text-center">
+                          <RowActionIcon
+                            variant="microscope"
                             to={`/eval/batches/${encodeURIComponent(t.batch_id)}/trials/${encodeURIComponent(t.trial_id)}`}
-                            className="text-[var(--brand-primary)] no-underline hover:underline"
-                          >
-                            显微镜
-                          </Link>
+                          />
                         </td>
                       </tr>
                     ))}
@@ -802,16 +800,14 @@ export function DiagnosticsPage() {
                   {(card.trials || []).length > 0 && (
                     <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1">
                       {card.trials.slice(0, 5).map((s) => (
-                        <div key={`${s.batch_id}-${s.trial_id}`} className="flex items-center justify-between gap-2 text-[11px]">
+                        <div key={`${s.batch_id}-${s.trial_id}`} className="group/row-action flex items-center justify-between gap-2 text-[11px]">
                           <span className="font-mono truncate">
                             {s.task_id} · <span className="text-[var(--text-muted)]">{s.batch_name}</span>
                           </span>
-                          <Link
+                          <RowActionIcon
+                            variant="microscope"
                             to={`/eval/batches/${encodeURIComponent(s.batch_id)}/trials/${encodeURIComponent(s.trial_id)}`}
-                            className="text-[var(--brand-primary)] no-underline hover:underline shrink-0"
-                          >
-                            显微镜
-                          </Link>
+                          />
                         </div>
                       ))}
                     </div>
