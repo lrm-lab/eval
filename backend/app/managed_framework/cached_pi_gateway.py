@@ -10,11 +10,13 @@ class CachedInterceptPi(CachedPi, InterceptPi):
     def __init__(self, *args, intercept_config, extra_env=None, **kwargs):
         base_url = intercept_config.get("base_url")
         session_key = intercept_config.get("api_key")
-        if not (base_url and session_key and intercept_config.get("model")):
+        model = intercept_config.get("model")
+        if not (base_url and session_key and model):
             raise ValueError("CachedInterceptPi requires an OpenEnv capture session")
 
         # Harbor 0.26 configures Pi's custom provider from its model connection.
         # Keep the upstream key in OpenEnv and give Pi only the capture session key.
+        kwargs["model_name"] = model
         super().__init__(
             *args,
             intercept_config=intercept_config,
