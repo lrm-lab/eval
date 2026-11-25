@@ -3,12 +3,17 @@ import logging.config
 import os
 import sqlite3
 import subprocess
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from queue import SimpleQueue
 
 import pytest
 import zstandard
 
 from app import logging_setup as logs
+from app.config import Settings
+from app.runner.daemon import IsolatedRunnerManager
 from scripts import backup_db
 
 
@@ -38,6 +43,15 @@ def test_stdio_flood_and_link_safety(tmp_path):
     assert len(segments) == 2
     assert all(p.stat().st_size <= MIB and p.stat().st_mode & 0o777 == 0o600 for p in segments)
     assert logs.read_bounded_tail_lines(path)[0][-1] == "last"
+
+
+def test_writer_refuses_oversized_existing_backup(tmp_path):
+    path = tmp_path / "runner_stdio.log"
+    backup = path.with_suffix(".log.1")
+    backup.write_bytes(b"x" * 1025)
+    with pytest.raises(OSError, match="Existing rotated stdio segment exceeds quota"):
+        logs.BoundedJobStdioWriter(path, max_segment_bytes=1024)
+    assert not path.exists()
 
 
 @pytest.mark.parametrize("limit", [200, 128 * 1024, 512 * 1024])
@@ -73,6 +87,81 @@ def test_reserve_running_jobs_before_pruning(tmp_path):
     assert result["committed_bytes_after"] == 5120
     assert {p.parent.name for p in tmp_path.glob("*/runner_stdio.log")} == {"new", "running"}
     assert unrelated.exists()
+
+
+def test_runner_reserves_stdio_for_concurrent_submissions(tmp_path, monkeypatch):
+    monkeypatch.setenv("LRM_JOB_STDIO_SEGMENT_BYTES", "1024")
+    monkeypatch.setenv("LRM_JOB_STDIO_MAX_TOTAL_BYTES", "4096")
+    work_dir = tmp_path / "runner-work"
+    evidence_dir = tmp_path / "evidence"
+    settings = Settings(
+        runtime_dir=tmp_path, config_dir=tmp_path, runner_work_dir=work_dir,
+        evidence_store_dir=evidence_dir, production_mode=False,
+    )
+    manager = IsolatedRunnerManager(settings, logging.getLogger(__name__))
+    monkeypatch.setattr(manager, "health", lambda: {"ok": True})
+    monkeypatch.setattr(manager.gateway_profiles, "resolve_runtime_credentials", lambda _: ({}, ""))
+
+    old_log = work_dir / "old" / "runner_stdio.log"
+    old_log.parent.mkdir(parents=True)
+    old_log.write_bytes(b"x" * 1024)
+    submit_together = threading.Barrier(3, timeout=5)
+    fill_logs = threading.Event()
+    finish_jobs = threading.Event()
+    filled = SimpleQueue()
+
+    def run_direct(state, spec, work_dir, evidence_dir, writer, gw_pub, gw_key, total_planned):
+        assert fill_logs.wait(5)
+        writer.write(b"x" * 8192)
+        filled.put(threading.current_thread())
+        assert finish_jobs.wait(5)
+        state.emit("runner_completed", {}, new_status="finalizing", exit_code=0)
+
+    monkeypatch.setattr(manager, "_run_real_direct", run_direct)
+
+    def submit(job_id):
+        return manager.submit_job({
+            "job_id": job_id, "channel_secret": "test-channel-secret", "spec": {"kind": "direct"},
+        })
+
+    def concurrent_submit(job_id):
+        submit_together.wait()
+        return submit(job_id)
+
+    def stdio_bytes():
+        return sum(path.stat().st_size for path in work_dir.glob("*/runner_stdio.log*"))
+
+    workers = []
+    try:
+        job_ids = ["job-a", "job-b", "job-c"]
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = dict(zip(job_ids, pool.map(concurrent_submit, job_ids)))
+        assert sorted(status for status, _ in results.values()) == [202, 202, 503]
+        rejected = next(job_id for job_id, (status, _) in results.items() if status == 503)
+        assert results[rejected][1]["code"] == "RUNNER_STDIO_CAPACITY_EXHAUSTED"
+        assert not (work_dir / rejected).exists()
+        assert not (evidence_dir / rejected).exists()
+        assert not old_log.exists()
+
+        fill_logs.set()
+        for _ in range(2):
+            workers.append(filled.get(timeout=5))
+        assert stdio_bytes() == 4096
+    finally:
+        fill_logs.set()
+        finish_jobs.set()
+        for worker in workers:
+            worker.join(timeout=5)
+            assert not worker.is_alive()
+
+    for job_id in job_ids:
+        if job_id != rejected:
+            assert manager.get_events(job_id, 0)[1]["status"] == "finalizing"
+    assert submit(rejected)[0] == 202
+    worker = filled.get(timeout=5)
+    worker.join(timeout=5)
+    assert not worker.is_alive()
+    assert stdio_bytes() == 4096
 
 
 def test_daemon_multibyte_and_oversized_records(tmp_path):
