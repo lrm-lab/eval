@@ -6,10 +6,44 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
+from app.indexing.hot_indexer import SourceApprovalRegistry
 from app.indexing.identity import make_batch_id
 from app.main import create_app
 from app.security.authz import ALL_SCOPES
 from tests.conftest import create_user, login_client
+
+
+def test_197_vlm_approvals_are_exact_and_limited_to_captured_evidence(tmp_path):
+    registry_src = Path(__file__).resolve().parents[2] / "config" / "source_approval_registry.yaml"
+    harbor_runs = tmp_path / "harbor-runs"
+    harbor_runs.mkdir()
+    registry_path = tmp_path / registry_src.name
+    registry_path.write_text(
+        registry_src.read_text(encoding="utf-8").replace(
+            "/home/share-data/tianxi_benches/harbor-runs/", f"{harbor_runs}/"
+        ),
+        encoding="utf-8",
+    )
+    registry = SourceApprovalRegistry(registry_path)
+    qa = frozenset({"summary_dto", "direct_vlm_qa"})
+    captured = qa | {"atif_trajectory"}
+    approval = ("default", "system", "approved_restricted")
+    pending = ("default", "system", "pending", frozenset())
+
+    for dataset in ("ai2d-test", "cmmmu-val", "mm-ifeval", "mmmu-pro-10c"):
+        for name, classes in (
+            (f"vlmkit-qwen-ca-{dataset}-smoke-20261125T060844Z-22210", captured),
+            (f"verify-{dataset}-smoke-20261125T060504Z-35747", qa),
+        ):
+            batch = harbor_runs / name
+            assert registry.lookup_full(batch) == (*approval, classes)
+            assert registry.lookup_full(batch / "trials" / "sample") == (*approval, classes)
+            assert registry.lookup_full(harbor_runs / f"{name}-rerun") == pending
+
+    ai2d = harbor_runs / "ai2d-vlmkit-qwen38-27b-20261124"
+    assert registry.lookup_full(ai2d) == (*approval, captured)
+    assert registry.lookup_full(ai2d.with_name(f"{ai2d.name}-rerun")) == (*approval, qa)
+    assert registry.lookup_full(harbor_runs / "vlmkit-qwen-ca-ai2d-holdout") == pending
 
 
 def test_legacy_vlm_media_indexed_and_backfilled_on_hot_scan(tmp_path, isolated_settings):
