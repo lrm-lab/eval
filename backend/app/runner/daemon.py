@@ -641,6 +641,9 @@ class IsolatedRunnerManager:
         for pass_key in ("VLMEVALKIT_ROOT", "VLMEVALKIT_PYTHON", "PI_BENCH_RUNNER_BIN", "TIANXI_BENCH_BUNDLE"):
             if os.environ.get(pass_key):
                 extra_env[pass_key] = os.environ[pass_key]
+        if is_vlm and os.environ.get("REQUESTS_CA_BUNDLE"):
+            # The native toolkit uses requests, which otherwise uses its bundled CA set.
+            extra_env["REQUESTS_CA_BUNDLE"] = os.environ["REQUESTS_CA_BUNDLE"]
         if os.environ.get("LRM_RUNNER_OPENENV_PYTHONPATH"):
             extra_env["PYTHONPATH"] = os.environ["LRM_RUNNER_OPENENV_PYTHONPATH"]
 

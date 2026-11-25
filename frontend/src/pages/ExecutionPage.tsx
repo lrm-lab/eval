@@ -78,6 +78,14 @@ export interface RegisteredSuite {
   reason: string | null;
 }
 
+function defaultSuiteForRunner(suites: RegisteredSuite[], kind: RunnerKind) {
+  const runner = kind === 'harbor_gateway' ? 'harbor' : kind;
+  const matching = suites.filter((suite) => suite.runner === runner);
+  const smokeSuites = matching.filter((suite) => suite.split === 'smoke' && (suite.task_count ?? 0) > 0);
+  smokeSuites.sort((first, second) => (first.task_count ?? 0) - (second.task_count ?? 0));
+  return smokeSuites[0] ?? matching[0];
+}
+
 export interface UnintegratedSuite {
   suite_id: string;
   display_name: string;
@@ -792,8 +800,9 @@ export function ExecutionPage() {
     queryFn: () => apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities'),
   });
   const configuredRunners = capsQ.data?.runner_environment.supported_runners ?? [];
+  const firstReadyRunner = capsQ.data?.runner_kinds.find((runner) => configuredRunners.includes(runner.kind))?.kind;
   const suggestedKind = capsQ.data?.runner_environment.isolated_runner_ready
-    ? capsQ.data.runner_kinds.find((runner) => configuredRunners.includes(runner.kind))?.kind
+    ? (configuredRunners.includes('direct') ? 'direct' : firstReadyRunner)
     : undefined;
   const kind = runnerChoice ?? suggestedKind ?? 'harbor';
 
@@ -844,8 +853,7 @@ export function ExecutionPage() {
     if (!caps) return;
     if (runnerChoice === null && suggestedKind) setKind(suggestedKind);
     if (!suiteId && caps.suites.length > 0) {
-      const targetRunner = kind === 'harbor_gateway' ? 'harbor' : kind;
-      const match = caps.suites.find((s) => s.runner === targetRunner) || caps.suites[0];
+      const match = defaultSuiteForRunner(caps.suites, kind) ?? caps.suites[0];
       if (match) setSuiteId(match.suite_id);
     }
     if (caps.gateway_profiles.length > 0) {
@@ -881,7 +889,7 @@ export function ExecutionPage() {
       const targetRunner = nextKind === 'harbor_gateway' ? 'harbor' : nextKind;
       const curSuite = suites.find((s) => s.suite_id === suiteId);
       if (!curSuite || curSuite.runner !== targetRunner) {
-        const match = suites.find((s) => s.runner === targetRunner);
+        const match = defaultSuiteForRunner(suites, nextKind);
         if (match) setSuiteId(match.suite_id);
       }
     }
