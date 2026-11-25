@@ -410,6 +410,9 @@ export function ComparePage() {
     return base.length > 0 ? base : ['default'];
   }, [optsQ.data?.writable_projects, user]);
   const effectiveSaveProject = saveProjectId && writableProjects.includes(saveProjectId) ? saveProjectId : writableProjects[0];
+  const sampleSetOptions = (optsQ.data?.sample_sets || []).filter((item) =>
+    !scopedReleaseIds?.length || scopedReleaseIds.includes(item.dataset_release_id ?? '')
+  );
 
   const savedOpenQ = useQuery({
     queryKey: ['compare-saved-open', openId],
@@ -1026,7 +1029,7 @@ export function ComparePage() {
                   ))}
             </select>
 
-            {modeKind === 'batch' && (optsQ.data?.sample_sets || []).length > 0 && (
+            {modeKind === 'batch' && sampleSetOptions.length > 0 && (
               <select
                 aria-label="选择自定义样本集"
                 value={sampleSetId}
@@ -1034,7 +1037,7 @@ export function ComparePage() {
                 className="rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs cursor-pointer"
               >
                 <option value="">全量共同题（无样本集过滤）</option>
-                {optsQ.data!.sample_sets.map((ss) => (
+                {sampleSetOptions.map((ss) => (
                   <option key={ss.set_id} value={ss.set_id}>
                     样本集: {ss.name} ({ss.task_ids.length} 题)
                   </option>
@@ -1271,6 +1274,9 @@ export function ComparePage() {
                         <div>
                           <strong>没有共同有效题</strong>
                           <div>覆盖 {row.intersection.common_covered_tasks} · 故障排除 {row.intersection.fault_excluded_tasks}</div>
+                          {Boolean(row.version_drift?.drifted_task_count) && (
+                            <div>题面版本不同 {row.version_drift?.drifted_task_count} 题</div>
+                          )}
                         </div>
                       ) : row.intersection.common_valid_scored_tasks !== null ? (
                         <button

@@ -5,6 +5,7 @@ import { ArrowRight, GitCompareArrows } from 'lucide-react';
 import { ApiError, apiFetch } from '../../lib/api';
 import { fmtDateShort, fmtDeltaPP, fmtPct, runScopeLabel } from '../../lib/format';
 import { StateNoticeCard } from './Skeletons';
+import type { DatasetReleaseDTO } from '../../types/api';
 
 interface GroupedBatch {
   batch_id: string;
@@ -14,7 +15,7 @@ interface GroupedBatch {
   planned: number | null;
   recorded: number;
   scored: number;
-  unique_tasks: number;
+  observed_unique_tasks?: number | null;
   batch_status: string | null;
   attempts_per_task: number | null;
   timeout_seconds: number | null;
@@ -198,10 +199,12 @@ function HistoricalScores({
 export function GroupedComparePanel({
   benchmark,
   data,
+  datasetReleases,
   onReload,
 }: {
   benchmark: string;
   data: GroupedComparison | undefined;
+  datasetReleases: DatasetReleaseDTO[];
   onReload: () => Promise<unknown>;
 }) {
   const navigate = useNavigate();
@@ -229,6 +232,7 @@ export function GroupedComparePanel({
   }
   const defaultDimension = !batchHint && [...configuredHarnesses.values()].some((keys) => keys.size >= 2) ? 'model' : 'combination';
   const dimension = dimensions.find((item) => item.id === params.get('group_dimension'))?.id ?? defaultDimension;
+  const knownTaskCount = datasetReleases.find((release) => release.dataset_release_id === context?.dataset_release_id)?.known_task_count;
   const contextsForRelease = contexts.filter((item) => item.dataset_release_id === context?.dataset_release_id);
   const releases = [...new Map(contexts.map((item) => [item.dataset_release_id, item])).values()];
 
@@ -294,7 +298,13 @@ export function GroupedComparePanel({
     const ownIds = new Set(group.batches.map((candidate) => candidate.batch_id));
     const picks = pickTokens.filter((token) => !ownIds.has(token.split(':', 1)[0]));
     if (batch) picks.push(batchToken(batch));
-    update({ group_context: context?.context_id, group_dimension: dimension, group_anchor: anchor }, picks);
+    const nextBaseline = !base && batch ? group.group_id
+      : base?.group.group_id === group.group_id && !batch
+        ? activeRows.find((row) => row.group.group_id !== group.group_id)?.group.group_id
+        : base?.group.group_id;
+    update({
+      group_context: context?.context_id, group_dimension: dimension, group_anchor: anchor, group_base: nextBaseline,
+    }, picks);
   }
 
   function submit(payload: GroupComparisonRequest) {
@@ -529,7 +539,8 @@ export function GroupedComparePanel({
                           )}
                           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[11px]">
                             <span className="tabular-nums text-[var(--text-secondary)]">
-                              {displayed.unique_tasks} 题 · {displayed.scored}/{displayed.recorded} 有效试验 · 计划 {displayed.planned ?? '未知'} · {runScopeLabel(displayed.run_scope)}
+                              题目覆盖 {displayed.observed_unique_tasks ?? '未知'} / {knownTaskCount ?? '未知'}
+                              {' · '}{displayed.scored}/{displayed.recorded} 有效试验 · 计划 {displayed.planned ?? '未知'} · {runScopeLabel(displayed.run_scope)}
                             </span>
                             <Link className="text-[var(--brand-primary)] hover:underline" to={`/eval/batches/${encodeURIComponent(displayed.batch_id)}`}>
                               查看批次

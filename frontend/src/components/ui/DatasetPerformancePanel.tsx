@@ -28,7 +28,7 @@ export interface DatasetPerformanceRow {
   scored: number | null;
   recorded: number | null;
   planned: number | null;
-  unique_tasks?: number | null;
+  observed_unique_tasks?: number | null;
   known_task_count?: number | null;
   batch_status: string | null;
   identity_status: string;
@@ -211,7 +211,7 @@ export function DatasetPerformancePanel({
                     {scoreLabels[row.score_kind]} · 分母 {row.denominator ?? '未知'}
                   </div>
                   <div className="text-[11px] tabular-nums text-[var(--text-muted)]">
-                    有效 / 已录试验 {row.scored ?? '—'} / {row.recorded ?? '—'} · 题目覆盖 {row.unique_tasks ?? '—'} / {row.known_task_count ?? '—'}
+                    有效 / 已录试验 {row.scored ?? '—'} / {row.recorded ?? '—'} · 题目覆盖 {row.observed_unique_tasks ?? '未知'} / {row.known_task_count ?? '未知'}
                   </div>
                   {(row.attempts_per_task != null || row.timeout_seconds != null) && (
                     <div className="text-[11px] text-[var(--text-muted)]">

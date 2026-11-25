@@ -282,7 +282,12 @@ function BenchmarkProfileView({ benchmarkSlug }: { benchmarkSlug: string }) {
       />
 
       {tab === 'groups' && data && !profQ.isError && (
-        <GroupedComparePanel benchmark={benchmarkSlug} data={data.grouped_comparison} onReload={profQ.refetch} />
+        <GroupedComparePanel
+          benchmark={benchmarkSlug}
+          data={data.grouped_comparison}
+          datasetReleases={data.releases}
+          onReload={profQ.refetch}
+        />
       )}
       {(tab === 'leaderboard' || tab === 'groups') && data && (
         <PublicBaselinePanel
