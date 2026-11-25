@@ -38,7 +38,7 @@ from app.security.redaction import (
     redact_path,
     redact_text,
 )
-from app.security.storage_probe import resolve_within_root, validate_safe_id
+from app.security.storage_probe import SAFE_ID_RE, resolve_within_root
 from app.services.methodology import TokenSemanticsValidator, finite, normalize_score_to_100
 
 _DATA_IMAGE_RE = re.compile(r"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]{16,})")
@@ -548,9 +548,16 @@ def _check_submission_file(st: os.stat_result) -> None:
         raise PermissionError("Expected private regular submission file")
 
 
+def _submission_filename(batch_name: str) -> str:
+    # Batch names support consecutive dots within a single filename component.
+    if not SAFE_ID_RE.fullmatch(batch_name):
+        raise AppError(400, "INVALID_PATH_OR_ID", "非法路径标识 batch_name", {"field": "batch_name"})
+    return f"{batch_name}.json"
+
+
 def write_runner_submission(state_dir: Path, doc: dict[str, Any]) -> None:
     """Replace the ledger entry atomically, relative to a pinned private directory."""
-    name = validate_safe_id(doc["batch_name"], "batch_name") + ".json"
+    name = _submission_filename(doc["batch_name"])
     with _submission_dir(state_dir, create=True) as directory:
         try:
             _check_submission_file(os.stat(name, dir_fd=directory, follow_symlinks=False))
@@ -888,7 +895,7 @@ class HotIndexer:
 
         if self.settings.state_dir is not None:
             try:
-                name = validate_safe_id(batch_name, "batch_name") + ".json"
+                name = _submission_filename(batch_name)
                 with _submission_dir(self.settings.state_dir) as directory:
                     fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
                     with os.fdopen(fd, "rb") as stream:
