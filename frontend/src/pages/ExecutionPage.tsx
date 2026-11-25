@@ -71,6 +71,8 @@ export interface RegisteredSuite {
   handoff_profile?: string | null;
   reward_key?: string;
   task_count?: number | null;
+  ready_task_count?: number;
+  ready_tasks?: string[];
   sample_tasks?: string[];
   task_discovery_status?: string;
   registered: boolean;
@@ -80,7 +82,7 @@ export interface RegisteredSuite {
 
 function defaultSuiteForRunner(suites: RegisteredSuite[], kind: RunnerKind) {
   const runner = kind === 'harbor_gateway' ? 'harbor' : kind;
-  const matching = suites.filter((suite) => suite.runner === runner);
+  const matching = suites.filter((suite) => suite.runner === runner && suite.selectable);
   const smokeSuites = matching.filter((suite) => suite.split === 'smoke' && (suite.task_count ?? 0) > 0);
   smokeSuites.sort((first, second) => (first.task_count ?? 0) - (second.task_count ?? 0));
   return smokeSuites[0] ?? matching[0];
@@ -865,6 +867,20 @@ export function ExecutionPage() {
   }, [vlmTaskGuardrailActive, vlmevalkitMode]);
 
   const parsedTasks = useMemo(() => parseTaskList(tasksInput), [tasksInput]);
+  const readyTaskCount = selectedSuite?.ready_task_count;
+  const readyTasks = selectedSuite?.ready_tasks;
+  const taskImagesPending = readyTaskCount !== undefined && readyTaskCount < (selectedSuite?.task_count ?? 1);
+  const hasUnreadyTask = readyTasks !== undefined && parsedTasks.some((task) => !readyTasks.includes(task));
+  const executionScopeReady = readyTaskCount === undefined ||
+    (readyTaskCount > 0 && (selectionMode === 'all' ? !taskImagesPending : parsedTasks.length > 0 && !hasUnreadyTask));
+
+  useEffect(() => {
+    if (taskImagesPending && selectionMode === 'all') {
+      setSelectionMode('tasks');
+      setPlanResult(null);
+    }
+  }, [taskImagesPending, selectionMode]);
+
   const effectiveRunScope =
     selectionMode === 'all'
       ? (selectedSuite?.split === 'smoke' ? 'smoke' : 'full_split')
@@ -1593,7 +1609,9 @@ export function ExecutionPage() {
                         return (
                           <option key={s.suite_id} value={s.suite_id} disabled={!runnable}>
                             {s.display_name} ({s.suite_id}
-                            {typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
+                            {s.ready_task_count !== undefined
+                              ? ` · ${s.ready_task_count}/${s.task_count ?? 0} 题镜像就绪`
+                              : typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
                             {s.split ? ` · ${s.split}` : ''})
                             {!runnable && ' · 暂不可运行'}
                           </option>
@@ -1648,12 +1666,13 @@ export function ExecutionPage() {
                   <div className="flex flex-wrap items-center gap-2">
                     <button
                       type="button"
+                      disabled={taskImagesPending}
                       aria-pressed={selectionMode === 'all'}
                       onClick={() => {
                         setSelectionMode('all');
                         setPlanResult(null);
                       }}
-                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors ${
+                      className={`rounded-lg border px-3 py-1.5 text-xs font-medium cursor-pointer transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                         selectionMode === 'all'
                           ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)]'
                           : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[var(--text-secondary)]'
@@ -1684,6 +1703,11 @@ export function ExecutionPage() {
                   <p title="run_scope · official_status" className="font-mono text-[11px] text-[var(--text-secondary)]">
                     {runScopeLabel(effectiveRunScope)} · {effectiveOfficialStatus}
                   </p>
+                  {taskImagesPending && (
+                    <p className="text-[11px] text-[var(--text-secondary)]">
+                      {readyTaskCount}/{selectedSuite?.task_count ?? 0} 题镜像就绪，全部就绪后开放全量评测。
+                    </p>
+                  )}
                 </div>
 
                 {selectionMode === 'tasks' && (
@@ -1704,6 +1728,28 @@ export function ExecutionPage() {
                       className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 font-mono text-xs text-[var(--text-primary)]"
                     />
                   </label>
+                )}
+
+                {selectionMode === 'tasks' && hasUnreadyTask && (
+                  <p className="text-[11px] text-[var(--text-secondary)]">部分任务的镜像尚未就绪，请选择已就绪的题目。</p>
+                )}
+
+                {selectionMode === 'tasks' && readyTaskCount !== undefined && Boolean(selectedSuite?.sample_tasks?.length) && (
+                  <div className="flex flex-wrap gap-1.5" aria-label="已就绪题目">
+                    {selectedSuite?.sample_tasks?.map((task) => (
+                      <button
+                        key={task}
+                        type="button"
+                        onClick={() => {
+                          setTasksInput(task);
+                          setPlanResult(null);
+                        }}
+                        className="rounded-md border border-[var(--border-subtle)] px-2 py-1 font-mono text-[11px] text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]"
+                      >
+                        {task}
+                      </button>
+                    ))}
+                  </div>
                 )}
 
                 {/* VLMEvalKit mode selector + VLMEVALKIT.md:44 lock */}
@@ -2165,7 +2211,7 @@ export function ExecutionPage() {
           <div className="grid gap-2">
             <button
               type="button"
-              disabled={!canStart || submitMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
+              disabled={!canStart || submitMut.isPending || !activeRunnerAvailable || !executionScopeReady || (selectionMode === 'tasks' && parsedTasks.length === 0)}
               onClick={() => submitMut.mutate()}
               aria-label="启动隔离执行作业"
               className="lrm-press inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white hover:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-45"

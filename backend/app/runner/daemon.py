@@ -59,6 +59,7 @@ from app.runner.cli_contract import (
     build_managed_run_py_command,
     materialize_managed_run_config,
 )
+from app.runner.terminal_images import terminal_image_readiness, terminal_selection_ready
 from app.runner.vlmevalkit_results import read_vlmevalkit_results
 from app.security.gateways import GatewayProfileRegistry
 from app.security.managed_exec import (
@@ -298,6 +299,7 @@ class IsolatedRunnerManager:
             "runner_user": runner_user,
             "docker_available": docker_ok,
             "harbor_gateway_runtime_ready": self._gateway_runtime_ready,
+            "terminal_image_readiness": terminal_image_readiness(self.settings) if docker_ok and direct_ok else None,
             "vlmevalkit_ready": vlm_ok,
             "direct_ready": direct_ok,
             "supported_runners": supported,
@@ -364,6 +366,12 @@ class IsolatedRunnerManager:
                 "message": "当前隔离 Runner 的 OpenEnv 采集依赖未就绪，暂不可运行 Harbor Gateway 作业",
                 "detail": {"kind": kind, "harbor_gateway_runtime_ready": False},
             }
+        if kind in ("harbor", "harbor_gateway") and spec.get("suite_id") == "terminal":
+            if not terminal_selection_ready(spec, h["terminal_image_readiness"]):
+                return 409, {
+                    "code": "TASK_IMAGE_NOT_READY",
+                    "message": "所选 Terminal-Bench 题目的运行镜像尚未就绪，请选择已就绪的题目",
+                }
         if kind == "vlmevalkit" and not h["vlmevalkit_ready"]:
             return 503, {
                 "code": "RUNNER_CAPABILITY_UNAVAILABLE",

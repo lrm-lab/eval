@@ -37,6 +37,7 @@ from app.logging_setup import (
 )
 from app.runner.cli_contract import build_managed_run_py_command
 from app.runner.client import RunnerIPCClient
+from app.runner.terminal_images import terminal_selection_ready
 from app.runner.vlmevalkit_results import OFFICIAL_RESULT_FILE, VLM_SCORING_FILES, encode_vlmevalkit_results
 from app.security.auth import AuthUser
 from app.security.authz import (
@@ -367,6 +368,7 @@ class ExecutionService:
             "runner_user": ipc_health.get("runner_user"),
             "docker_available": bool(ipc_health.get("docker_available", False)),
             "harbor_gateway_runtime_ready": bool(ipc_health.get("harbor_gateway_runtime_ready", False)),
+            "terminal_image_readiness": ipc_health.get("terminal_image_readiness") if ready else None,
             "vlmevalkit_ready": bool(ipc_health.get("vlmevalkit_ready", False)),
             "direct_ready": bool(ipc_health.get("direct_ready", False)),
             "supported_runners": list(ipc_health.get("supported_runners") or []),
@@ -562,6 +564,7 @@ class ExecutionService:
         return [], None, "unknown_runner"
 
     def get_capabilities(self, user: AuthUser) -> dict[str, Any]:
+        runner_env = self.probe_runner_health()
         registered = self._load_registered_suites()
         if not has_scope(user, "dataset:holdout_read"):
             visible_registered = [
@@ -574,6 +577,17 @@ class ExecutionService:
         public_suites: list[dict[str, Any]] = []
         for s in visible_registered:
             tasks, count, disc_status = self._discover_suite_tasks(s)
+            availability = {}
+            if s["suite_id"] == "terminal":
+                readiness = runner_env.get("terminal_image_readiness") or {}
+                ready = set(readiness.get("ready_tasks", []))
+                tasks = [task for task in tasks if task in ready]
+                availability = {
+                    "ready_task_count": len(tasks),
+                    "ready_tasks": tasks,
+                    "selectable": bool(tasks),
+                    "reason": None if tasks else "当前执行环境暂无镜像就绪的 Terminal-Bench 题目",
+                }
             public_suites.append(
                 {
                     "suite_id": s["suite_id"],
@@ -588,10 +602,10 @@ class ExecutionService:
                     "registered": True,
                     "selectable": True,
                     "reason": None,
+                    **availability,
                 }
             )
 
-        runner_env = self.probe_runner_health()
         return {
             "methodology_version": self.settings.methodology_version,
             "runner_kinds": [
@@ -1628,6 +1642,10 @@ class ExecutionService:
         runner_instance_id = rhealth.get("runner_instance_id")
         if not isinstance(runner_instance_id, str) or not runner_instance_id:
             raise AppError(503, "RUNNER_PROTOCOL_MISMATCH", "隔离 Runner 未提供实例标识，请同代更新 Web 与 Runner")
+        if spec["suite_id"] == "terminal" and not terminal_selection_ready(spec, rhealth.get("terminal_image_readiness")):
+            raise AppError(
+                409, "TASK_IMAGE_NOT_READY", "所选 Terminal-Bench 题目的运行镜像尚未就绪，请选择已就绪的题目",
+            )
 
         batch_name = spec["batch_name"]
         want_harbor_publish = bool(payload.get("publish_to_harbor_runs", False))
