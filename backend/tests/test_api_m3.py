@@ -1601,12 +1601,16 @@ with TestClient(app) as client:
             )}
             wire_path = tmp_path / "delayed-submission.json"
             backend_root = Path(__file__).resolve().parents[1]
-            child = subprocess.run(
-                [sys.executable, "-c", crash_code, crash_at, json.dumps(paths), json.dumps(job_request), str(wire_path)],
-                cwd=backend_root, env={**os.environ, "PYTHONPATH": str(backend_root)},
-                capture_output=True, text=True, timeout=20,
-            )
-            assert child.returncode == 57, child.stderr
+
+            def crash_web(request, dispatch_file):
+                child = subprocess.run(
+                    [sys.executable, "-c", crash_code, crash_at, json.dumps(paths), json.dumps(request), str(dispatch_file)],
+                    cwd=backend_root, env={**os.environ, "PYTHONPATH": str(backend_root)},
+                    capture_output=True, text=True, timeout=20,
+                )
+                assert child.returncode == 57, child.stderr
+
+            crash_web(job_request, wire_path)
             job = app.state.ctx.db.fetchone("SELECT job_id, status FROM exec_jobs WHERE batch_name = ?", (batch_name,))
             assert job is not None
             old_job_id = job["job_id"]
@@ -1675,6 +1679,48 @@ with TestClient(app) as client:
                 assert row == {"project_id": "team_restart", "owner_id": owner,
                                "generation_id": snapshot["generation_id"]}
                 assert not ctx.db.fetchall("SELECT job_id FROM exec_batch_reservations")
+
+            if crash_at == "before_dispatch":
+                # Leave a second reservation unresolved when the original Runner is replaced.
+                unresolved_request = {**job_request, "batch_name": "restart-unresolved-publication"}
+                unresolved_wire = tmp_path / "unresolved-submission.json"
+                crash_web(unresolved_request, unresolved_wire)
+
+        if crash_at == "before_dispatch":
+            with _start_external_runner_daemon(isolated_settings):
+                replacement = create_app(isolated_settings, run_startup_scan=False)
+                ctx = replacement.state.ctx
+                old_payload = json.loads(wire_path.read_text())
+                unresolved_payload = json.loads(unresolved_wire.read_text())
+                runner = ctx.execution.ipc
+                assert runner.probe_health()["runner_instance_id"] != old_payload["runner_instance_id"]
+                for payload in (old_payload, unresolved_payload):
+                    assert runner.submit_job(payload) == (409, {
+                        "code": "RUNNER_INSTANCE_MISMATCH", "job_id": payload["job_id"],
+                    })
+                    assert runner.get_events(payload["job_id"])[0] == 404
+
+                recovered = threading.Event()
+                recover = runner.recover_job
+
+                def observe_recovery(job_id):
+                    response = recover(job_id)
+                    recovered.set()
+                    return response
+
+                monkeypatch.setattr(runner, "recover_job", observe_recovery)
+                with TestClient(replacement) as client:
+                    csrf = login_client(client, "restart_admin", "RestartFixture!2026")
+                    assert recovered.wait(5)
+                    reply = client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json=unresolved_request)
+                    assert reply.status_code == 409
+                    assert ctx.db.fetchone("SELECT job_id FROM exec_batch_reservations") == {
+                        "job_id": unresolved_payload["job_id"],
+                    }
+                    valid_request = {**job_request, "batch_name": "restart-replacement-valid"}
+                    reply = client.post("/api/v1/execution/jobs", headers={"X-CSRF-Token": csrf}, json=valid_request)
+                    assert reply.status_code == 202, reply.text
+                    assert _wait_job_terminal(client, reply.json()["job_id"])["status"] == "finished"
 
 
 def test_m3_e02_training_opd_empty_prod_state_contract_fixture_and_holdout_guardrail(
