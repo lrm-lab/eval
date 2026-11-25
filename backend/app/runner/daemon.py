@@ -116,7 +116,7 @@ raise SystemExit(0 if all(map(callable, (Server, create_app, export_session, run
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            timeout=6.0,
+            timeout=15.0,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
