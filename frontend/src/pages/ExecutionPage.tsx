@@ -838,8 +838,11 @@ export function ExecutionPage() {
   }, [vlmTaskGuardrailActive, vlmevalkitMode]);
 
   const parsedTasks = useMemo(() => parseTaskList(tasksInput), [tasksInput]);
+  const selectedSuite = capsQ.data?.suites.find((suite) => suite.suite_id === suiteId);
   const effectiveRunScope =
-    selectionMode === 'all' ? 'full_split' : parsedTasks.length <= 10 ? 'smoke' : 'subset';
+    selectionMode === 'all'
+      ? (selectedSuite?.split === 'smoke' ? 'smoke' : 'full_split')
+      : (parsedTasks.length <= 10 ? 'smoke' : 'subset');
   const effectiveOfficialStatus =
     kind === 'vlmevalkit' && effectiveVlmMode === 'infer'
       ? 'unscored'
@@ -1364,7 +1367,6 @@ export function ExecutionPage() {
 
   // ---------- Computed View Data ----------
   const runnerKinds = capsQ.data?.runner_kinds ?? FALLBACK_RUNNER_KINDS;
-  const selectedSuite = capsQ.data?.suites.find((suite) => suite.suite_id === suiteId);
   const dockerGroupAttached =
     planResult?.docker_group_attached ?? capsQ.data?.runner_environment.docker_group_attached ?? false;
   const isolatedRunnerReady = Boolean(capsQ.data?.runner_environment.isolated_runner_ready);
