@@ -146,6 +146,19 @@ def test_grouped_profile_and_cross_dataset_matrix_use_exact_authorized_batches(c
     _insert_batch(db, "g_other_team", {"ordinary": (1, "same")}, project="team-other")
     _insert_batch(db, "h_placeholder", {}, placeholder=1, status="running")
     _insert_batch(db, "i_shared", {"ordinary": (1, "same")}, project="team-shared", harness="pi")
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET unique_tasks = 20, recorded = 4 WHERE batch_id = 'a_current'")
+        conn.executemany(
+            """
+            INSERT INTO episodes (batch_id, trial_id, canonical_trial_key, generation_id, task_id, status)
+            VALUES ('a_current', ?, ?, ?, ?, 'failed')
+            """,
+            [
+                ("retry", "retry", "gen_old", "ordinary"),
+                ("hidden", "hidden", "gen_old", "hidden-task"),
+                ("past", "past", "gen_past", "past-task"),
+            ],
+        )
 
     result = client.get(f"/api/v1/benchmarks/{BENCHMARK}").json()
     grouped = result["grouped_comparison"]
@@ -158,13 +171,14 @@ def test_grouped_profile_and_cross_dataset_matrix_use_exact_authorized_batches(c
     assert group["default_batch_id"] == "a_current"
     assert [b["batch_id"] for b in group["batches"]] == ["a_unscored", "a_current"]
     assert batch["generation_id"] == "gen_old" and batch["has_visible_task_scores"]
+    assert (batch["observed_unique_tasks"], batch["unique_tasks"], batch["recorded"]) == (2, 20, 4)
     assert (batch["attempts_per_task"], batch["timeout_seconds"]) == (2, 60)
     assert by_batch["c_unknown"][0]["harness_key"] is None
     assert by_batch["c_unknown"][0]["runner"] == "harbor"
     assert (NEXT, PROTOCOL, "reward") in contexts and (RELEASE, "other-protocol", "reward") in contexts
     held = contexts[(HOLDOUT, PROTOCOL, "reward")]["groups"][0]["batches"][0]
     assert not held["task_details_allowed"] and not held["has_visible_task_scores"]
-    assert held["scored"] == 1
+    assert held["scored"] == 1 and held["observed_unique_tasks"] is None
     accuracy = contexts[(RELEASE, "legacy-20261120-csv", "accuracy")]
     assert accuracy["kind"] == "historical_summary" and len(accuracy["groups"]) == 2
     assert all(
@@ -182,7 +196,9 @@ def test_grouped_profile_and_cross_dataset_matrix_use_exact_authorized_batches(c
     assert left == m_rows["a_current"] and right == m_rows["d_next"]
     assert left["model_key"] == right["model_key"] and left["model_route"] != right["model_route"]
     assert (left["dataset_version"], right["dataset_version"], right["split"]) == ("1", "2", "default")
-    assert (left["scored"], left["recorded"], left["known_task_count"], left["denominator"]) == (1, 2, 20, 1)
+    assert (left["scored"], left["recorded"], left["known_task_count"], left["denominator"]) == (1, 4, 20, 1)
+    assert left["observed_unique_tasks"] == 2 and left["unique_tasks"] == 20
+    assert h_rows["f_holdout"]["observed_unique_tasks"] is None
     assert left["score"] == 100 and left["score_kind"] == "trial_valid_mean"
     assert h_rows["a_unscored"]["score"] is None and h_rows["a_unscored"]["denominator"] is None
     assert "g_other_team" not in m_rows
@@ -192,8 +208,17 @@ def test_grouped_profile_and_cross_dataset_matrix_use_exact_authorized_batches(c
         "contexts": [], "empty_reason": "no_authorized_results",
     }
     with db.transaction() as conn:
-        conn.execute("UPDATE users SET projects_json = '[\"default\"]' WHERE user_id = ?", (uid,))
+        conn.execute(
+            """UPDATE users SET projects_json = '["default"]', scopes_json = '["dataset:holdout_read"]'
+               WHERE user_id = ?""",
+            (uid,),
+        )
     assert "i_shared" not in client.get(f"/api/v1/benchmarks/{BENCHMARK}").text
+    observed = {
+        r["batch_id"]: r["observed_unique_tasks"]
+        for r in client.get("/api/v1/harnesses/codex").json()["dataset_performance"]
+    }
+    assert observed["a_current"] == 3 and observed["f_holdout"] == 1
 
 
 def test_grouped_n_way_and_scoped_legacy_totals_keep_their_denominators(case) -> None:
