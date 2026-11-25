@@ -37,6 +37,7 @@ from app.logging_setup import (
 )
 from app.runner.cli_contract import build_managed_run_py_command
 from app.runner.client import RunnerIPCClient
+from app.runner.gateway_evidence import gateway_receipt, read_gateway_capture, read_gateway_receipts
 from app.runner.terminal_images import terminal_selection_ready
 from app.runner.vlmevalkit_results import OFFICIAL_RESULT_FILE, VLM_SCORING_FILES, encode_vlmevalkit_results
 from app.security.auth import AuthUser
@@ -51,6 +52,7 @@ from app.security.gateways import GatewayProfileRegistry
 from app.security.managed_exec import build_sanitized_subprocess_env, resolve_verified_managed_script
 from app.security.redaction import redact_json_recursive, redact_path, redact_text
 from app.security.storage_probe import probe_isolated_dir, validate_safe_id
+from app.services.gateway_view import gateway_window
 
 ALLOWED_RUNNER_KINDS = ("harbor", "harbor_gateway", "vlmevalkit", "direct")
 TERMINAL_STATUSES = frozenset({"finished", "failed", "interrupted", "paused_by_guard"})
@@ -1201,6 +1203,8 @@ class ExecutionService:
                 continue
             task_attempts_plan[ts] = task_attempts_plan.get(ts, 0) + int(spec["attempts"])
 
+        job_work = self.settings.runner_work_dir / job_id  # type: ignore[operator]
+        gateway_receipts = read_gateway_receipts(job_work, batch_name) if spec["kind"] == "harbor_gateway" else None
         for tr in trial_outcomes:
             tid = str(tr["trial_id"])
             st = str(tr["status"])
@@ -1231,6 +1235,10 @@ class ExecutionService:
             restricted_doc["task_id"] = str(tr["task_id"])
             restricted_doc["generation_id"] = gen_id
             restricted_doc["storage_tier"] = "isolated_0700_evidence_store"
+            if gateway_receipts is not None:
+                gateway = gateway_receipt(job_work, batch_name, tid, gateway_receipts)
+                read_gateway_capture(evidence_dir, batch_name, gateway)
+                restricted_doc["gateway_receipt"] = gateway
             if "verifier_log" in restricted_doc and isinstance(restricted_doc["verifier_log"], str):
                 restricted_doc["verifier_log"] = redact_text(restricted_doc["verifier_log"])
             ev_bytes = (json.dumps(restricted_doc, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
@@ -1244,7 +1252,6 @@ class ExecutionService:
                 "sha256": ev_sha,
                 "size": len(ev_bytes),
             }
-
             # Approved lightweight public trial summary inside immutable generations/<gen_id>/trials/<tid>/
             res_rel_path = f"generations/{gen_id}/trials/{tid}/result.json"
             t_pub_dir = out_dir / "generations" / gen_id / "trials" / tid
@@ -1297,7 +1304,7 @@ class ExecutionService:
                 "trajectory": None,
                 "trajectory_status": "missing",
                 "gateway_trace": None,
-                "gateway_status": "not_captured",
+                "gateway_status": "captured" if gateway_receipts is not None else "not_captured",
                 "training_trace": None,
                 "training_status": "not_captured",
                 "evidence_refs": {
@@ -2396,6 +2403,7 @@ class ExecutionService:
 
     def get_authorized_trial_evidence(
         self, user: AuthUser, job_id: str, trial_id: str, *, expected_batch: tuple[str, str] | None = None,
+        gateway_slice: tuple[int, int, bool] | None = None,
     ) -> dict[str, Any]:
         """Serve restricted trial evidence from 0700 isolated evidence_store ONLY after:
         1. Project + Scope + Holdout authorization (S-02 / S-06), AND
@@ -2405,13 +2413,18 @@ class ExecutionService:
         validate_safe_id(job_id, "job_id")
         validate_safe_id(trial_id, "trial_id")
         row = self.db.fetchone(
-            "SELECT project_id, owner_id, kind, batch_id, status, params_json FROM exec_jobs WHERE job_id = ?",
+            "SELECT project_id, owner_id, kind, batch_id, batch_name, status, params_json FROM exec_jobs WHERE job_id = ?",
             (job_id,),
         )
         if row is None:
             raise AppError(404, "RESOURCE_NOT_FOUND", f"执行作业不存在: {job_id}")
         req_scope = "direct_vlm_qa:read" if row["kind"] in ("direct", "vlmevalkit") else "trace:read"
-        authorize(user, project_id=row["project_id"], owner_id=row["owner_id"], min_role="viewer", required_scope=req_scope)
+        authorize(user, project_id=row["project_id"], owner_id=row["owner_id"], min_role="viewer",
+                  required_scope=None if gateway_slice is not None else req_scope)
+        if gateway_slice is not None and (
+            row["kind"] != "harbor_gateway" or row["status"] != "finished" or expected_batch is None
+        ):
+            raise AppError(404, "RESOURCE_NOT_FOUND", "该试验没有受管 Runner 网关证据")
         self._require_holdout_if_needed(user, row)
 
         # 1. Resolve committed generation_id strictly from SQLite batches + reconciled event (FAIL CLOSED!)
@@ -2423,7 +2436,7 @@ class ExecutionService:
                 "作业尚未完成 Common Finalizer 发布与 SQLite 入库对账，拒绝返回未提交发布代的受限证据",
                 {"job_id": job_id, "trial_id": trial_id, "reason": "missing_committed_batch"},
             )
-        b_row = self.db.fetchone("SELECT generation_id FROM batches WHERE batch_id = ?", (batch_id,))
+        b_row = self.db.fetchone("SELECT generation_id, evidence_approval FROM batches WHERE batch_id = ?", (batch_id,))
         committed_gen_id = str(b_row["generation_id"]).strip() if (b_row and b_row.get("generation_id")) else ""
         if expected_batch is not None and (batch_id, committed_gen_id) != expected_batch:
             raise AppError(409, "GENERATION_MISMATCH", "Runner 作业与试验的批次或发布代不一致，请刷新后重试")
@@ -2505,9 +2518,33 @@ class ExecutionService:
                 {"trial_id": trial_id, "reason": "evidence_inner_generation_mismatch"},
             )
 
+        if gateway_slice is not None:
+            batch_name = str(row["batch_name"])
+            gateway = doc.get("gateway_receipt")
+            if gateway is None:
+                # Older published jobs have a sealed raw digest and a committed restricted bundle,
+                # but predate the gateway digest in the Finalizer's private manifest.
+                work = ev_digest_file.parent
+                gateway = gateway_receipt(work, batch_name, trial_id, read_gateway_receipts(work, batch_name))
+            if not isinstance(gateway, dict):
+                raise AppError(409, "GENERATION_MISMATCH", "已发布试验的网关摘要损坏")
+            capture = read_gateway_capture(self.settings.evidence_store_dir / job_id, batch_name, gateway)  # type: ignore[operator]
+            reason = None
+            if not has_scope(user, "gateway:read"):
+                reason = "缺少 gateway:read 权限"
+            elif b_row["evidence_approval"] not in ("approved_restricted", "approved_public"):
+                reason = "来源未批准 gateway_capture 证据"
+            offset, limit, include_tools = gateway_slice
+            return {
+                "batch_id": batch_id, "trial_id": trial_id, "generation_id": committed_gen_id,
+                **gateway_window(capture, turn_offset=offset, turn_limit=limit, include_tools=include_tools,
+                                 redacted_reason=reason, strip_answers=not has_scope(user, "dataset:answer_read")),
+            }
+
         if not has_scope(user, "verifier_log:read") and "verifier_log" in doc:
             doc["verifier_log"] = "<redacted: requires verifier_log:read>"
             doc["verifier_log_redacted"] = True
+        doc.pop("gateway_receipt", None)
         doc = redact_json_recursive(doc, strip_answers=not has_scope(user, "dataset:answer_read"))  # type: ignore[assignment]
         return {
             "job_id": job_id,

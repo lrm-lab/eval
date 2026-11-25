@@ -29,6 +29,7 @@ from app.security.authz import (
 )
 from app.security.redaction import redact_json_recursive, redact_text
 from app.security.storage_probe import resolve_within_root, validate_safe_id, validate_safe_task_id
+from app.services.gateway_view import gateway_window
 from app.services.methodology import (
     METHODOLOGY_VERSION,
     bootstrap_ci95,
@@ -812,25 +813,28 @@ class QueryService:
             require_scope(user, "dataset:holdout_read")
         return batch, ep
 
-    def get_runner_trial_binding(self, user: AuthUser, batch_id: str, trial_id: str) -> tuple[str, str]:
+    def get_runner_trial_binding(
+        self, user: AuthUser, batch_id: str, trial_id: str, *, native_gateway: bool = False,
+    ) -> tuple[str, str]:
         batch, episode = self._load_batch_and_episode(user, batch_id, trial_id)
-        if batch["source_namespace"] != "runner_published":
+        namespaces = ("runner_published", "harbor_runs") if native_gateway else ("runner_published",)
+        if batch["source_namespace"] not in namespaces or (native_gateway and batch["runner"] != "harbor"):
             raise AppError(404, "RESOURCE_NOT_FOUND", "该试验没有受管 Runner 证据")
-        generation = batch["generation_id"]
-        if not generation or episode["generation_id"] != generation:
-            raise AppError(409, "GENERATION_MISMATCH", "试验与批次发布代不一致，请刷新后重试")
         jobs = self.db.fetchall(
             """
             SELECT job_id FROM exec_jobs
             WHERE batch_id = ? AND project_id = ? AND owner_id = ? AND kind = ?
             LIMIT 2
             """,
-            (batch_id, batch["project_id"], batch["owner_id"], batch["runner"]),
+            (batch_id, batch["project_id"], batch["owner_id"], "harbor_gateway" if native_gateway else batch["runner"]),
         )
         if not jobs:
             raise AppError(404, "RESOURCE_NOT_FOUND", "该试验没有已对账的 Runner 作业")
         if len(jobs) != 1:
             raise AppError(409, "GENERATION_MISMATCH", "该试验无法唯一匹配 Runner 作业")
+        generation = batch["generation_id"]
+        if not generation or episode["generation_id"] != generation:
+            raise AppError(409, "GENERATION_MISMATCH", "试验与批次发布代不一致，请刷新后重试")
         return jobs[0]["job_id"], generation
 
     def get_trial_detail(self, user: AuthUser, batch_id: str, trial_id: str) -> dict[str, Any]:
@@ -1049,51 +1053,21 @@ class QueryService:
         target = self._resolve_evidence_ref_path(batch, g_ref)
         raw = self._verify_lazy_file(target, g_ref.get("sha256"))
         data = json.loads(raw.decode("utf-8", errors="replace"))
-        turns = data.get("turns") if isinstance(data, dict) and isinstance(data.get("turns"), list) else []
-
-        summary = {
-            "model_calls": data.get("model_calls", len(turns)) if isinstance(data, dict) else len(turns),
-            "validated": data.get("validated") if isinstance(data, dict) else None,
-            "turn_count": len(turns),
-            "discarded_turns": sum(1 for t in turns if isinstance(t, dict) and t.get("discarded")),
-            "finish_reasons": sorted({str(t.get("finish_reason")) for t in turns if isinstance(t, dict) and t.get("finish_reason")}),
-        }
-
         can_full = (
             self._check_evidence_class_approved(batch, "gateway_capture")
             and has_scope(user, "gateway:read")
             and (not self._is_holdout_batch(batch) or has_scope(user, "dataset:holdout_read"))
         )
-        if not can_full:
-            return {
-                "batch_id": batch_id,
-                "generation_id": ep["generation_id"],
-                "trial_id": trial_id,
-                "redacted": True,
-                "summary": summary,
-                "turns": [],
-                "methodology_version": METHODOLOGY_VERSION,
-            }
-
-        sliced = []
-        for t in turns[turn_offset : turn_offset + turn_limit]:
-            if not isinstance(t, dict):
-                continue
-            item = dict(t)
-            if not include_tools:
-                item.pop("request_tools", None)
-            sliced.append(redact_json_recursive(item))
-
         return {
             "batch_id": batch_id,
             "generation_id": ep["generation_id"],
             "trial_id": trial_id,
-            "redacted": False,
-            "summary": summary,
-            "turn_offset": turn_offset,
-            "turn_limit": turn_limit,
-            "turns": sliced,
             "methodology_version": METHODOLOGY_VERSION,
+            **gateway_window(
+                data if isinstance(data, dict) else {}, turn_offset=turn_offset, turn_limit=turn_limit,
+                include_tools=include_tools,
+                redacted_reason=None if can_full else "当前账号缺少 gateway:read 权限或来源未批准 gateway_capture",
+            ),
         }
 
     def read_trial_verifier_output(self, user: AuthUser, batch_id: str, trial_id: str) -> dict[str, Any]:

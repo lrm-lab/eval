@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import Response
 
 from app.api.deps import get_current_user, require_researcher
+from app.api.errors import AppError
 from app.security.auth import AuthUser
 
 router = APIRouter(prefix="/api/v1/batches", tags=["batches"])
@@ -85,7 +86,30 @@ def get_trial_detail(
     request: Request,
     user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
-    return request.app.state.ctx.query.get_trial_detail(user, batch_id, trial_id)
+    ctx = request.app.state.ctx
+    detail = ctx.query.get_trial_detail(user, batch_id, trial_id)
+    try:
+        job_id, generation = ctx.query.get_runner_trial_binding(user, batch_id, trial_id, native_gateway=True)
+    except AppError as exc:
+        if exc.status_code != 404:
+            raise
+        return detail
+    if generation != detail["generation_id"]:
+        raise AppError(409, "GENERATION_MISMATCH", "试验发布代已更新，请刷新后重试")
+    detail["runner_gateway"] = True
+    if detail["gateway_status"] == "not_captured":
+        # Restore status for a committed job whose older DTO omitted the verified private capture.
+        try:
+            ctx.execution.get_authorized_trial_evidence(
+                user, job_id, trial_id, expected_batch=(batch_id, generation), gateway_slice=(0, 0, False),
+            )
+        except AppError as exc:
+            if exc.status_code != 409:
+                raise
+            detail["gateway_status"] = "invalid"
+        else:
+            detail["gateway_status"] = "captured"
+    return detail
 
 
 @router.get("/{batch_id}/trials/{trial_id}/runner-evidence")
@@ -94,13 +118,22 @@ def get_runner_trial_evidence(
     trial_id: str,
     request: Request,
     response: Response,
+    section: Literal["trial", "gateway"] = Query(default="trial"),
+    generation_id: str | None = Query(default=None),
+    turn_offset: int = Query(default=0, ge=0),
+    turn_limit: int = Query(default=10, ge=1, le=50),
+    include_tools: bool = Query(default=False),
     user: AuthUser = Depends(get_current_user),
 ) -> dict[str, Any]:
     ctx = request.app.state.ctx
-    job_id, generation = ctx.query.get_runner_trial_binding(user, batch_id, trial_id)
+    is_gateway = section == "gateway"
+    job_id, generation = ctx.query.get_runner_trial_binding(user, batch_id, trial_id, native_gateway=is_gateway)
+    if generation_id is not None and generation_id != generation:
+        raise AppError(409, "GENERATION_MISMATCH", "请求的试验发布代已过期，请刷新后重试")
     response.headers["Cache-Control"] = "private, no-store"
     return ctx.execution.get_authorized_trial_evidence(
         user, job_id, trial_id, expected_batch=(batch_id, generation),
+        gateway_slice=(turn_offset, turn_limit, include_tools) if is_gateway else None,
     )
 
 

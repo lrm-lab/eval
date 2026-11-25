@@ -36,6 +36,7 @@ interface TrajectoryResp {
 
 interface GatewayResp {
   redacted: boolean;
+  redacted_reason?: string;
   summary: {
     model_calls: number;
     validated: boolean | null;
@@ -243,14 +244,26 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
   });
 
   const gwQ = useQuery({
-    queryKey: ['trial-gw', batchId, trialId, includeGwTools],
+    queryKey: ['trial-gw', batchId, trialId, trial?.generation_id, user?.user_id, user?.scopes, includeGwTools],
     enabled: hasTrial && tab === 'gateway' && !missingReason,
-    queryFn: () =>
-      apiFetch<GatewayResp>(
-        `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(
-          trialId
-        )}/gateway?turn_offset=0&turn_limit=25&include_tools=${includeGwTools}`
-      ),
+    staleTime: trial?.runner_gateway ? 0 : undefined,
+    gcTime: trial?.runner_gateway ? 0 : undefined,
+    refetchOnWindowFocus: trial?.runner_gateway ? 'always' : undefined,
+    queryFn: () => {
+      const params = new URLSearchParams({
+        turn_offset: '0',
+        turn_limit: '25',
+        include_tools: String(includeGwTools),
+      });
+      const route = trial?.runner_gateway ? 'runner-evidence' : 'gateway';
+      if (trial?.runner_gateway) {
+        params.set('section', 'gateway');
+        params.set('generation_id', trial.generation_id);
+      }
+      return apiFetch<GatewayResp>(
+        `/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/${route}?${params}`
+      );
+    },
   });
 
   const verQ = useQuery({
@@ -634,7 +647,7 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
           </div>
         ) : null
       ) : tab === 'gateway' ? (
-        gwQ.isLoading ? (
+        (gwQ.isLoading || (trial.runner_gateway && gwQ.isFetching)) ? (
           <TableSkeleton rows={5} cols={2} />
         ) : gwQ.isError ? (
           gwQ.error instanceof ApiError && gwQ.error.status === 404 ? (
@@ -662,7 +675,7 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
             {gwQ.data.redacted ? (
               <div className="rounded-xl border border-[var(--sem-zero-border)] bg-[var(--sem-zero-bg)] p-4 flex items-center gap-2 text-[var(--sem-zero-fg)]">
                 <Lock className="w-4 h-4 shrink-0" />
-                <span>当前账号缺少 gateway:read 权限或来源未批准 gateway_capture，仅展示汇总统计。</span>
+                <span>{gwQ.data.redacted_reason || '当前账号缺少 gateway:read 权限或来源未批准 gateway_capture'}，仅展示汇总统计。</span>
               </div>
             ) : (
               <div className="space-y-3">
