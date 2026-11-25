@@ -29,6 +29,9 @@ path = "datasets/gaia"
 [datasets.gaia.agents]
 pi = "cached_pi:CachedPi"
 
+[datasets.gaia.gateway_agents]
+pi = "cached_pi_gateway:CachedInterceptPi"
+
 [datasets.tianxi-synth-v1-train]
 name = "tianxi-synth-v1-train"
 path = "../datasets/tianxi-synth-v1/train"

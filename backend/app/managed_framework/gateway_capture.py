@@ -66,7 +66,7 @@ async def serve_gateway(host, base_url, model, key):
             await serving
 
 
-async def capture_batch(args, task_paths, job, base_url, model, key, write_capture):
+async def capture_batch(args, task_paths, job, base_url, model, key, write_capture, *, harness):
     from openenv.core.harness.capture.export import export_session
     from openenv.harbor.rollout import run_rollout
 
@@ -92,7 +92,7 @@ async def capture_batch(args, task_paths, job, base_url, model, key, write_captu
                 session = app.state.registry.get(session_id)
 
             result = await run_rollout(
-                task_dir=task, harness=args.agent, sandbox="docker",
+                task_dir=task, harness=harness, sandbox="docker",
                 registry=app.state.registry, inference=app.state.inference,
                 intercept_url=url, local_intercept_url=url, model=model,
                 trials_dir=job, reward_key=args.reward_key, require_reward=False,
@@ -144,7 +144,7 @@ async def capture_batch(args, task_paths, job, base_url, model, key, write_captu
     return counts
 
 
-def run_capture(args, task_paths, job, base_url, model, key, write_capture):
+def run_capture(args, task_paths, job, base_url, model, key, write_capture, *, harness):
     try:
         address = ipaddress.IPv4Address(args.capture_host)
     except ipaddress.AddressValueError as exc:
@@ -154,8 +154,8 @@ def run_capture(args, task_paths, job, base_url, model, key, write_capture):
     for name in ("NO_PROXY", "no_proxy"):
         os.environ[name] = ",".join(filter(None, (os.environ.get(name), args.capture_host)))
     if args.agent_version:
-        os.environ["OPENENV_HARBOR_AGENT_VERSIONS"] = json.dumps({args.agent: args.agent_version})
+        os.environ["OPENENV_HARBOR_AGENT_VERSIONS"] = json.dumps({harness: args.agent_version})
     try:
-        return asyncio.run(capture_batch(args, task_paths, job, base_url, model, key, write_capture))
+        return asyncio.run(capture_batch(args, task_paths, job, base_url, model, key, write_capture, harness=harness))
     except ModuleNotFoundError as exc:
         raise ValueError(f"Gateway mode requires OpenEnv with Harbor support ({exc.name})") from exc

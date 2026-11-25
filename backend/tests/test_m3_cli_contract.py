@@ -81,6 +81,31 @@ def test_native_resume_reuses_unchanged_overlay(isolated_settings: Settings, tmp
     assert not overlay.exists()
 
 
+def test_gaia_pi_gateway_plan_keeps_the_registered_agent(isolated_settings: Settings, tmp_path: Path):
+    bundle = tmp_path / "bundle"
+    task = bundle / "datasets/gaia/gaia-test-case"
+    task.mkdir(parents=True)
+    (task / "task.toml").write_text("")
+    work = tmp_path / "work"
+    output = tmp_path / "output"
+    spec = dict(kind="harbor_gateway", suite_id="gaia", batch_name="gaia-plan", model_route="test-model",
+                agent="pi", harness_version="0.87.1", selection_mode="tasks", tasks=[task.name])
+    overlay = materialize_managed_run_config(isolated_settings, spec, work)
+    cmd = build_managed_run_py_command(
+        run_py_path=str(resolve_verified_managed_script(isolated_settings, "run.py")),
+        python_exe=sys.executable, spec=spec, base_url="http://127.0.0.1:1/v1",
+        config_path=str(overlay), work_dir=str(work), output_dir=str(output), plan_only=True,
+    )
+    result = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=30,
+                            env=build_sanitized_subprocess_env({"TIANXI_BENCH_BUNDLE": str(bundle)}))
+    assert result.returncode == 0, result.stderr
+    plan = json.loads(result.stdout)
+    assert plan["harness"] == "pi"
+    assert plan["agent_import_path"] == "cached_pi_gateway:CachedInterceptPi"
+    assert cmd[cmd.index("--agent-version") + 1] == "0.87.1"
+    assert not output.exists()
+
+
 def test_external_runner_rejects_invalid_native_resume(isolated_settings: Settings):
     ipc = RunnerIPCClient(isolated_settings)
     with _start_external_runner_daemon(isolated_settings) as daemon:
