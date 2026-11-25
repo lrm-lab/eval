@@ -110,12 +110,16 @@ interface EfficiencyResp {
     harness: string | null;
     runner: string;
     score_pct: number | null;
-    x_value: number | null;
-    avg_duration_sec: number | null;
-    avg_total_tokens: number | null;
-    avg_reasoning_tokens: number | null;
+    x_avg: number | null;
     token_semantics: string;
     on_pareto: boolean;
+  }>;
+  trial_points: Array<{
+    task_id: string;
+    model_canonical: string | null;
+    harness: string | null;
+    x_value: number | null;
+    reward_pct: number | null;
   }>;
 }
 
@@ -274,22 +278,67 @@ export function DiagnosticsPage() {
     };
   }, [failuresQ.data, theme]);
 
+  const batchScatterPoints = useMemo(() =>
+    (efficiencyQ.data?.batch_points ?? [])
+      .filter((point) => Number.isFinite(point.x_avg) && Number.isFinite(point.score_pct)),
+  [efficiencyQ.data]);
+  const trialScatterPoints = useMemo(() =>
+    (efficiencyQ.data?.trial_points ?? [])
+      .filter((point) => Number.isFinite(point.x_value) && Number.isFinite(point.reward_pct)),
+  [efficiencyQ.data]);
+
   const effScatterOption = useMemo<echarts.EChartsCoreOption>(() => {
-    const pts = (efficiencyQ.data?.batch_points || []).filter((p) => p.x_value !== null && p.score_pct !== null);
+    const batchData = batchScatterPoints.map((point) => ({
+      value: [point.x_avg, point.score_pct],
+      meta: point,
+    }));
+    const series = [
+      {
+        type: 'scatter',
+        name: '试验样本',
+        symbolSize: 6,
+        itemStyle: { color: '#94a3b8', opacity: 0.45 },
+        data: trialScatterPoints.map((point) => ({ value: [point.x_value, point.reward_pct], meta: point })),
+      },
+      {
+        type: 'scatter',
+        name: '批次均值',
+        symbolSize: 11,
+        itemStyle: { color: theme === 'dark' ? '#60a5fa' : '#2563eb' },
+        data: batchData.filter(({ meta }) => !meta.on_pareto),
+        z: 3,
+      },
+      {
+        type: 'scatter',
+        name: 'Pareto 前沿',
+        symbol: 'diamond',
+        symbolSize: 15,
+        itemStyle: { color: theme === 'dark' ? '#fbbf24' : '#b45309' },
+        data: batchData.filter(({ meta }) => meta.on_pareto),
+        z: 4,
+      },
+    ].filter(({ data }) => data.length > 0);
+
     return {
-      grid: { left: 56, right: 24, top: 24, bottom: 44 },
+      grid: { left: 56, right: 28, top: 54, bottom: 52 },
+      legend: { top: 0, textStyle: { color: theme === 'dark' ? '#d4d4d8' : '#334155' } },
       tooltip: {
         ...glassTooltipConfig(theme),
         trigger: 'item',
         formatter: (param: unknown) => {
-          const p = (param as { data?: { meta?: EfficiencyResp['batch_points'][number] } })?.data?.meta;
-          if (!p) return '';
-          return `<div><strong>${escapeHtml(p.batch_name)}</strong><br/>Model: ${escapeHtml(p.model_canonical || '—')} · Harness: ${escapeHtml(p.harness || p.runner)}<br/>Score: <b>${fmtPct(p.score_pct)}</b> · X: <b>${p.x_value}</b><br/>Token Semantics: ${escapeHtml(p.token_semantics)}</div>`;
+          type Point = EfficiencyResp['batch_points'][number] | EfficiencyResp['trial_points'][number];
+          const point = (param as { data?: { meta?: Point } })?.data?.meta;
+          if (!point) return '';
+          const model = escapeHtml(point.model_canonical || '—');
+          if ('task_id' in point) {
+            return `<div><strong>${escapeHtml(point.task_id)}</strong><br/>试验 · ${model} · ${escapeHtml(point.harness || '—')}<br/>得分 <b>${fmtPct(point.reward_pct)}</b> · 横轴 <b>${point.x_value}</b></div>`;
+          }
+          return `<div><strong>${escapeHtml(point.batch_name)}</strong><br/>批次 · ${model} · ${escapeHtml(point.harness || point.runner)}<br/>均分 <b>${fmtPct(point.score_pct)}</b> · 横轴均值 <b>${point.x_avg}</b><br/>Token 语义 ${escapeHtml(point.token_semantics)}</div>`;
         },
       },
       xAxis: {
         type: 'value',
-        name: xMetric === 'duration_sec' ? '均耗时 (s)' : xMetric === 'total_tokens' ? '均总 Tokens' : '均 Reasoning Tokens',
+        name: xMetric === 'duration_sec' ? '耗时 (s)' : xMetric === 'total_tokens' ? '总 Tokens' : 'Reasoning Tokens',
         nameLocation: 'middle',
         nameGap: 28,
         splitLine: { lineStyle: { color: theme === 'dark' ? '#27272a' : '#e5e7eb' } },
@@ -297,23 +346,13 @@ export function DiagnosticsPage() {
       yAxis: {
         type: 'value',
         name: '得分 (%)',
-        min: 0,
-        max: 100,
+        min: (extent: { min: number }) => Math.min(0, extent.min),
+        max: (extent: { max: number }) => Math.max(100, extent.max),
         splitLine: { lineStyle: { color: theme === 'dark' ? '#27272a' : '#e5e7eb' } },
       },
-      series: [
-        {
-          type: 'scatter',
-          symbolSize: 11,
-          data: pts.map((p) => ({
-            value: [p.x_value, p.score_pct],
-            meta: p,
-            itemStyle: { color: p.on_pareto ? '#f59e0b' : '#2563eb' },
-          })),
-        },
-      ],
+      series,
     };
-  }, [efficiencyQ.data, xMetric, theme]);
+  }, [batchScatterPoints, trialScatterPoints, xMetric, theme]);
 
   const toolBarOption = useMemo<echarts.EChartsCoreOption>(() => {
     const rows = (toolsQ.data?.tool_ranking || []).slice(0, 12);
@@ -610,7 +649,7 @@ export function DiagnosticsPage() {
             <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4 text-xs space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="font-bold text-[var(--text-primary)]">效率散点图（严格区分耗时、Token 包含语义与原生已记录成本）</div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex flex-wrap items-center gap-1.5">
                   {[
                     { id: 'duration_sec', label: '均耗时 (s)' },
                     { id: 'total_tokens', label: '均总 Tokens' },
@@ -620,6 +659,7 @@ export function DiagnosticsPage() {
                       key={m.id}
                       type="button"
                       onClick={() => setXMetric(m.id)}
+                      aria-pressed={xMetric === m.id}
                       className={`rounded-lg px-2.5 py-1 text-[11px] border cursor-pointer ${
                         xMetric === m.id
                           ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] text-[var(--brand-primary)] font-semibold'
@@ -660,7 +700,19 @@ export function DiagnosticsPage() {
                   </div>
                 </div>
               </div>
-              <EChartBox option={effScatterOption} height={340} exportName="diagnostics-efficiency" />
+              {batchScatterPoints.length || trialScatterPoints.length ? (
+                <section aria-label="效率散点图">
+                  <div className="mb-2 text-[11px] text-[var(--text-secondary)]">
+                    批次可绘制 {batchScatterPoints.length} / {efficiencyQ.data.banner.batch_count} · 试验样本 {trialScatterPoints.length}
+                  </div>
+                  <EChartBox option={effScatterOption} height={340} exportName="diagnostics-efficiency" />
+                </section>
+              ) : (
+                <StateNoticeCard
+                  title="当前指标暂无可绘制的效率数据"
+                  description={`当前筛选的 ${efficiencyQ.data.banner.batch_count} 个批次中，暂无同时具备该指标观测与有效得分的批次。可切换横轴指标或调整筛选。`}
+                />
+              )}
             </div>
           </div>
         ) : null

@@ -428,7 +428,7 @@ export function EfficiencyScatterChart({
               }}
               className="inline-flex items-center gap-1 rounded-lg bg-[var(--brand-primary)] hover:bg-[var(--brand-hover)] px-2.5 py-1.5 text-xs font-medium text-white lrm-press cursor-pointer"
             >
-              <Plus className="w-3.5 h-3.5" /> 全部入对比篮
+              <Plus className="w-3.5 h-3.5" /> 全部加入对比
             </button>
           )}
         </div>
@@ -531,7 +531,7 @@ export function EfficiencyScatterChart({
                   }}
                   className="inline-flex items-center gap-1 rounded-lg bg-[var(--brand-tint)] text-[var(--brand-primary)] hover:bg-[var(--brand-primary)] hover:text-white px-2.5 py-1 font-semibold cursor-pointer"
                 >
-                  <Plus className="w-3 h-3" /> 选中项入对比篮
+                  <Plus className="w-3 h-3" /> 选中项加入对比
                 </button>
                 {selectedBatchIds.length >= 2 && (
                   <button

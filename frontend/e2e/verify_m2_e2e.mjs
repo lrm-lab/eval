@@ -93,6 +93,23 @@ async function main() {
     });
     inpSamples.push(s);
     await page.waitForSelector(`text=${expectedText}`, { timeout: 15000 });
+    if (tabLabel === '效率与 Token') {
+      for (const [button, axis] of [
+        ['均耗时 (s)', '耗时 (s)'],
+        ['均总 Tokens', '总 Tokens'],
+        ['均 Reasoning Tokens', 'Reasoning Tokens'],
+      ]) {
+        await page.getByRole('button', { name: button, exact: true }).click();
+        await page.waitForFunction((name) => {
+          const plot = document.querySelector('[aria-label="效率散点图"] [_echarts_instance_]');
+          const option = plot?.__lrmChart?.getOption();
+          return option?.xAxis?.[0]?.name === name &&
+            option?.series?.some((series) =>
+              series.type === 'scatter' && series.name !== '试验样本' && series.data?.some((point) =>
+                point.value?.length === 2 && point.value.every(Number.isFinite)));
+        }, axis, { timeout: 15000 });
+      }
+    }
   }
   const cluesBody = await page.innerText('body');
   assert(!/cheating|laziness|作弊|摆烂/i.test(cluesBody), 'Zero subjective behavioral labels allowed');
