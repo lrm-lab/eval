@@ -84,7 +84,30 @@ def _recorded_batch_settings(row: dict[str, Any]) -> dict[str, int | None]:
     }
 
 
-def _dataset_performance(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _visible_episode_filter(can_holdout: bool) -> str:
+    return "" if can_holdout else f"AND {sql_task_holdout_exclude_clause('b.dataset_release_id', 'e.task_id')}"
+
+
+def _observed_task_count_projection(episode_filter: str) -> str:
+    return f"""(
+        SELECT COUNT(DISTINCT e.task_id)
+        FROM episodes e
+        WHERE e.batch_id = b.batch_id AND e.generation_id = b.generation_id
+          {episode_filter}
+    ) AS observed_unique_tasks"""
+
+
+def _task_details_allowed(row: dict[str, Any], split: str | None, *, can_holdout: bool) -> bool:
+    return can_holdout or not is_holdout_dataset_or_batch(
+        dataset_release_id=row["dataset_release_id"],
+        release_split=split,
+        benchmark_slug=row["benchmark_slug"],
+        raw_dataset_name=row["raw_dataset_name"],
+        batch_name=row["batch_name"],
+    )
+
+
+def _dataset_performance(batches: list[dict[str, Any]], *, can_holdout: bool) -> list[dict[str, Any]]:
     """Each score and denominator come from the authorized batch in this row."""
     rows = []
     for b in batches:
@@ -108,6 +131,9 @@ def _dataset_performance(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )},
             "display_name": b["bm_display_name"] or b["raw_dataset_name"] or b["benchmark_slug"],
             "metric_name": metric_name,
+            "observed_unique_tasks": (
+                b["observed_unique_tasks"] if _task_details_allowed(b, b["split"], can_holdout=can_holdout) else None
+            ),
             "score": round(score, 2) if score is not None else None,
             "denominator": denominator,
             "score_kind": score_kind,
@@ -178,14 +204,9 @@ def _grouped_comparison(
             )
         }
         batch.update(_recorded_batch_settings(row))
-        details_allowed = can_holdout or not is_holdout_dataset_or_batch(
-            dataset_release_id=row["dataset_release_id"],
-            release_split=release["split"],
-            benchmark_slug=row["benchmark_slug"],
-            raw_dataset_name=row["raw_dataset_name"],
-            batch_name=row["batch_name"],
-        )
+        details_allowed = _task_details_allowed(row, release["split"], can_holdout=can_holdout)
         batch["task_details_allowed"] = details_allowed
+        batch["observed_unique_tasks"] = row["observed_unique_tasks"] if details_allowed else None
         batch["has_visible_task_scores"] = details_allowed and bool(row["has_visible_task_scores"])
         batch["official_result"] = (
             {"metric": row["official_metric"], "score": row["official_score"], "denominator": row["official_denominator"]}
@@ -330,13 +351,15 @@ class ProfileService:
         if not model_canonical or ".." in model_canonical or "\x00" in model_canonical:
             raise AppError(400, "INVALID_PATH_OR_ID", "非法模型标识")
         proj_sql, params = _project_filter_sql(user, "b.project_id")
+        can_holdout = has_scope(user, "dataset:holdout_read")
+        observed_task_count = _observed_task_count_projection(_visible_episode_filter(can_holdout))
         batch_rows = self.db.fetchall(
             f"""
             SELECT b.*, o.metric AS official_metric, o.score AS official_score,
                    o.denominator AS official_denominator, o.source AS official_source,
                    bm.display_name AS bm_display_name, bm.track_slug, bm.track_display_name,
                    bm.goal_type, bm.capability, r.scale_type, r.dataset_version, r.split,
-                   r.metric_name, r.known_task_count
+                   r.metric_name, r.known_task_count, {observed_task_count}
             FROM batches b
             LEFT JOIN official_results o ON o.batch_id = b.batch_id
             LEFT JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
@@ -536,6 +559,7 @@ class ProfileService:
                 "split",
                 "metric_name",
                 "known_task_count",
+                "observed_unique_tasks",
             ):
                 b_copy.pop(k, None)
             dto = _sanitize_batch_row(b_copy)
@@ -587,7 +611,7 @@ class ProfileService:
             "verdict_suggestion": verdict_suggestion,
             "track_scores": dict(track_scores),
             "harness_matrix": harness_matrix,
-            "dataset_performance": _dataset_performance(batch_rows),
+            "dataset_performance": _dataset_performance(batch_rows, can_holdout=can_holdout),
             "checkpoint_trends": checkpoint_trends,
             "batches": sanitized_batches,
         }
@@ -655,12 +679,14 @@ class ProfileService:
         if not harness_name or ".." in harness_name or "\x00" in harness_name:
             raise AppError(400, "INVALID_PATH_OR_ID", "非法 Harness 标识")
         proj_sql, params = _project_filter_sql(user, "b.project_id")
+        can_holdout = has_scope(user, "dataset:holdout_read")
+        observed_task_count = _observed_task_count_projection(_visible_episode_filter(can_holdout))
         batches = self.db.fetchall(
             f"""
             SELECT b.*, o.metric AS official_metric, o.score AS official_score,
                    o.denominator AS official_denominator, o.source AS official_source,
                    bm.display_name AS bm_display_name, r.scale_type, r.dataset_version, r.split,
-                   r.metric_name, r.known_task_count
+                   r.metric_name, r.known_task_count, {observed_task_count}
             FROM batches b
             LEFT JOIN official_results o ON o.batch_id = b.batch_id
             LEFT JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
@@ -758,6 +784,7 @@ class ProfileService:
             for k in (
                 "official_metric", "official_score", "official_denominator", "official_source",
                 "bm_display_name", "scale_type", "dataset_version", "split", "metric_name", "known_task_count",
+                "observed_unique_tasks",
             ):
                 bc.pop(k, None)
             dto = _sanitize_batch_row(bc)
@@ -787,7 +814,7 @@ class ProfileService:
                 "reasoning_observed_trials": int(tool_stats.get("reasoning_observed_trials") or 0),
             },
             "score_matrix": matrix_out,
-            "dataset_performance": _dataset_performance(batches),
+            "dataset_performance": _dataset_performance(batches, can_holdout=can_holdout),
             "batches": sanitized_batches,
         }
 
@@ -849,18 +876,17 @@ class ProfileService:
         )
         proj_sql, params = _project_filter_sql(user, "b.project_id")
         can_holdout = has_scope(user, "dataset:holdout_read")
-        score_visibility = (
-            "" if can_holdout else f"AND {sql_task_holdout_exclude_clause('b.dataset_release_id', 'e.task_id')}"
-        )
+        episode_filter = _visible_episode_filter(can_holdout)
         batch_rows = self.db.fetchall(
             f"""
             SELECT b.*, o.metric AS official_metric, o.score AS official_score,
                    o.denominator AS official_denominator, o.source AS official_source,
+                   {_observed_task_count_projection(episode_filter)},
                    EXISTS (
                        SELECT 1 FROM episodes e
                        WHERE e.batch_id = b.batch_id AND e.generation_id = b.generation_id
                          AND e.reward_valid = 1 AND e.reward IS NOT NULL
-                         {score_visibility}
+                         {episode_filter}
                    ) AS has_visible_task_scores
             FROM batches b
             LEFT JOIN official_results o ON o.batch_id = b.batch_id
@@ -889,7 +915,10 @@ class ProfileService:
                     "source": b["official_source"],
                 }
             bc = dict(b)
-            for k in ("official_metric", "official_score", "official_denominator", "official_source", "has_visible_task_scores"):
+            for k in (
+                "official_metric", "official_score", "official_denominator", "official_source",
+                "has_visible_task_scores", "observed_unique_tasks",
+            ):
                 bc.pop(k, None)
             dto = _sanitize_batch_row(bc)
             dto["official_result"] = off
