@@ -26,6 +26,9 @@ name = "gaia-validation-20261124"
 path_root = "bundle"
 path = "datasets/gaia"
 
+[datasets.gaia.agents]
+pi = "cached_pi:CachedPi"
+
 [datasets.tianxi-synth-v1-train]
 name = "tianxi-synth-v1-train"
 path = "../datasets/tianxi-synth-v1/train"
