@@ -2,6 +2,7 @@
 # Launch the External Isolated Execution Runner Daemon on a 0600 Unix Domain Socket
 # (separate OS process from the Web server; bounded 30 MiB rotating log in 0700 state/logs/).
 set -euo pipefail
+umask 077
 
 RUNTIME_DIR="${LRM_RUNTIME_DIR:-${HOME}/.local/share/lrm-eval}"
 VENV_PY="${RUNTIME_DIR}/venv/bin/python"
@@ -16,7 +17,6 @@ mkdir -p "${STATE_DIR}" "${RUNNER_WORK_DIR}"
 chmod 700 "${STATE_DIR}" "${RUNNER_WORK_DIR}"
 
 if [[ ! -f "${TOKEN_FILE}" ]]; then
-    umask 077
     "${VENV_PY}" -c 'import secrets; print(secrets.token_hex(32))' > "${TOKEN_FILE}"
     chmod 600 "${TOKEN_FILE}"
 fi
