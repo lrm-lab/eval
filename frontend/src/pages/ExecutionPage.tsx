@@ -27,7 +27,7 @@ import {
   XCircle,
   Zap,
 } from 'lucide-react';
-import { apiFetch } from '../lib/api';
+import { ApiError, apiFetch } from '../lib/api';
 import { fmtDateShort, fmtDuration, fmtPct, runScopeLabel } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import { AnimatedNumber, PageTransition } from '../components/motion/primitives';
@@ -84,6 +84,28 @@ function defaultSuiteForRunner(suites: RegisteredSuite[], kind: RunnerKind) {
   const smokeSuites = matching.filter((suite) => suite.split === 'smoke' && (suite.task_count ?? 0) > 0);
   smokeSuites.sort((first, second) => (first.task_count ?? 0) - (second.task_count ?? 0));
   return smokeSuites[0] ?? matching[0];
+}
+
+function readyRunners(caps?: ExecutionCapabilitiesResp): string[] {
+  const environment = caps?.runner_environment;
+  return environment?.isolated_runner_ready && !environment.docker_group_attached
+    ? environment.supported_runners ?? []
+    : [];
+}
+
+function runnerForSuite(suite: RegisteredSuite, available: string[], preference: RunnerKind | null, agent: string) {
+  const choices: RunnerKind[] =
+    suite.runner === 'harbor'
+      ? (['oracle', 'nop'].includes(agent.trim()) ? ['harbor'] : ['harbor', 'harbor_gateway'])
+      : suite.runner === 'direct' || suite.runner === 'vlmevalkit' ? [suite.runner] : [];
+  const preferred = preference && choices.includes(preference) ? preference : choices[0];
+  if (preferred && available.includes(preferred)) return preferred;
+  return choices.find((choice) => available.includes(choice)) ?? preferred;
+}
+
+function suiteCanRun(suite: RegisteredSuite, available: string[], agent: string): boolean {
+  const runner = runnerForSuite(suite, available, null, agent);
+  return suite.selectable && (suite.task_count ?? 0) > 0 && Boolean(runner && available.includes(runner));
 }
 
 export interface UnintegratedSuite {
@@ -777,6 +799,7 @@ export function ExecutionPage() {
   const [notifyEvents, setNotifyEvents] = useState<string[]>(['finished', 'failed', 'paused_by_guard']);
 
   const [planResult, setPlanResult] = useState<ExecutionPlanResp | null>(null);
+  const [environmentNotice, setEnvironmentNotice] = useState(false);
   const [dismissedNotifBanner, setDismissedNotifBanner] = useState<boolean>(false);
   const cliPreviewRef = useRef<HTMLDetailsElement>(null);
 
@@ -799,12 +822,13 @@ export function ExecutionPage() {
     queryKey: ['execution-capabilities'],
     queryFn: () => apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities'),
   });
-  const configuredRunners = capsQ.data?.runner_environment.supported_runners ?? [];
+  const configuredRunners = readyRunners(capsQ.data);
+  const registeredSuites = capsQ.data?.suites ?? [];
+  const selectedSuite = registeredSuites.find((suite) => suite.suite_id === suiteId);
   const firstReadyRunner = capsQ.data?.runner_kinds.find((runner) => configuredRunners.includes(runner.kind))?.kind;
-  const suggestedKind = capsQ.data?.runner_environment.isolated_runner_ready
-    ? (configuredRunners.includes('direct') ? 'direct' : firstReadyRunner)
-    : undefined;
-  const kind = runnerChoice ?? suggestedKind ?? 'harbor';
+  const suggestedKind = configuredRunners.includes('direct') ? 'direct' : firstReadyRunner;
+  const suiteRunner = selectedSuite && runnerForSuite(selectedSuite, configuredRunners, runnerChoice, agent);
+  const kind = suiteRunner ?? runnerChoice ?? suggestedKind ?? 'harbor';
 
   const jobsQ = useQuery({
     queryKey: ['execution-jobs'],
@@ -838,7 +862,6 @@ export function ExecutionPage() {
   }, [vlmTaskGuardrailActive, vlmevalkitMode]);
 
   const parsedTasks = useMemo(() => parseTaskList(tasksInput), [tasksInput]);
-  const selectedSuite = capsQ.data?.suites.find((suite) => suite.suite_id === suiteId);
   const effectiveRunScope =
     selectionMode === 'all'
       ? (selectedSuite?.split === 'smoke' ? 'smoke' : 'full_split')
@@ -854,9 +877,9 @@ export function ExecutionPage() {
   useEffect(() => {
     const caps = capsQ.data;
     if (!caps) return;
-    if (runnerChoice === null && suggestedKind) setKind(suggestedKind);
-    if (!suiteId && caps.suites.length > 0) {
-      const match = defaultSuiteForRunner(caps.suites, kind) ?? caps.suites[0];
+    if (!suiteId) {
+      const runnable = caps.suites.filter((suite) => suiteCanRun(suite, readyRunners(caps), agent));
+      const match = defaultSuiteForRunner(runnable, kind) ?? runnable[0];
       if (match) setSuiteId(match.suite_id);
     }
     if (caps.gateway_profiles.length > 0) {
@@ -865,7 +888,7 @@ export function ExecutionPage() {
         setGatewayProfileId(caps.gateway_profiles[0].profile_id);
       }
     }
-  }, [capsQ.data, gatewayProfileId, kind, runnerChoice, suggestedKind, suiteId]);
+  }, [agent, capsQ.data, gatewayProfileId, kind, suiteId]);
 
   // Auto-select latest job from history if none selected yet
   useEffect(() => {
@@ -876,8 +899,10 @@ export function ExecutionPage() {
 
   // Handle runner switch with smart suite & agent defaults
   const handleSelectRunner = (nextKind: RunnerKind) => {
+    if (!configuredRunners.includes(nextKind)) return;
     setKind(nextKind);
     setPlanResult(null);
+    setEnvironmentNotice(false);
     if (nextKind === 'vlmevalkit' && selectionMode === 'tasks') {
       setVlmevalkitMode('infer');
     }
@@ -887,13 +912,16 @@ export function ExecutionPage() {
         setHarnessVersion('1.19.3');
       }
     }
-    const suites = capsQ.data?.suites || [];
+    const suites = registeredSuites.filter((suite) => suiteCanRun(suite, configuredRunners, agent));
     if (suites.length > 0) {
       const targetRunner = nextKind === 'harbor_gateway' ? 'harbor' : nextKind;
       const curSuite = suites.find((s) => s.suite_id === suiteId);
       if (!curSuite || curSuite.runner !== targetRunner) {
         const match = defaultSuiteForRunner(suites, nextKind);
-        if (match) setSuiteId(match.suite_id);
+        if (match) {
+          setSuiteId(match.suite_id);
+          setTasksInput('');
+        }
       }
     }
   };
@@ -905,18 +933,18 @@ export function ExecutionPage() {
   };
 
   // Build strict whitelisted request payload (ZERO raw API key or secret fields)
-  const buildExecutionPayload = useCallback(() => {
-    const isHarborFamily = kind === 'harbor' || kind === 'harbor_gateway';
+  const buildExecutionPayload = useCallback((resolvedKind = kind) => {
+    const isHarborFamily = resolvedKind === 'harbor' || resolvedKind === 'harbor_gateway';
     return {
-      kind,
+      kind: resolvedKind,
       suite_id: suiteId,
       selection_mode: selectionMode,
       tasks: selectionMode === 'tasks' ? parsedTasks : [],
-      vlmevalkit_mode: kind === 'vlmevalkit' ? (effectiveVlmMode || 'infer') : 'all',
+      vlmevalkit_mode: resolvedKind === 'vlmevalkit' ? (selectionMode === 'tasks' ? 'infer' : vlmevalkitMode) : 'all',
       model_route: modelRoute.trim(),
       gateway_profile_id: gatewayProfileId,
       judge_profile_id: judgeProfileId.trim() || null,
-      agent: isHarborFamily ? agent.trim() || 'opencode' : kind,
+      agent: isHarborFamily ? agent.trim() || 'opencode' : resolvedKind,
       harness_version: isHarborFamily ? harnessVersion.trim() || '1.19.3' : 'locked-v1',
       concurrent: Math.max(1, Math.min(32, Number(concurrent) || 2)),
       attempts: isHarborFamily ? Math.max(1, Math.min(16, Number(attempts) || 1)) : 1,
@@ -933,7 +961,6 @@ export function ExecutionPage() {
     attempts,
     batchName,
     concurrent,
-    effectiveVlmMode,
     gatewayProfileId,
     harnessVersion,
     judgeProfileId,
@@ -945,6 +972,7 @@ export function ExecutionPage() {
     pauseAfter,
     selectionMode,
     suiteId,
+    vlmevalkitMode,
     webhookProfileId,
   ]);
 
@@ -965,12 +993,23 @@ export function ExecutionPage() {
   });
 
   const submitMut = useMutation({
-    mutationFn: () =>
-      apiFetch<SubmitJobResp>('/api/v1/execution/jobs', {
+    mutationFn: async () => {
+      setEnvironmentNotice(false);
+      const fresh = await capsQ.refetch();
+      const suite = fresh.data?.suites.find((item) => item.suite_id === suiteId);
+      const available = readyRunners(fresh.data);
+      const resolvedKind = suite && runnerForSuite(suite, available, runnerChoice, agent);
+      if (fresh.isError || !suite || !suiteCanRun(suite, available, agent) || !resolvedKind) {
+        setEnvironmentNotice(true);
+        return null;
+      }
+      return apiFetch<SubmitJobResp>('/api/v1/execution/jobs', {
         method: 'POST',
-        body: JSON.stringify(buildExecutionPayload()),
-      }),
+        body: JSON.stringify(buildExecutionPayload(resolvedKind)),
+      });
+    },
     onSuccess: (res) => {
+      if (!res) return;
       pushToast('success', `已提交隔离执行作业 ${res.job_id} (${res.batch_name})`);
       setEvidenceViewer(null);
       connectFromSeqRef.current = 0;
@@ -979,6 +1018,11 @@ export function ExecutionPage() {
       void refetchJobs();
     },
     onError: (err: Error) => {
+      if (err instanceof ApiError && ['RUNNER_NOT_ATTACHED', 'RUNNER_CAPABILITY_UNAVAILABLE', 'RUNNER_UNAVAILABLE'].includes(err.code)) {
+        setEnvironmentNotice(true);
+        void capsQ.refetch();
+        return;
+      }
       pushToast('error', `启动作业失败：${err.message}`);
     },
   });
@@ -1370,10 +1414,10 @@ export function ExecutionPage() {
   const dockerGroupAttached =
     planResult?.docker_group_attached ?? capsQ.data?.runner_environment.docker_group_attached ?? false;
   const isolatedRunnerReady = Boolean(capsQ.data?.runner_environment.isolated_runner_ready);
-  const activeRunnerAvailable = isolatedRunnerReady && configuredRunners.includes(kind);
+  const activeRunnerAvailable = Boolean(selectedSuite && suiteCanRun(selectedSuite, configuredRunners, agent));
   const runnerStatus = capsQ.isPending
     ? '正在检查运行状态'
-    : activeRunnerAvailable && !dockerGroupAttached ? '评测可启动' : '此模式暂不可启动';
+    : activeRunnerAvailable && !dockerGroupAttached ? '评测可启动' : '此题库暂不可启动';
   const workProbeOk = capsQ.data?.runner_environment.runner_work_isolation?.ok ?? true;
   const evProbeOk = capsQ.data?.runner_environment.evidence_store_isolation?.ok ?? true;
 
@@ -1517,46 +1561,7 @@ export function ExecutionPage() {
         className="grid items-start gap-4 text-xs lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.43fr)]"
       >
         <div className="min-w-0 space-y-4">
-          <ExecutionStep number={1} title="选择运行器">
-            <div className="grid auto-rows-fr grid-cols-1 gap-2.5 min-[360px]:grid-cols-2" role="radiogroup" aria-label="评测运行器模式选择">
-              {runnerKinds.map((runner) => {
-                const selected = runner.kind === kind;
-                return (
-                  <button
-                    key={runner.kind}
-                    type="button"
-                    role="radio"
-                    aria-checked={selected}
-                    aria-label={`选择运行器 ${RUNNER_SHORT_LABELS[runner.kind]}`}
-                    onClick={() => handleSelectRunner(runner.kind)}
-                    className={`lrm-press flex min-h-16 min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2.5 text-left transition-colors sm:gap-3 sm:px-3 ${
-                      selected
-                        ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] ring-1 ring-[var(--brand-primary)] shadow-[0_0_16px_var(--hero-glow-1)]'
-                        : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-[var(--brand-primary)]'
-                    }`}
-                  >
-                    <span aria-hidden="true" className={`grid size-7 shrink-0 place-items-center rounded-md ${
-                      selected ? 'bg-[var(--brand-primary)] text-white' : 'bg-[var(--bg-surface)] text-[var(--text-secondary)]'
-                    }`}>
-                      {selected ? <CheckCircle2 className="size-4" /> : <Cpu className="size-4" />}
-                    </span>
-                    <span className="min-w-0">
-                      <span className="block font-bold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[runner.kind]}</span>
-                      <span className="block text-[11px] text-[var(--text-secondary)]">
-                        {capsQ.isPending
-                          ? '正在检查状态'
-                          : isolatedRunnerReady && configuredRunners.includes(runner.kind)
-                            ? '已就绪 · 可启动'
-                            : '仅可预检'}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </ExecutionStep>
-
-          <ExecutionStep number={2} title="选择题库与范围">
+          <ExecutionStep number={1} title="选择题库与范围">
             <div className="grid grid-cols-1 gap-4 xl:grid-cols-2">
               <div className="space-y-2">
                 <label className="block space-y-1">
@@ -1566,21 +1571,26 @@ export function ExecutionPage() {
                     value={suiteId}
                     onChange={(e) => {
                       setSuiteId(e.target.value);
+                      setKind(null);
+                      setTasksInput('');
                       setPlanResult(null);
+                      setEnvironmentNotice(false);
                     }}
                     className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
                   >
-                    {!capsQ.data?.suites.length && (
-                      <option value="">{capsQ.isPending ? '正在加载题库' : '暂无已登记题库'}</option>
-                    )}
-                    <optgroup label="已正式登记（可执行）">
-                      {(capsQ.data?.suites || []).map((s) => (
-                        <option key={s.suite_id} value={s.suite_id}>
-                          [{s.runner}] {s.display_name} ({s.suite_id}
-                          {typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
-                          {s.split ? ` · ${s.split}` : ''})
-                        </option>
-                      ))}
+                    <option value="" disabled>{capsQ.isPending ? '正在加载题库' : '请选择可运行的题库'}</option>
+                    <optgroup label="已登记题库">
+                      {registeredSuites.map((s) => {
+                        const runnable = suiteCanRun(s, configuredRunners, agent);
+                        return (
+                          <option key={s.suite_id} value={s.suite_id} disabled={!runnable}>
+                            {s.display_name} ({s.suite_id}
+                            {typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
+                            {s.split ? ` · ${s.split}` : ''})
+                            {!runnable && ' · 暂不可运行'}
+                          </option>
+                        );
+                      })}
                     </optgroup>
                     {(capsQ.data?.unintegrated_suites || []).length > 0 && (
                       <optgroup label="原始数据可见、未接入评测（禁止提交）">
@@ -1761,7 +1771,54 @@ export function ExecutionPage() {
             </div>
           </ExecutionStep>
 
-          <ExecutionStep number={3} title="模型与参数">
+          <details className="group rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-semibold text-[var(--text-secondary)]">
+              运行环境（高级）
+              <ChevronDown aria-hidden="true" className="size-4 transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="mt-3 grid auto-rows-fr grid-cols-1 gap-2.5 min-[360px]:grid-cols-2" role="radiogroup" aria-label="评测运行器模式选择">
+              {runnerKinds.map((runner) => {
+                const selected = runner.kind === kind;
+                return (
+                  <button
+                    key={runner.kind}
+                    type="button"
+                    role="radio"
+                    aria-checked={selected}
+                    aria-label={`选择运行器 ${RUNNER_SHORT_LABELS[runner.kind]}`}
+                    disabled={!configuredRunners.includes(runner.kind) || !registeredSuites.some((suite) =>
+                      suite.runner === (runner.kind === 'harbor_gateway' ? 'harbor' : runner.kind)
+                      && suiteCanRun(suite, [runner.kind], agent)
+                    )}
+                    onClick={() => handleSelectRunner(runner.kind)}
+                    className={`lrm-press flex min-h-16 min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 sm:gap-3 sm:px-3 ${
+                      selected
+                        ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)] ring-1 ring-[var(--brand-primary)] shadow-[0_0_16px_var(--hero-glow-1)]'
+                        : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)] hover:border-[var(--brand-primary)]'
+                    }`}
+                  >
+                    <span aria-hidden="true" className={`grid size-7 shrink-0 place-items-center rounded-md ${
+                      selected ? 'bg-[var(--brand-primary)] text-white' : 'bg-[var(--bg-surface)] text-[var(--text-secondary)]'
+                    }`}>
+                      {selected ? <CheckCircle2 className="size-4" /> : <Cpu className="size-4" />}
+                    </span>
+                    <span className="min-w-0">
+                      <span className="block font-bold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[runner.kind]}</span>
+                      <span className="block text-[11px] text-[var(--text-secondary)]">
+                        {capsQ.isPending
+                          ? '正在检查状态'
+                          : isolatedRunnerReady && configuredRunners.includes(runner.kind)
+                            ? '已就绪 · 可启动'
+                            : '暂不可用'}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </details>
+
+          <ExecutionStep number={2} title="模型与参数">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <label className="space-y-1">
                 <ExecutionFieldLabel label="模型路由" field="model_route" />
@@ -1982,7 +2039,7 @@ export function ExecutionPage() {
             </details>
           </ExecutionStep>
 
-          <ExecutionStep number={4} title="预览并启动">
+          <ExecutionStep number={3} title="预览并启动">
             <details ref={cliPreviewRef} className="group rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
               <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 rounded-lg px-3 py-2.5 font-semibold text-[var(--text-primary)]">
                 <Terminal aria-hidden="true" className="size-4 shrink-0 text-[var(--brand-primary)]" />
@@ -2053,8 +2110,10 @@ export function ExecutionPage() {
         >
           <h2 id="execution-summary-heading" className="text-sm font-bold text-[var(--text-primary)]">作业摘要</h2>
           <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-2.5 text-[var(--text-secondary)]">
-            <dt>运行器</dt>
-            <dd className="truncate text-right font-semibold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[kind]}</dd>
+            <dt>运行环境</dt>
+            <dd className="truncate text-right font-semibold text-[var(--text-primary)]">
+              {activeRunnerAvailable ? RUNNER_SHORT_LABELS[kind] : '待匹配'}
+            </dd>
             <dt>题库</dt>
             <dd title={selectedSuite?.display_name} className="truncate text-right font-semibold text-[var(--text-primary)]">
               {selectedSuite?.display_name || '待选择'}
@@ -2084,8 +2143,9 @@ export function ExecutionPage() {
                 ? '正在查询当前可用的评测模式。'
                 : activeRunnerAvailable && !dockerGroupAttached
                   ? '配置确认后即可启动，页面会实时更新进度。'
-                  : '可以选择其他已就绪的模式，或先生成本次评测的预检。'}
+                  : '请选择一个标为可运行的题库，系统会自动匹配运行环境。'}
             </p>
+            {environmentNotice && <p role="status" className="text-[11px] leading-4">运行环境状态已变化。请选择当前可运行的题库。</p>}
           </div>
           {!canWrite && (
             <p className="flex items-start gap-1.5 text-[11px] text-[var(--text-secondary)]">
@@ -2095,7 +2155,7 @@ export function ExecutionPage() {
           <div className="grid gap-2">
             <button
               type="button"
-              disabled={!canWrite || submitMut.isPending || !suiteId || dockerGroupAttached || !activeRunnerAvailable}
+              disabled={!canWrite || submitMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
               onClick={() => submitMut.mutate()}
               aria-label="启动隔离执行作业"
               className="lrm-press inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white hover:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-45"
@@ -2105,7 +2165,7 @@ export function ExecutionPage() {
             </button>
             <button
               type="button"
-              disabled={!canWrite || planMut.isPending || !suiteId}
+              disabled={!canWrite || planMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
               onClick={() => {
                 const preview = cliPreviewRef.current;
                 if (preview) {

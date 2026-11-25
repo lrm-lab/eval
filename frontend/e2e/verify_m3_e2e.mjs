@@ -4,8 +4,8 @@
  * 1. Login
  * 2. /eval/execution:
  *    - docker_group_attached: false & live external isolated_runner_ready badge (with PID)
- *    - 4 runner modes + >= 3 disabled unintegrated suites (MMLU-Pro, BFCL-v4, Global-MMLU-Lite)
- *    - VLMEvalKit + --task hard lock to mode="infer" (VLMEVALKIT.md:44) + --plan CLI preview
+ *    - dataset-first routing and disabled suites without a compatible ready runner
+ *    - ready VLMEvalKit + --task hard lock to mode="infer" (VLMEVALKIT.md:44) + --plan CLI preview
  *    - Direct harmless single-task execution (`direct-smoke-v1` / `smoke-arith-001`) via DEFAULT Web submit,
  *      real SSE stream -> disconnect and replay -> reconciled snapshot (`gen_...`) -> clicks batch drilldown
  *      `/eval/batches/{batch_id}` and verifies HTTP 200 OK (ZERO 404!) + exact score & generation_id!
@@ -166,6 +166,20 @@ async function verify(browser) {
   // 2b) All 4 runner modes + disabled unintegrated suites
   const runnerRadios = page.locator('[role="radiogroup"][aria-label="评测运行器模式选择"] [role="radio"]');
   assert((await runnerRadios.count()) === 4, 'Expected 4 runner mode radios');
+  const capabilities = await context.request.get('/api/v1/execution/capabilities');
+  assert(capabilities.ok(), 'Expected execution capabilities');
+  const { runner_environment: environment, suites } = await capabilities.json();
+  const readyRunners = environment.supported_runners ?? [];
+  const suitePicker = page.getByRole('combobox', { name: '选择已登记评测题库' });
+  for (const suite of suites) {
+    const kinds = suite.runner === 'harbor' ? ['harbor', 'harbor_gateway'] : [suite.runner];
+    const runnable = suite.selectable && suite.task_count > 0 && kinds.some((kind) => readyRunners.includes(kind));
+    assert(
+      await suitePicker.evaluate((select, suiteId) =>
+        Array.from(select.options).find((option) => option.value === suiteId)?.disabled, suite.suite_id) === !runnable,
+      `Unexpected execution availability for ${suite.suite_id}`
+    );
+  }
   const unintStrip = page.locator('[aria-label="未接入评测题库列表"]');
   assert((await unintStrip.locator('button[disabled]').count()) >= 3, 'Expected >= 3 disabled unintegrated suites');
   const unintText = await unintStrip.innerText();
@@ -174,28 +188,26 @@ async function verify(browser) {
   }
 
   // 2c) VLMEvalKit + --task hard lock to mode="infer" (VLMEVALKIT.md:44)
-  inpSamples.push(
-    await sampleInp(page, 'exec-select-vlmevalkit', async () => {
-      await page.getByRole('radio', { name: '选择运行器 VLMEvalKit 多模态' }).click();
-    })
-  );
-  inpSamples.push(
-    await sampleInp(page, 'exec-select-tasks-mode', async () => {
-      await page.getByRole('button', { name: /--task 局部抽测/ }).click();
-    })
-  );
-  const modeAllBtn = page.getByRole('button', { name: /mode=all（推理\+官方评分）/ });
-  assert(await modeAllBtn.isDisabled(), 'VLMEvalKit mode=all MUST be disabled when --task is selected');
-  const modeInferBtn = page.getByRole('button', { name: /mode=infer（仅推理 · unscored）/ });
-  assert((await modeInferBtn.getAttribute('aria-pressed')) === 'true', 'VLMEvalKit mode=infer MUST be locked active');
-  await page.waitForSelector('text=VLMEVALKIT.md:44 硬约束已触发', { timeout: 10000 });
+  const vlmSuite = suites.find((suite) => suite.runner === 'vlmevalkit' && suite.selectable && suite.task_count > 0);
+  if (vlmSuite && readyRunners.includes('vlmevalkit')) {
+    inpSamples.push(await sampleInp(page, 'exec-select-vision-suite', async () => {
+      await suitePicker.selectOption(vlmSuite.suite_id);
+    }));
+    await page.getByRole('button', { name: /--task 局部抽测/ }).click();
+    const modeAllBtn = page.getByRole('button', { name: /mode=all（推理\+官方评分）/ });
+    assert(await modeAllBtn.isDisabled(), 'VLMEvalKit mode=all MUST be disabled when --task is selected');
+    const modeInferBtn = page.getByRole('button', { name: /mode=infer（仅推理 · unscored）/ });
+    assert((await modeInferBtn.getAttribute('aria-pressed')) === 'true', 'VLMEvalKit mode=infer MUST be locked active');
+    await page.waitForSelector('text=VLMEVALKIT.md:44 硬约束已触发', { timeout: 10000 });
+  }
 
   // 2d) Switch to Direct 原生直测 (real harmless direct-smoke-v1 / smoke-arith-001)
   inpSamples.push(
     await sampleInp(page, 'exec-select-direct', async () => {
-      await page.getByRole('radio', { name: '选择运行器 Direct 原生直测' }).click();
+      await suitePicker.selectOption('direct-smoke-v1');
     })
   );
+  await page.getByRole('button', { name: /--task 局部抽测/ }).click();
   await page.locator('input[aria-label="指定任务 ID 列表"]').fill('smoke-arith-001');
   const uniqueBatchName = `m3-e2e-direct-${Date.now()}`;
   await page.locator('input[aria-label="批次名 batch_name"]').fill(uniqueBatchName);
@@ -225,6 +237,9 @@ async function verify(browser) {
   const submitResponse = await jobSubmitted;
   assert(submitResponse.ok(), `Job submission returned HTTP ${submitResponse.status()}`);
   const { job_id: jobId } = await submitResponse.json();
+  const submittedPayload = submitResponse.request().postDataJSON();
+  assert(submittedPayload.kind === 'direct' && submittedPayload.suite_id === 'direct-smoke-v1',
+    'The selected Direct suite must be submitted through its compatible runner');
   assert(typeof jobId === 'string' && jobId.length > 0, 'Expected the submitted job ID');
   const detailPath = `/api/v1/execution/jobs/${encodeURIComponent(jobId)}`;
   const detailUrl = new URL(detailPath, BASE_URL).href;
