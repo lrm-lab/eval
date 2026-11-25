@@ -14,7 +14,10 @@ Guarantees that `--plan` previews (`ExecutionService`) and live execution dispat
 """
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import stat
 import tomllib
 from pathlib import Path
 from typing import Any
@@ -77,6 +80,20 @@ def _dump_toml_doc(doc: dict[str, Any]) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
+def _write_private(path: Path, data: bytes) -> None:
+    with os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as file:
+        file.write(data)
+
+
+def _harbor_input_digest(spec: dict[str, Any], overlay: Path) -> bytes:
+    # The native batch lock checks the resulting Harbor command and dataset. Also
+    # bind the source overlay and the ordered Web selection before dispatch.
+    inputs = [str(overlay), hashlib.sha256(overlay.read_bytes()).hexdigest(),
+              spec["suite_id"], spec["batch_name"], spec.get("selection_mode"),
+              spec.get("tasks"), spec.get("planned_tasks")]
+    return hashlib.sha256(json.dumps(inputs).encode()).hexdigest().encode()
+
+
 def materialize_managed_run_config(
     settings: Settings,
     spec: dict[str, Any],
@@ -93,15 +110,25 @@ def materialize_managed_run_config(
        like `cmmmu-val` without passing any unsupported `--mode` CLI flag."""
     kind = str(spec["kind"])
     suite_id = str(spec["suite_id"])
-    effective_work_dir.mkdir(parents=True, exist_ok=True)
-    os.chmod(effective_work_dir, 0o700)
     out_toml = effective_work_dir / ".resolved_harbor.toml"
+    lock = effective_work_dir / ".harbor-input.sha256"
 
-    # For native Harbor --resume, preserve the exact locked config file created on the initial run!
-    if spec.get("resume_mode") == "native" and out_toml.is_file() and not out_toml.is_symlink():
+    if spec.get("resume_mode") == "native":
+        if (kind != "harbor" or any(p.is_symlink() or not p.is_file()
+                                   or stat.S_IMODE(p.stat().st_mode) != 0o600 for p in (out_toml, lock))
+                or lock.read_bytes() != _harbor_input_digest(spec, out_toml)):
+            raise ValueError("Original Harbor config or locked task selection is missing or changed")
         return out_toml
 
-    if kind == "vlmevalkit":
+    effective_work_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(effective_work_dir, 0o700)
+    if kind == "direct":
+        cases = Path(spec["dataset_path"]).resolve(strict=True)
+        suite_tbl = {"runner": "direct", "name": suite_id, "path": str(cases)}
+        if spec.get("scorer_path"):
+            suite_tbl["scorer"] = str(Path(spec["scorer_path"]).resolve(strict=True))
+        resolved_doc = {"datasets": {suite_id: suite_tbl}}
+    elif kind == "vlmevalkit":
         raw_cfg_path = spec.get("config_path") or spec.get("_config_path")
         src_toml = Path(str(raw_cfg_path)) if raw_cfg_path else (settings.datasets_dir / "multimodal" / "harbor.toml")
         if not src_toml.is_file():
@@ -124,7 +151,7 @@ def materialize_managed_run_config(
         raw_path = str(suite_tbl.get("path") or "")
         if raw_path and not Path(raw_path).is_absolute():
             suite_tbl["path"] = str((src_toml.resolve().parent / raw_path).resolve())
-        resolved_doc: dict[str, Any] = {"datasets": {suite_id: suite_tbl}}
+        resolved_doc = {"datasets": {suite_id: suite_tbl}}
     else:
         managed_toml = settings.managed_framework_dir / "harbor.toml"
         fw_toml = settings.framework_dir / "harbor.toml"
@@ -150,8 +177,9 @@ def materialize_managed_run_config(
                 resolved_doc[top_key] = cfg[top_key]
         resolved_doc["datasets"] = {suite_id: suite_tbl}
 
-    out_toml.write_text(_dump_toml_doc(resolved_doc), encoding="utf-8")
-    os.chmod(out_toml, 0o600)
+    _write_private(out_toml, _dump_toml_doc(resolved_doc).encode())
+    if kind == "harbor":
+        _write_private(lock, _harbor_input_digest(spec, out_toml))
     return out_toml
 
 
@@ -175,6 +203,8 @@ def build_managed_run_py_command(
     suite_id = str(spec["suite_id"])
     cmd: list[str] = [python_exe, run_py_path, suite_id]
 
+    if kind == "direct" and config_path is None:
+        config_path = str(Path(work_dir) / ".resolved_harbor.toml")
     if config_path:
         cmd.extend(["--config", config_path])
 
