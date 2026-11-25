@@ -1221,7 +1221,7 @@ def export_session(session, **kwargs):
     return {
         "turns": [{
             "node_id": "n1", "index": 0, "root_id": "n1", "discarded": False,
-            "request_messages": [{"role": "user", "content": "solve"}],
+            "request_messages": [{"role": "user", "content": "capture-only-test-contents s0123456789abcdef01234567"}],
             "request_tools": [], "response_message": {"role": "assistant", "content": "done"},
             "finish_reason": "stop", "sampling_params": {}, "requested_sampling_params": {},
         }],
@@ -1509,7 +1509,70 @@ def dump(data, path):
             gw_det = _wait_job_terminal(c_hb, gw_jid)
             assert gw_det["status"] == "finished", gw_det
             gw_bid = gw_det["shared_snapshot"]["batch_id"]
-            assert c_hb.get(f"/api/v1/batches/{gw_bid}").status_code == 200
+            batch_base = f"/api/v1/batches/{gw_bid}"
+            batch_response = c_hb.get(batch_base)
+            assert batch_response.status_code == 200
+            assert batch_response.json()["has_gateway"]
+            episode = c_hb.get(f"{batch_base}/episodes").json()["items"][0]
+            assert episode["gateway_status"] == "captured"
+            trial_base = f"{batch_base}/trials/{episode['trial_id']}"
+            detail = c_hb.get(trial_base)
+            assert detail.json()["runner_gateway"] is True
+            assert detail.json()["gateway_status"] == "captured"
+            assert "capture-only-test-contents" not in detail.text
+            gateway_route = f"{trial_base}/runner-evidence?section=gateway"
+            current_gateway = f"{gateway_route}&generation_id={episode['generation_id']}"
+            clients = {}
+            gateway_reader_id = None
+            for name, projects, scopes in (
+                ("gw_plain_viewer", ["default"], []),
+                ("gw_scope_viewer", ["default"], ["gateway:read"]),
+                ("gw_other_viewer", ["other"], ["gateway:read"]),
+            ):
+                password = "RunnerGatewayViewer!1"
+                viewer_id = create_user(ctx_h.db, username=name, password=password, projects=projects, scopes=scopes)
+                clients[name] = TestClient(app_h)
+                login_client(clients[name], name, password)
+                if name == "gw_scope_viewer":
+                    gateway_reader_id = viewer_id
+            plain = clients["gw_plain_viewer"].get(current_gateway)
+            assert plain.status_code == 200 and plain.json()["redacted"] is True
+            assert plain.json()["summary"]["turn_count"] == 1
+            assert not plain.json()["turns"] and "gateway:read" in plain.json()["redacted_reason"]
+            allowed = clients["gw_scope_viewer"]
+            full = allowed.get(current_gateway)
+            assert full.status_code == 200 and full.headers["cache-control"] == "private, no-store"
+            assert full.json()["generation_id"] == episode["generation_id"]
+            assert full.json()["redacted"] is False and "capture-only-test-contents" in full.text
+            assert "s0123456789abcdef01234567" not in full.text
+            assert clients["gw_other_viewer"].get(current_gateway).json()["error"]["code"] == "PROJECT_FORBIDDEN"
+            stale = allowed.get(f"{gateway_route}&generation_id=gen_old")
+            assert stale.status_code == 409 and stale.json()["error"]["code"] == "GENERATION_MISMATCH"
+            with ctx_h.db.transaction() as conn:
+                conn.execute("UPDATE users SET scopes_json = '[]' WHERE user_id = ?", (gateway_reader_id,))
+            assert allowed.get(current_gateway).json()["turns"] == []
+
+            # The gateway reference is anchored in the committed restricted evidence and omitted
+            # from the generic evidence API. Older bundles can recover it from the sealed native batch.
+            digest_path = ctx_h.settings.runner_work_dir / gw_jid / ".evidence-digests.json"
+            evidence_manifest = json.loads(digest_path.read_text())
+            evidence_path = ctx_h.settings.evidence_store_dir / gw_jid / episode["trial_id"] / "evidence.json"
+            bound_trial = json.loads(evidence_path.read_text())
+            assert bound_trial["gateway_receipt"]
+            default_evidence = c_hb.get(f"/api/v1/execution/jobs/{gw_jid}/evidence/{episode['trial_id']}")
+            assert default_evidence.status_code == 200 and "gateway_receipt" not in default_evidence.text
+            bound_trial.pop("gateway_receipt")
+            legacy_bytes = json.dumps(bound_trial).encode()
+            evidence_path.write_bytes(legacy_bytes)
+            evidence_manifest["trials"][episode["trial_id"]].update(
+                size=len(legacy_bytes), sha256=hashlib.sha256(legacy_bytes).hexdigest(),
+            )
+            digest_path.write_text(json.dumps(evidence_manifest))
+            with ctx_h.db.transaction() as conn:
+                conn.execute("UPDATE episodes SET gateway_status = 'not_captured' WHERE batch_id = ?", (gw_bid,))
+            assert c_hb.get(trial_base).json()["gateway_status"] == "captured"
+            assert c_hb.get(current_gateway).json()["summary"]["validated"] is True
+
             # Harbor Gateway native --resume -> 409 RESUME_UNSUPPORTED
             assert c_hb.post(
                 f"/api/v1/execution/jobs/{gw_jid}/resume",

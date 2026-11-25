@@ -376,6 +376,7 @@ export interface TrialDetailDTO {
   tool_call_count: number | null;
   trajectory_status: string | null;
   gateway_status: string | null;
+  runner_gateway?: boolean;
   training_status: string | null;
   has_verifier_output: boolean;
   has_artifacts: boolean;

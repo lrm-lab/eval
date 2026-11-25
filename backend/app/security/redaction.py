@@ -14,6 +14,7 @@ _SECRET_PATTERNS = [
     re.compile(r"(Bearer\s+)[A-Za-z0-9._\-]{12,}", re.IGNORECASE),
     re.compile(r"\b(sk-[A-Za-z0-9_\-]{12,})\b"),
     re.compile(r"(?i)((?:api[_-]?key|secret[_-]?key|access[_-]?token|password|passwd)\s*[=:]\s*['\"]?)([^'\"\s,;]{6,})"),
+    re.compile(r"\bs[0-9a-f]{24}\b"),  # OpenEnv rollout session keys
 ]
 
 
@@ -101,6 +102,7 @@ def redact_text(text: str | None) -> str | None:
     out = _SECRET_PATTERNS[0].sub(r"\1<redacted>", out)
     out = _SECRET_PATTERNS[1].sub("<redacted-key>", out)
     out = _SECRET_PATTERNS[2].sub(r"\1<redacted>", out)
+    out = _SECRET_PATTERNS[3].sub("<redacted-key>", out)
     return out
 
 
