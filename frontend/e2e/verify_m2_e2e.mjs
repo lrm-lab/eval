@@ -159,12 +159,21 @@ async function main() {
 
   // 6. Toolkit Verify (report.py check + summary_only offline calc -> Offline Report -> Report Management)
   await page.goto(`${BASE_URL}/toolkit/verify`, { waitUntil: 'networkidle' });
-  await page.waitForSelector('text=Offline Verify 离线校验与三格式分流算分', { timeout: 15000 });
+  await page.getByRole('heading', { name: '离线校验与算分', exact: true }).waitFor({ timeout: 15000 });
   await recordCls('/toolkit/verify');
-  await page.getByRole('button', { name: '提交离线算分并入库' }).click();
-  await page.waitForSelector('text=summary_passthrough', { timeout: 15000 });
-  await page.getByRole('tab', { name: 'Report Management' }).click();
-  await page.waitForSelector('text=离线验证报告', { timeout: 15000 });
+  await page.getByRole('button', { name: '导入离线结果' }).click();
+  await page.getByRole('radio', { name: '粘贴内容' }).check();
+  const reportName = 'E2E 离线验证报告';
+  await page.getByLabel('报告名称').fill(reportName);
+  await page.getByLabel('原始文件名').fill('official-result.json');
+  await page.getByLabel('JSON 或 JSONL 内容').fill(JSON.stringify({
+    dataset: 'CMMMU', metric: 'accuracy', score: 0.6667, denominator: 6, source: 'vlmevalkit/metrics.json',
+  }));
+  await page.getByRole('button', { name: '导入并生成报告' }).click();
+  await page.getByRole('heading', { name: '报告详情' }).waitFor({ timeout: 15000 });
+  await page.getByText('summary_passthrough', { exact: true }).waitFor({ timeout: 15000 });
+  await page.getByRole('button', { name: '返回报告列表' }).click();
+  await page.getByRole('link', { name: '查看离线报告：' + reportName }).waitFor({ timeout: 15000 });
   console.log('[OK] 6. Toolkit Verify 3 tabs + offline calc verified');
 
   // 7. Toolkit Params + Manuals + Upgraded Admin Health

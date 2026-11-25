@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
 import { trackDisplayName } from '../lib/format';
+import { useAppStore } from '../lib/store';
 import type { BenchmarkTreeNode, DatasetReleaseDTO, DatasetTreeTrack } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
@@ -730,14 +731,51 @@ export function DatasetsPage() {
                     ))}
                   </div>
                 )}
-                <pre className="m-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3.5 text-[11px] font-mono whitespace-pre-wrap break-words overflow-x-auto max-h-[60vh]">
-                  {JSON.stringify(legacyDetailQ.data.sample, null, 2)}
-                </pre>
+                <SampleJsonPreview sample={legacyDetailQ.data.sample} />
               </div>
             );
           })()
         ) : null}
       </SlideOverDrawer>
     </PageTransition>
+  );
+}
+
+function SampleJsonPreview({ sample }: { sample: unknown }) {
+  const dark = useAppStore((state) => state.theme === 'dark');
+  const lines = useMemo(() => (JSON.stringify(sample, null, 2) ?? '').split('\n'), [sample]);
+  const colors = dark
+    ? { property: '#9cdcfe', string: '#ce9178', number: '#b5cea8', literal: '#c4a7ff' }
+    : { property: '#005787', string: '#9d301a', number: '#087045', literal: '#7446a8' };
+
+  return (
+    <section aria-label="样本 JSON" className="overflow-hidden rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+      <div className="border-b border-[var(--border-subtle)] px-3.5 py-2 font-mono text-[11px] text-[var(--text-secondary)]">JSON</div>
+      <pre className="m-0 max-h-[60vh] overflow-auto py-2 font-mono text-xs leading-relaxed">
+        <code>
+          {lines.map((line, index) => {
+            // Split complete JSON tokens so escape sequences and HTML-like text stay intact.
+            const tokens = line.split(/("(?:\\.|[^"\\])*"(?=\s*:)|"(?:\\.|[^"\\])*"|\b(?:true|false|null)\b|-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?)/);
+            return (
+              <React.Fragment key={index}>
+                <span className="flex">
+                  <span aria-hidden="true" data-line={index + 1} className="w-12 shrink-0 select-none border-r border-[var(--border-subtle)] pr-2 text-right tabular-nums text-[var(--text-muted)] before:content-[attr(data-line)]" />
+                  <span className="min-w-0 flex-1 whitespace-pre-wrap [overflow-wrap:anywhere] px-3">
+                    {tokens.map((token, tokenIndex) => {
+                      if (tokenIndex % 2 === 0) return token;
+                      const kind = token.startsWith('"')
+                        ? tokens[tokenIndex + 1]?.trimStart().startsWith(':') ? 'property' : 'string'
+                        : /^[a-z]/.test(token) ? 'literal' : 'number';
+                      return <span key={tokenIndex} data-json-token={kind} style={{ color: colors[kind] }}>{token}</span>;
+                    })}
+                  </span>
+                </span>
+                {index < lines.length - 1 && '\n'}
+              </React.Fragment>
+            );
+          })}
+        </code>
+      </pre>
+    </section>
   );
 }
