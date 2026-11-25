@@ -6,13 +6,16 @@ import json
 import math
 import os
 import re
+import secrets
 import sqlite3
+import stat
 import time
 import tomllib
 from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import Any, Iterator
 
 import yaml
 
@@ -35,7 +38,7 @@ from app.security.redaction import (
     redact_path,
     redact_text,
 )
-from app.security.storage_probe import resolve_within_root
+from app.security.storage_probe import resolve_within_root, validate_safe_id
 from app.services.methodology import TokenSemanticsValidator, finite, normalize_score_to_100
 
 _DATA_IMAGE_RE = re.compile(r"data:(image/[A-Za-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]{16,})")
@@ -509,6 +512,67 @@ def _inspect_trial_result_and_media(
     return info
 
 
+@contextmanager
+def _submission_dir(state_dir: Path, *, create: bool = False) -> Iterator[int]:
+    flags = os.O_DIRECTORY | os.O_NOFOLLOW | os.O_RDONLY
+    state = os.open(state_dir, flags)
+    try:
+        st = os.fstat(state)
+        if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o700:
+            raise PermissionError("Expected private submission state directory")
+        if create:
+            try:
+                os.mkdir("runner-submissions", 0o700, dir_fd=state)
+                os.fsync(state)
+            except FileExistsError:
+                pass
+        directory = os.open("runner-submissions", flags, dir_fd=state)
+        try:
+            st = os.fstat(directory)
+            if st.st_uid != os.geteuid() or stat.S_IMODE(st.st_mode) != 0o700:
+                raise PermissionError("Expected private runner-submissions directory")
+            yield directory
+        finally:
+            os.close(directory)
+    finally:
+        os.close(state)
+
+
+def _check_submission_file(st: os.stat_result) -> None:
+    if (
+        not stat.S_ISREG(st.st_mode)
+        or stat.S_IMODE(st.st_mode) != 0o600
+        or st.st_uid != os.geteuid()
+        or st.st_nlink != 1
+    ):
+        raise PermissionError("Expected private regular submission file")
+
+
+def write_runner_submission(state_dir: Path, doc: dict[str, Any]) -> None:
+    """Replace the ledger entry atomically, relative to a pinned private directory."""
+    name = validate_safe_id(doc["batch_name"], "batch_name") + ".json"
+    with _submission_dir(state_dir, create=True) as directory:
+        try:
+            _check_submission_file(os.stat(name, dir_fd=directory, follow_symlinks=False))
+        except FileNotFoundError:
+            pass
+        tmp = f".submission-{secrets.token_hex(16)}.tmp"
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, dir_fd=directory)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                os.fchmod(fd, 0o600)
+                json.dump(doc, stream, ensure_ascii=False)
+                stream.flush()
+                os.fsync(fd)
+            os.replace(tmp, name, src_dir_fd=directory, dst_dir_fd=directory)
+            os.fsync(directory)
+        finally:
+            try:
+                os.unlink(tmp, dir_fd=directory)
+            except FileNotFoundError:
+                pass
+
+
 class SourceApprovalRegistry:
     """Granular directory/prefix approval registry enforcing `approved_evidence_classes` per evidence class."""
 
@@ -804,47 +868,45 @@ class HotIndexer:
     ) -> tuple[str, str, str] | None:
         """Resolve authoritative `(project_id, owner_id, evidence_approval)` for a Runner-published
         batch (`source_namespace='runner_published'`) strictly from trusted control-plane records (S-02):
-        1. SQLite `exec_jobs` submission row (`batch_id` or `batch_name`);
+        1. SQLite `exec_jobs` row for this exact published batch;
         2. Private `0700 <state_dir>/runner-submissions/<batch_name>.json` (`0600`, symlink-rejected)
            for fresh-DB restart recovery;
         3. Existing committed `batches` row for `source_locator`.
-        Returns None for unknown/untracked directories so they fail closed to pending/default."""
+        Returns None for unknown/untracked directories."""
         job_row = self.db.fetchone(
             """
             SELECT project_id, owner_id
             FROM exec_jobs
-            WHERE batch_id = ? OR batch_name = ?
-            ORDER BY CASE WHEN batch_id = ? THEN 0 ELSE 1 END, created_at DESC
+            WHERE batch_id = ? AND batch_name = ?
+            ORDER BY created_at DESC
             LIMIT 1
             """,
-            (default_batch_id, batch_name, default_batch_id),
+            (default_batch_id, batch_name),
         )
         if job_row is not None and job_row.get("project_id") and job_row.get("owner_id"):
             return (str(job_row["project_id"]), str(job_row["owner_id"]), "approved_restricted")
 
         if self.settings.state_dir is not None:
-            sub_dir = self.settings.state_dir / "runner-submissions"
             try:
-                meta_path = resolve_within_root(sub_dir, f"{batch_name}.json")
-            except AppError:
-                meta_path = None
-            if meta_path is not None and meta_path.is_file() and not meta_path.is_symlink():
-                try:
-                    doc = json.loads(meta_path.read_text(encoding="utf-8"))
-                    if (
-                        isinstance(doc, dict)
-                        and str(doc.get("batch_name") or "") == batch_name
-                        and isinstance(doc.get("project_id"), str)
-                        and doc["project_id"].strip()
-                        and isinstance(doc.get("owner_id"), str)
-                        and doc["owner_id"].strip()
-                    ):
-                        appr = str(doc.get("evidence_approval") or "approved_restricted")
-                        if appr not in ("approved_restricted", "pending", "revoked"):
-                            appr = "approved_restricted"
-                        return (doc["project_id"].strip(), doc["owner_id"].strip(), appr)
-                except (OSError, ValueError):
-                    pass
+                name = validate_safe_id(batch_name, "batch_name") + ".json"
+                with _submission_dir(self.settings.state_dir) as directory:
+                    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+                    with os.fdopen(fd, "rb") as stream:
+                        _check_submission_file(os.fstat(fd))
+                        doc = json.load(stream)
+            except FileNotFoundError:
+                pass  # Older installations may only have the committed database record.
+            else:
+                if (
+                    not isinstance(doc, dict)
+                    or doc.get("batch_name") != batch_name
+                    or doc.get("batch_id") != default_batch_id
+                    or doc.get("source_namespace") != "runner_published"
+                    or doc.get("evidence_approval") not in ("approved_restricted", "pending", "revoked")
+                    or not all(isinstance(doc.get(k), str) and doc[k].strip() for k in ("project_id", "owner_id"))
+                ):
+                    raise ValueError("Invalid runner submission record")
+                return doc["project_id"], doc["owner_id"], doc["evidence_approval"]
 
         existing = self.db.fetchone(
             "SELECT project_id, owner_id, evidence_approval FROM batches WHERE source_locator = ? AND is_running_placeholder = 0",
@@ -969,19 +1031,31 @@ class HotIndexer:
                     )
                 return "error"
 
+        trusted = None
+        if ns == "runner_published":
+            trusted = self._resolve_runner_published_ownership(batch_name, default_batch_id, source_locator)
+            if trusted is None:
+                raise ValueError("Cannot establish ownership of runner publication")
+
         if not force:
-            if existing_digests is not None:
+            if existing_digests is not None and trusted is None:
                 if existing_digests.get(source_locator) == digest:
                     return "skipped_unchanged"
             else:
                 existing = self.db.fetchone(
                     """
-                    SELECT batch_id, content_digest, generation_id, checks_json, is_running_placeholder
+                    SELECT batch_id, content_digest, generation_id, checks_json, is_running_placeholder,
+                           project_id, owner_id, evidence_approval
                     FROM batches WHERE source_locator = ?
                     """,
                     (source_locator,),
                 )
-                if existing is not None and existing["content_digest"] == digest:
+                if (
+                    existing is not None and existing["content_digest"] == digest
+                    and (trusted is None or trusted == (
+                        existing["project_id"], existing["owner_id"], existing["evidence_approval"]
+                    ))
+                ):
                     tr_rows = self.db.fetchall(
                         """
                         SELECT evidence_refs_json FROM episodes
@@ -998,17 +1072,13 @@ class HotIndexer:
                     ):
                         return "skipped_unchanged"
 
-        reg_proj, reg_owner, reg_approval, _ = self.approval_registry.lookup_full(batch_dir)
-        if ns == "runner_published":
-            trusted = self._resolve_runner_published_ownership(batch_name, default_batch_id, source_locator)
-            if trusted is not None:
-                reg_proj, reg_owner, reg_approval = trusted
-            else:
-                reg_proj, reg_owner, reg_approval = "default", "system", "pending"
-        project_id = project_override or reg_proj
-        owner_id = owner_override or reg_owner
-        if approval_override:
-            reg_approval = approval_override
+        if trusted is not None:
+            project_id, owner_id, reg_approval = trusted
+        else:
+            reg_proj, reg_owner, reg_approval, _ = self.approval_registry.lookup_full(batch_dir)
+            project_id = project_override or reg_proj
+            owner_id = owner_override or reg_owner
+            reg_approval = approval_override or reg_approval
 
         manifest_path = batch_dir / "manifest.json"
         status_path = batch_dir / "batch-status.json"
@@ -2799,11 +2869,6 @@ class HotIndexer:
         # batches published via default Web Start survive restarts & never return 404 (I-05)!
         pub_dir = self.settings.published_batches_dir
         if pub_dir is not None and pub_dir.is_dir():
-            pub_existing: dict[str, str] = {}
-            for r in self.db.fetchall(
-                "SELECT source_locator, content_digest FROM batches WHERE source_namespace = 'runner_published'"
-            ):
-                pub_existing[str(r["source_locator"])] = str(r["content_digest"])
             try:
                 pub_entries = sorted(
                     (Path(e.path) for e in os.scandir(pub_dir) if e.is_dir(follow_symlinks=False)),
@@ -2816,7 +2881,6 @@ class HotIndexer:
                     pd,
                     force=force,
                     source_namespace="runner_published",
-                    existing_digests=pub_existing,
                     deep_trial_enrich=deep_trial_enrich,
                 )
                 counts[res] += 1
