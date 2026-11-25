@@ -51,6 +51,7 @@ bash "$LRM_RUNTIME_DIR/releases/current/backend/scripts/run_runner.sh"
 - HTTPS 入口默认是 `https://10.110.158.197:8443`，FastAPI 监听 `127.0.0.1:8680`。通过 `LRM_DEMO_HOST_IP`、`HTTPS_PORT` 和 `LRM_ALLOWED_ORIGINS` 配置实际入口。演示证书位于 `state/tls/server.crt`，在客户端核对 `--status` 显示的指纹后再信任证书。停服使用 `start_https_demo.sh --stop`，并在进程管理器中单独停止 Runner。
 - 已有 HTTPS 入口的环境可使用 `deploy_release.sh` 安装发布副本，再由进程管理器运行副本中的 `run_server.sh` 和 `run_runner.sh`。HTTPS 代理需转发协议头并关闭 SSE 响应缓冲。升级前备份，重启 Web 与 Runner 后再验收。需要回滚时从上一个已校验的冻结包重新部署。
 - Runner 使用 `0600` Unix socket 和令牌，原始 `--work`、待审上传和受限证据目录保持 `0700`。网关配置在受管发布副本，凭据通过服务账号的 `state/gateways.env`（`0600`）注入。在 `/admin/health` 检查 `isolated_runner_ready=true`、正数 `runner_pid`、`docker_group_attached=false` 和 `managed_framework` 探针。
+- Harbor Gateway 可通过 Runner 服务的 `LRM_RUNNER_OPENENV_PYTHON` 指向安装 OpenEnv 采集及 Harbor 依赖的绝对 Python 路径。Runner 在启动时用该解释器检查采集导入，Docker、受管框架与导入均通过才开放 Gateway。更新依赖环境后重启 Runner 以重新检查。
 
 运行 API 回归时将 pytest 的缓存和临时文件放在本地临时目录。197 样本验收需要能读取规划文档所列共享数据源。
 

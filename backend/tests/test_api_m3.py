@@ -32,6 +32,7 @@ from app.logging_setup import (
     enforce_job_stdio_retention_cap,
 )
 from app.main import create_app
+from app.runner.client import RunnerIPCClient
 from app.runner.cli_contract import build_managed_run_py_command, materialize_managed_run_config
 from app.security.auth import SESSION_COOKIE_NAME
 from app.security.authz import ALL_SCOPES, personal_project_id
@@ -411,6 +412,44 @@ def test_viewer_can_run_and_manage_owned_evaluations(tmp_path: Path, isolated_se
             assert resumed_detail["status"] == "finished"
             assert (resumed_detail["project_id"], resumed_detail["owner_id"]) == ("team_eval", owner)
             assert resumed_detail["parent_job_id"] == team_job_id
+
+
+def test_m3_gateway_capability_requires_openenv_runtime(tmp_path: Path, isolated_settings: Settings) -> None:
+    mock_bin = tmp_path / "mock-bin"
+    mock_bin.mkdir()
+    docker = mock_bin / "docker"
+    docker.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    docker.chmod(0o700)
+    empty_env = tmp_path / "empty-venv"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(empty_env)], check=True)
+    isolated_settings.config_dir = Path(__file__).resolve().parents[2] / "config"
+
+    with _start_external_runner_daemon(
+        isolated_settings,
+        extra_env={
+            "PATH": f"{mock_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}",
+            "LRM_RUNNER_OPENENV_PYTHON": str(empty_env / "bin/python"),
+            "LRM_RUNNER_OPENENV_PYTHONPATH": "",
+        },
+    ):
+        ipc = RunnerIPCClient(isolated_settings)
+        health = ipc.probe_health()
+        assert health["ok"] and health["docker_available"]
+        assert health["harbor_gateway_runtime_ready"] is False
+        assert "harbor" in health["supported_runners"]
+        assert "harbor_gateway" not in health["supported_runners"]
+        job_id = "job_unready_gateway"
+        status, reply = ipc.submit_job({
+            "job_id": job_id,
+            "runner_instance_id": health["runner_instance_id"],
+            "channel_secret": secrets.token_hex(32),
+            "spec": {"kind": "harbor_gateway"},
+        })
+        assert status == 503
+        assert reply["code"] == "RUNNER_CAPABILITY_UNAVAILABLE"
+        assert reply["detail"] == {"kind": "harbor_gateway", "harbor_gateway_runtime_ready": False}
+        assert isolated_settings.runner_work_dir is not None
+        assert not (isolated_settings.runner_work_dir / job_id).exists()
 
 
 def test_m3_i05_real_external_runner_direct_spoof_immunity_sse_replay_and_default_reconcile(
@@ -1356,6 +1395,7 @@ def dump(data, path):
             "PI_BENCH_RUNNER_BIN": str(mock_bin),
             "VLMEVALKIT_ROOT": str(vlm_root),
             "VLMEVALKIT_PYTHON": sys.executable,
+            "LRM_RUNNER_OPENENV_PYTHON": sys.executable,
             "LRM_RUNNER_OPENENV_PYTHONPATH": str(openenv_root),
         }
         with _start_external_runner_daemon(isolated_settings, extra_env=runner_extra_env):
@@ -1374,6 +1414,7 @@ def dump(data, path):
 
             # Verify Runner /health natively advertises all 4 runners (harbor, harbor_gateway, vlmevalkit, direct)
             caps_all = c_hb.get("/api/v1/execution/capabilities").json()["runner_environment"]
+            assert caps_all["harbor_gateway_runtime_ready"] is True
             assert set(caps_all["supported_runners"]) == {"direct", "harbor", "harbor_gateway", "vlmevalkit"}
 
             # 4a) REAL managed `run.py` Harbor DispatchGuard exit-75 + SAME-`--work` native `--resume`!
