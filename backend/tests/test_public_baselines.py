@@ -94,6 +94,18 @@ def test_public_baseline_sync_alignment_and_default(isolated_settings, monkeypat
         login_client(client, user, password)
         original = client.get(catalog_path).json()["sources"][0]
         assert original["status"] == "ready"
+        assert original["release_id"] == tb.release_id
+        text_sources = [
+            source
+            for source in client.get(catalog_path, params={"include_text_leaders": True}).json()["sources"]
+            if source["status"] == "snapshot"
+        ]
+        assert {source["benchmark_slug"] for source in text_sources} == {"aa-lcr", "ifeval", "gpqa-diamond", "ifbench", "hle"}
+        ifeval = next(source for source in text_sources if source["benchmark_slug"] == "ifeval")
+        assert ifeval["legacy_metric"] == "Prompt-level-strict-accuracy"
+        assert ifeval["rows"][0]["sample_count"] == 541
+        assert "release_id" not in ifeval
+        assert len(client.get(catalog_path).json()["sources"]) == 2
         assert not ctx.public_baselines.refresh(replace(tb, fetch=fail))
         restored = client.get(catalog_path).json()["sources"][0]
         assert restored["status"] == "stale"
@@ -122,6 +134,7 @@ def test_public_baseline_sync_alignment_and_default(isolated_settings, monkeypat
         assert comparison.status_code == 200, comparison.text
         items = {item["batch_id"]: item for item in comparison.json()["items"]}
         assert items["aligned"]["delta_pp"] == -30
+        assert items["aligned"]["generation_id"] == "gen"
         assert not items["aligned"]["reasons"]
         assert all(items[key]["delta_pp"] is None for key in ordered_batches[:-1])
         assert "protocol" not in items["hidden"]

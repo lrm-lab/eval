@@ -1,7 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate, useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
-import type * as echarts from 'echarts';
 import {
   Bookmark,
   Check,
@@ -18,7 +17,7 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ApiError, apiDownload, apiFetch } from '../lib/api';
-import { fmtDeltaPP, fmtDuration, fmtPct, stableColorForKey } from '../lib/format';
+import { fmtDeltaPP, fmtDuration, fmtPct } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import type { CompareQueryResponse, CompareSubjectRef, TrialDetailDTO } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
@@ -27,10 +26,9 @@ import { GainGuardrailPill } from '../components/ui/GainGuardrailPill';
 import { LegacyCompareEvidence, type LegacyCompareSample } from '../components/ui/LegacyCompareEvidence';
 import { MethodologyPopover } from '../components/ui/MethodologyPopover';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
-import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { SlideOverDrawer } from '../components/ui/SlideOverDrawer';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
-import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
+import { CompareScoreCharts } from '../components/charts/CompareScoreCharts';
 
 interface CompareOptionsResp {
   writable_projects?: string[];
@@ -176,135 +174,6 @@ function parseDiffFilter(raw: string | null): DiffFilterKind {
     return raw;
   }
   return 'divergent';
-}
-
-function CompareScoreCharts({
-  comparisonId,
-  rows,
-  subjects,
-}: {
-  comparisonId: string;
-  rows: CompareQueryResponse['rows'];
-  subjects: Array<{ id: string; alias: string }>;
-}) {
-  const theme = useAppStore((s) => s.theme);
-  const sectionRef = useRef<HTMLElement>(null);
-  const [stacked, setStacked] = useState(false);
-
-  useEffect(() => {
-    const section = sectionRef.current;
-    if (!section) return;
-    const observer = new ResizeObserver(([entry]) => setStacked(entry.contentRect.width < 760));
-    observer.observe(section);
-    return () => observer.disconnect();
-  }, []);
-
-  const hasRadar = rows.length >= 3;
-  const option = useMemo<echarts.EChartsOption>(() => {
-    const textColor = theme === 'dark' ? '#a1a1aa' : '#475569';
-    const gridColor = theme === 'dark' ? '#3f3f46' : '#e5e7eb';
-    const radarCenter = stacked ? '50%' : '16.67%';
-    const barTitleTop = stacked ? (hasRadar ? 284 : 88) : 6;
-    const titleStyle = { color: textColor, fontSize: 13, fontWeight: 600 };
-    const datasetNames = rows.map((row) => row.raw_dataset_name);
-    const scores = subjects.map(({ id, alias }) => ({
-      name: subjects.some((other) => other.id !== id && other.alias === alias) ? `${alias} (${id})` : alias,
-      color: stableColorForKey(id),
-      values: rows.map((row) => row.cells[id]?.common_valid?.score ?? null),
-    }));
-
-    return {
-      title: [
-        {
-          text: '多维雷达图',
-          subtext: hasRadar ? undefined : '至少需要 3 个共同可比基准',
-          textStyle: titleStyle,
-          subtextStyle: { color: textColor, fontSize: 11 },
-          left: radarCenter,
-          top: 6,
-          textAlign: 'center',
-        },
-        {
-          text: '分组柱状图',
-          textStyle: titleStyle,
-          left: stacked ? '50%' : '66.67%',
-          top: barTitleTop,
-          textAlign: 'center',
-        },
-      ],
-      tooltip: { ...glassTooltipConfig(theme), trigger: 'axis' },
-      legend: {
-        type: 'scroll',
-        data: scores.map(({ name }) => name),
-        left: 4,
-        right: 4,
-        bottom: 32,
-        textStyle: { color: textColor, fontSize: 11 },
-        pageTextStyle: { color: textColor },
-      },
-      radar: hasRadar ? {
-        center: [radarCenter, stacked ? 148 : 158],
-        radius: stacked ? 78 : 86,
-        indicator: datasetNames.map((name) => ({ name, max: 100 })),
-        axisName: { color: textColor, fontSize: 10, width: 68, overflow: 'truncate' },
-        axisNameGap: 6,
-        axisLine: { lineStyle: { color: gridColor } },
-        splitLine: { lineStyle: { color: gridColor } },
-        splitArea: { show: false },
-      } : undefined,
-      grid: { top: barTitleTop + 35, right: 12, bottom: 90, left: stacked ? 42 : '38%' },
-      xAxis: {
-        type: 'category',
-        data: datasetNames,
-        axisLabel: {
-          color: textColor,
-          fontSize: 10,
-          width: stacked ? 58 : 82,
-          overflow: 'truncate',
-          rotate: rows.length > 6 || stacked ? 30 : 0,
-          hideOverlap: true,
-        },
-      },
-      yAxis: {
-        type: 'value',
-        min: 0,
-        max: 100,
-        axisLabel: { color: textColor, fontSize: 11, formatter: '{value}%' },
-        splitLine: { lineStyle: { color: gridColor, type: 'dashed' } },
-      },
-      series: [
-        ...scores.map(({ name, color, values }): echarts.BarSeriesOption => ({
-          name,
-          type: 'bar',
-          itemStyle: { color, borderRadius: [4, 4, 0, 0] },
-          data: values,
-        })),
-        ...(hasRadar ? [{
-          type: 'radar' as const,
-          tooltip: { trigger: 'item' as const },
-          symbolSize: 4,
-          data: scores.map(({ name, color, values }) => ({
-            name,
-            value: values.map((value) => value ?? '-'),
-            lineStyle: { color, width: 2 },
-            itemStyle: { color },
-          })),
-        }] : []),
-      ],
-    };
-  }, [hasRadar, rows, stacked, subjects, theme]);
-
-  const height = stacked ? (hasRadar ? 600 : 390) : 340;
-  return (
-    <section
-      ref={sectionRef}
-      aria-labelledby="compare-scores-heading"
-      className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4"
-    >
-      <h2 id="compare-scores-heading" className="mb-2 text-sm font-bold text-[var(--text-primary)]">共同可比基准得分可视化</h2>
-      <EChartBox option={option} height={height} exportName={`compare-${comparisonId}`} />
-    </section>
-  );
 }
 
 export function ComparePage() {
@@ -1143,12 +1012,6 @@ export function ComparePage() {
         </div>
       </div>
 
-      <PublicBaselinePanel
-        candidates={subjects.map((subject) => ({ id: subject.id, label: subject.alias, batchId: subject.batch_id }))}
-        emptyMessage="添加一个站内批次即可与所选公榜基准比较。"
-        disabledReason={sampleSetId ? '当前对比限定为自定义样本集，公榜没有该样本集的分数。' : undefined}
-      />
-
       {/* Results Area */}
       {runCompareMut.isPending || (openId && savedOpenQ.isFetching && !result) ? (
         <TableSkeleton rows={8} cols={5} />
@@ -1253,7 +1116,12 @@ export function ComparePage() {
           </div>
 
           {chartRows.length > 0 && (
-            <CompareScoreCharts comparisonId={result.comparison_id} rows={chartRows} subjects={subjectMetaList} />
+            <CompareScoreCharts
+              comparisonId={result.comparison_id}
+              rows={chartRows}
+              subjects={subjectMetaList}
+              snapshot={result.bound_snapshot}
+            />
           )}
 
           {/* Multi-Denominator Pivot Matrix */}
