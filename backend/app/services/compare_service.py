@@ -31,7 +31,7 @@ from app.services.methodology import (
     compute_comparative_macro_avg,
     compute_unrounded_delta,
     finite,
-    normalize_score_to_100,
+    normalize_trial_score_to_100,
 )
 
 LEGACY_BENCHMARK_DIR_MAP: dict[str, str] = {
@@ -547,6 +547,18 @@ class CompareService:
                 sid = str(s["id"])
                 bid = str(s["batch_id"])
                 b = self._load_authorized_batch(user, bid, conn=snap_conn)
+                expected_generation = s.get("expected_generation_id")
+                if expected_generation is not None and expected_generation != b["generation_id"]:
+                    raise AppError(
+                        409,
+                        "GENERATION_MISMATCH",
+                        "已选批次的发布代发生变化，请刷新批次后重新对比",
+                        {
+                            "batch_id": bid,
+                            "expected_generation_id": expected_generation,
+                            "current_generation_id": b["generation_id"],
+                        },
+                    )
                 subj_batches[sid] = b
                 bound_batches.append(
                     {
@@ -670,10 +682,14 @@ class CompareService:
                 sid = str(s["id"])
                 b = subj_batches[sid]
                 emap = ep_maps[sid]
+                reward_protocol = "gaia-raw-correct" if eff_proto == "gaia-raw-correct" else b["scoring_protocol"]
 
                 # 1. common_valid (primary intersection denominator)
                 if n_valid > 0:
-                    cv_rewards = [normalize_score_to_100(float(emap[t]["effective_reward"]), rel["scale_type"]) for t in common_valid]
+                    cv_rewards = [
+                        normalize_trial_score_to_100(float(emap[t]["effective_reward"]), rel["scale_type"], reward_protocol)
+                        for t in common_valid
+                    ]
                     cv_pct = math.fsum(cv_rewards) / n_valid
                     cv_passed = sum(1 for t in common_valid if float(emap[t]["effective_reward"]) >= 1.0)
                     raw_common_valid_pct[sid] = cv_pct
@@ -689,7 +705,9 @@ class CompareService:
                     for t in common_covered:
                         ep = emap[t]
                         if ep["reward_valid"] == 1 and finite(ep["effective_reward"]):
-                            val100 = normalize_score_to_100(float(ep["effective_reward"]), rel["scale_type"])
+                            val100 = normalize_trial_score_to_100(
+                                float(ep["effective_reward"]), rel["scale_type"], reward_protocol,
+                            )
                             faz_scores.append(val100)
                             if float(ep["effective_reward"]) >= 1.0:
                                 faz_passed += 1
@@ -703,7 +721,7 @@ class CompareService:
 
                 # 3. self_full_batch_valid (independent full-batch valid mean, non-comparable reference)
                 valid_all = [
-                    normalize_score_to_100(float(e["effective_reward"]), rel["scale_type"])
+                    normalize_trial_score_to_100(float(e["effective_reward"]), rel["scale_type"], reward_protocol)
                     for e in emap.values()
                     if e["reward_valid"] == 1 and finite(e["effective_reward"])
                 ]
@@ -1049,6 +1067,18 @@ class CompareService:
 
         req_slug = payload.get("benchmark_slug")
         req_rel = payload.get("dataset_release_id")
+        scoped_releases = ((cfg.get("payload") or {}).get("scope") or {}).get("dataset_release_ids") or []
+        if scoped_releases:
+            if not req_rel and len(scoped_releases) == 1:
+                req_rel = scoped_releases[0]
+            if req_rel not in scoped_releases:
+                raise AppError(400, "INCOMPARABLE_PROTOCOL", "逐题回答请求超出已保存的发行版范围")
+            release = self.db.fetchone(
+                "SELECT benchmark_slug FROM dataset_releases WHERE dataset_release_id = ?", (req_rel,),
+            )
+            if release is None or (req_slug and req_slug != release["benchmark_slug"]):
+                raise AppError(400, "INCOMPARABLE_PROTOCOL", "逐题回答请求与已绑定发行版不一致")
+            req_slug = release["benchmark_slug"]
         if (
             is_holdout_dataset_or_batch(
                 dataset_release_id=str(req_rel) if req_rel else None,
@@ -1741,7 +1771,14 @@ class CompareService:
                     raise AppError(403, "PROJECT_FORBIDDEN", "您已无权访问该快照所属项目")
 
         if row["mode"] == "live":
-            result = self.query_compare(user, cfg["payload"])
+            payload = cfg["payload"]
+            # The selection guard applies only to the initial request. Live links
+            # intentionally recompute the selected batches against their current generations.
+            live_subjects = [
+                {key: value for key, value in subject.items() if key != "expected_generation_id"}
+                for subject in payload["subjects"]
+            ]
+            result = self.query_compare(user, {**payload, "subjects": live_subjects})
         else:
             result = json.loads(row["snapshot_json"] or "{}")
             result["comparison_id"] = row["short_id"]
@@ -1785,7 +1822,11 @@ class CompareService:
         baseline_id = str(payload.get("baseline_subject_id") or subjects[0]["id"])
         regression_threshold_pp = float(payload.get("regression_threshold_pp", -1.0))
         include_verdict = bool(payload.get("include_verdict", True))
-        scope_tracks = set((payload.get("scope") or {}).get("tracks") or [])
+        scope = payload.get("scope") or {}
+        scope_tracks = set(scope.get("tracks") or [])
+        scope_release_ids = set(scope.get("dataset_release_ids") or [])
+        metric = scope.get("legacy_metric")
+        scale = scope.get("legacy_scale_type")
 
         # Load legacy leaderboard rows + benchmark metadata
         all_leg = self.db.fetchall(
@@ -1802,6 +1843,12 @@ class CompareService:
         for r in all_leg:
             col = str(r["model_col"])
             rel_id = str(r["dataset_release_id"])
+            if (
+                (scope_release_ids and rel_id not in scope_release_ids)
+                or (metric is not None and r["metric"] != metric)
+                or (scale is not None and r["scale_type"] != scale)
+            ):
+                continue
             by_col.setdefault(col, {})[rel_id] = r
             rel_info[rel_id] = r
 

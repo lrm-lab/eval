@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 from collections import defaultdict
@@ -14,10 +15,11 @@ from app.security.authz import (
     authorized_projects_for_user,
     can_access_project,
     has_scope,
+    is_holdout_dataset_or_batch,
     sql_task_holdout_exclude_clause,
 )
 from app.security.storage_probe import validate_safe_id
-from app.services.methodology import METHODOLOGY_VERSION, finite, normalize_score_to_100
+from app.services.methodology import METHODOLOGY_VERSION, finite, normalize_score_to_100, normalize_trial_score_to_100
 from app.services.query_service import _project_filter_sql, _sanitize_batch_row
 
 
@@ -35,6 +37,192 @@ _HARNESS_BOUNDARY_NOTES: dict[str, str] = {
     "oracle": "参考解（Reference / Oracle），仅用于校验题目可解性，严禁混入正式主榜。",
     "nop": "空操作基线（Reference / NOP），用于校验环境零通过基线。",
 }
+
+
+def _profile_key(prefix: str, *parts: Any) -> str:
+    encoded = json.dumps(parts, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return f"{prefix}_{hashlib.sha256(encoded).hexdigest()[:32]}"
+
+
+def _recorded_identity(value: str | None) -> str | None:
+    return value if value and value.strip().lower() not in ("", "unknown", "unmapped") else None
+
+
+def _comparison_identity(row: dict[str, Any]) -> dict[str, Any]:
+    model = _recorded_identity(row["model_canonical"])
+    route = _recorded_identity(row.get("model_route") or row.get("model_col"))
+    checkpoint, thinking = row["checkpoint"], row["thinking_mode"]
+    harness, version, runner = _recorded_identity(row.get("harness")), row.get("harness_version"), row["runner"]
+    # The native Harbor runner and the CSV default fallback do not identify a harness.
+    if (harness == runner == "harbor") or (runner == "legacy" and harness == "direct"):
+        harness = None
+    return {
+        "model_key": _profile_key("model", model, checkpoint, thinking) if model else None,
+        "harness_key": _profile_key("harness", harness, version, runner) if harness else None,
+        "model_canonical": model,
+        "model_route": route,
+        "checkpoint": checkpoint,
+        "thinking_mode": thinking,
+        "harness": harness,
+        "harness_version": version if harness else None,
+        "runner": runner,
+    }
+
+
+def _recorded_batch_settings(row: dict[str, Any]) -> dict[str, int | None]:
+    try:
+        config = json.loads(row.get("run_config_json") or "{}")
+    except ValueError:
+        config = {}
+    if not isinstance(config, dict):
+        config = {}
+    attempts = config.get("attempts")
+    timeout = config.get("timeout_seconds")
+    return {
+        "attempts_per_task": attempts if type(attempts) is int and attempts > 0 else None,
+        "timeout_seconds": timeout if type(timeout) is int and timeout > 0 else None,
+    }
+
+
+def _dataset_performance(batches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Each score and denominator come from the authorized batch in this row."""
+    rows = []
+    for b in batches:
+        metric_name = b["metric_name"]
+        score, denominator, score_kind = None, None, "unscored"
+        if b["dataset_release_id"] and _recorded_identity(b["scoring_protocol"]):
+            if finite(b["official_score"]):
+                metric_name = b["official_metric"]
+                score = normalize_score_to_100(float(b["official_score"]), b["scale_type"])
+                denominator, score_kind = b["official_denominator"], "official_summary"
+            elif b["scored"] and finite(b["valid_mean"]):
+                score = normalize_trial_score_to_100(float(b["valid_mean"]), b["scale_type"], b["scoring_protocol"])
+                denominator, score_kind = b["scored"], "trial_valid_mean"
+        rows.append({
+            **_comparison_identity(b),
+            **_recorded_batch_settings(b),
+            **{field: b[field] for field in (
+                "benchmark_slug", "dataset_release_id", "dataset_version", "split", "known_task_count",
+                "scoring_protocol", "run_scope", "batch_status", "scored", "recorded", "planned", "unique_tasks",
+                "batch_id", "generation_id", "batch_name", "identity_status",
+            )},
+            "display_name": b["bm_display_name"] or b["raw_dataset_name"] or b["benchmark_slug"],
+            "metric_name": metric_name,
+            "score": round(score, 2) if score is not None else None,
+            "denominator": denominator,
+            "score_kind": score_kind,
+        })
+    return rows
+
+
+def _grouped_comparison(
+    releases: list[dict[str, Any]],
+    batches: list[dict[str, Any]],
+    historical: list[dict[str, Any]],
+    *,
+    can_holdout: bool,
+) -> dict[str, Any]:
+    release_by_id = {r["dataset_release_id"]: r for r in releases}
+    contexts: dict[str, dict[str, Any]] = {}
+    groups: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
+
+    def context(release: dict[str, Any], protocol: str, metric: str, kind: str, scale: str) -> tuple[str, dict[str, Any]]:
+        rel_id = release["dataset_release_id"]
+        context_id = _profile_key("ctx", rel_id, protocol, metric, kind, scale)
+        if context_id not in contexts:
+            contexts[context_id] = {
+                "context_id": context_id,
+                "dataset_release_id": rel_id,
+                "dataset_version": release["dataset_version"],
+                "split": release["split"],
+                "scoring_protocol": protocol,
+                "metric_name": metric,
+                "kind": kind,
+                "groups": [],
+            }
+        return context_id, contexts[context_id]
+
+    def group(
+        active_context: tuple[str, dict[str, Any]], row: dict[str, Any], source_id: str,
+    ) -> dict[str, Any]:
+        context_id, entry = active_context
+        identity = _comparison_identity(row)
+        model_key, harness_key = identity["model_key"], identity["harness_key"]
+        # Missing identity does not prove two runs used the same setup.
+        group_id = _profile_key(
+            "grp", context_id, model_key, harness_key, identity["model_route"],
+            None if model_key and harness_key else source_id,
+        )
+        if group_id not in groups[context_id]:
+            grouped = {
+                "group_id": group_id,
+                **identity,
+                "default_batch_id": None,
+                "batches": [],
+                "historical_scores": [],
+            }
+            groups[context_id][group_id] = grouped
+            entry["groups"].append(grouped)
+        return groups[context_id][group_id]
+
+    for row in batches:
+        release = release_by_id.get(row["dataset_release_id"])
+        protocol = _recorded_identity(row["scoring_protocol"])
+        if row["is_running_placeholder"] or release is None or protocol is None:
+            continue
+        batch = {
+            field: row[field]
+            for field in (
+                "batch_id", "batch_name", "generation_id", "run_scope", "planned", "recorded", "scored",
+                "unique_tasks", "batch_status", "finished_at", "indexed_at",
+            )
+        }
+        batch.update(_recorded_batch_settings(row))
+        details_allowed = can_holdout or not is_holdout_dataset_or_batch(
+            dataset_release_id=row["dataset_release_id"],
+            release_split=release["split"],
+            benchmark_slug=row["benchmark_slug"],
+            raw_dataset_name=row["raw_dataset_name"],
+            batch_name=row["batch_name"],
+        )
+        batch["task_details_allowed"] = details_allowed
+        batch["has_visible_task_scores"] = details_allowed and bool(row["has_visible_task_scores"])
+        batch["official_result"] = (
+            {"metric": row["official_metric"], "score": row["official_score"], "denominator": row["official_denominator"]}
+            if finite(row["official_score"]) else None
+        )
+        active_context = context(release, protocol, release["metric_name"], "trials", release["scale_type"])
+        group(active_context, row, row["batch_id"])["batches"].append(batch)
+
+    for row in historical:
+        release = release_by_id.get(row["dataset_release_id"])
+        if release is None or not finite(row["norm_score_100"]):
+            continue
+        active_context = context(release, "legacy-20261120-csv", row["metric"], "historical_summary", row["scale_type"])
+        group(active_context, {**row, "runner": "legacy"}, row["model_col"])["historical_scores"].append(
+            {
+                "model_col": row["model_col"],
+                "score": round(float(row["norm_score_100"]), 2),
+                "raw_score": row["raw_score"],
+                "scale_type": row["scale_type"],
+                "denominator": None,
+            }
+        )
+
+    for entry in contexts.values():
+        for grouped in entry["groups"]:
+            if grouped["batches"]:
+                # Rows arrive newest first. Prefer a finished run with a visible task score.
+                default = next(
+                    (
+                        b for b in grouped["batches"]
+                        if b["batch_status"] in (None, "finished", "completed", "succeeded")
+                        and b["has_visible_task_scores"]
+                    ),
+                    grouped["batches"][0],
+                )
+                grouped["default_batch_id"] = default["batch_id"]
+    return {"contexts": list(contexts.values()), "empty_reason": None if contexts else "no_authorized_results"}
 
 
 class ProfileService:
@@ -147,13 +335,14 @@ class ProfileService:
             SELECT b.*, o.metric AS official_metric, o.score AS official_score,
                    o.denominator AS official_denominator, o.source AS official_source,
                    bm.display_name AS bm_display_name, bm.track_slug, bm.track_display_name,
-                   bm.goal_type, bm.capability, r.scale_type
+                   bm.goal_type, bm.capability, r.scale_type, r.dataset_version, r.split,
+                   r.metric_name, r.known_task_count
             FROM batches b
             LEFT JOIN official_results o ON o.batch_id = b.batch_id
             LEFT JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
             LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
             WHERE {proj_sql} AND b.model_canonical = ? AND b.is_running_placeholder = 0
-            ORDER BY COALESCE(b.finished_at, b.indexed_at) DESC
+            ORDER BY COALESCE(b.finished_at, b.indexed_at) DESC, b.batch_id
             """,
             [*params, model_canonical],
         )
@@ -188,7 +377,7 @@ class ProfileService:
                        b.benchmark_slug, b.dataset_release_id, b.harness, b.harness_version, b.runner,
                        b.run_scope, b.checkpoint, b.thinking_mode,
                        bm.display_name AS bm_display_name, bm.track_slug, bm.track_display_name,
-                       bm.goal_type, bm.capability, r.scale_type,
+                       bm.goal_type, bm.capability, r.scale_type, r.dataset_version, r.split, r.metric_name,
                        ROW_NUMBER() OVER (
                            PARTITION BY t.canonical_trial_key, t.scoring_protocol
                            ORDER BY t.source_priority_rank ASC, t.batch_id ASC
@@ -200,7 +389,8 @@ class ProfileService:
                 WHERE {proj_sql} AND b.model_canonical = ? AND b.is_running_placeholder = 0
             )
             SELECT benchmark_slug, dataset_release_id, bm_display_name, track_slug, track_display_name,
-                   goal_type, capability, scale_type, harness, harness_version, runner, run_scope,
+                   goal_type, capability, scale_type, dataset_version, split, metric_name, harness,
+                   harness_version, runner, run_scope,
                    scoring_protocol, checkpoint, thinking_mode,
                    MIN(batch_id) AS sample_batch_id,
                    COUNT(*) AS recorded,
@@ -220,10 +410,16 @@ class ProfileService:
 
         for d in dedup_scores:
             raw_v = float(d["valid_mean"]) if d["valid_mean"] is not None else None
-            norm_v = round(normalize_score_to_100(raw_v, d["scale_type"] or "ratio_0_1"), 2) if raw_v is not None else None
+            norm_v = round(
+                normalize_trial_score_to_100(raw_v, d["scale_type"] or "ratio_0_1", d["scoring_protocol"]), 2,
+            ) if raw_v is not None else None
             entry = {
                 "benchmark_slug": d["benchmark_slug"],
                 "dataset_release_id": d["dataset_release_id"],
+                "dataset_version": d["dataset_version"],
+                "split": d["split"],
+                "metric_name": d["metric_name"],
+                "model_canonical": model_canonical,
                 "display_name": d["bm_display_name"] or d["benchmark_slug"] or "Unmapped",
                 "track_slug": d["track_slug"] or "custom",
                 "track_display_name": d["track_display_name"] or "Custom",
@@ -336,6 +532,10 @@ class ProfileService:
                 "goal_type",
                 "capability",
                 "scale_type",
+                "dataset_version",
+                "split",
+                "metric_name",
+                "known_task_count",
             ):
                 b_copy.pop(k, None)
             dto = _sanitize_batch_row(b_copy)
@@ -387,6 +587,7 @@ class ProfileService:
             "verdict_suggestion": verdict_suggestion,
             "track_scores": dict(track_scores),
             "harness_matrix": harness_matrix,
+            "dataset_performance": _dataset_performance(batch_rows),
             "checkpoint_trends": checkpoint_trends,
             "batches": sanitized_batches,
         }
@@ -457,11 +658,15 @@ class ProfileService:
         batches = self.db.fetchall(
             f"""
             SELECT b.*, o.metric AS official_metric, o.score AS official_score,
-                   o.denominator AS official_denominator, o.source AS official_source
+                   o.denominator AS official_denominator, o.source AS official_source,
+                   bm.display_name AS bm_display_name, r.scale_type, r.dataset_version, r.split,
+                   r.metric_name, r.known_task_count
             FROM batches b
             LEFT JOIN official_results o ON o.batch_id = b.batch_id
+            LEFT JOIN benchmarks bm ON bm.benchmark_slug = b.benchmark_slug
+            LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
             WHERE {proj_sql} AND COALESCE(b.harness, b.runner) = ? AND b.is_running_placeholder = 0
-            ORDER BY COALESCE(b.finished_at, b.indexed_at) DESC
+            ORDER BY COALESCE(b.finished_at, b.indexed_at) DESC, b.batch_id
             """,
             [*params, harness_name],
         )
@@ -492,7 +697,7 @@ class ProfileService:
             WITH auth_tps AS (
                 SELECT t.canonical_trial_key, t.scoring_protocol, t.batch_id, t.reward, t.reward_valid,
                        b.model_canonical, b.benchmark_slug, b.dataset_release_id, b.run_scope,
-                       bm.display_name AS bm_display_name, r.scale_type,
+                       bm.display_name AS bm_display_name, r.scale_type, r.dataset_version, r.split, r.metric_name,
                        ROW_NUMBER() OVER (
                            PARTITION BY t.canonical_trial_key, t.scoring_protocol
                            ORDER BY t.source_priority_rank ASC, t.batch_id ASC
@@ -504,7 +709,7 @@ class ProfileService:
                 WHERE {proj_sql} AND COALESCE(b.harness, b.runner) = ? AND b.is_running_placeholder = 0
             )
             SELECT model_canonical, benchmark_slug, dataset_release_id, bm_display_name,
-                   run_scope, scoring_protocol, scale_type,
+                   run_scope, scoring_protocol, scale_type, dataset_version, split, metric_name,
                    MIN(batch_id) AS sample_batch_id,
                    COUNT(*) AS recorded,
                    SUM(CASE WHEN reward_valid = 1 THEN 1 ELSE 0 END) AS scored,
@@ -524,10 +729,15 @@ class ProfileService:
                     "model_canonical": s["model_canonical"],
                     "benchmark_slug": s["benchmark_slug"],
                     "dataset_release_id": s["dataset_release_id"],
+                    "dataset_version": s["dataset_version"],
+                    "split": s["split"],
+                    "metric_name": s["metric_name"],
                     "display_name": s["bm_display_name"] or s["benchmark_slug"] or "Unmapped",
                     "run_scope": s["run_scope"],
                     "scoring_protocol": s["scoring_protocol"],
-                    "score": round(normalize_score_to_100(raw_v, s["scale_type"] or "ratio_0_1"), 2) if raw_v is not None else None,
+                    "score": round(
+                        normalize_trial_score_to_100(raw_v, s["scale_type"] or "ratio_0_1", s["scoring_protocol"]), 2,
+                    ) if raw_v is not None else None,
                     "scored": int(s["scored"] or 0),
                     "recorded": int(s["recorded"] or 0),
                     "batch_id": s["sample_batch_id"],
@@ -545,7 +755,10 @@ class ProfileService:
                     "source": b["official_source"],
                 }
             bc = dict(b)
-            for k in ("official_metric", "official_score", "official_denominator", "official_source"):
+            for k in (
+                "official_metric", "official_score", "official_denominator", "official_source",
+                "bm_display_name", "scale_type", "dataset_version", "split", "metric_name", "known_task_count",
+            ):
                 bc.pop(k, None)
             dto = _sanitize_batch_row(bc)
             dto["official_result"] = off
@@ -574,6 +787,7 @@ class ProfileService:
                 "reasoning_observed_trials": int(tool_stats.get("reasoning_observed_trials") or 0),
             },
             "score_matrix": matrix_out,
+            "dataset_performance": _dataset_performance(batches),
             "batches": sanitized_batches,
         }
 
@@ -634,14 +848,24 @@ class ProfileService:
             (benchmark_slug,),
         )
         proj_sql, params = _project_filter_sql(user, "b.project_id")
+        can_holdout = has_scope(user, "dataset:holdout_read")
+        score_visibility = (
+            "" if can_holdout else f"AND {sql_task_holdout_exclude_clause('b.dataset_release_id', 'e.task_id')}"
+        )
         batch_rows = self.db.fetchall(
             f"""
             SELECT b.*, o.metric AS official_metric, o.score AS official_score,
-                   o.denominator AS official_denominator, o.source AS official_source
+                   o.denominator AS official_denominator, o.source AS official_source,
+                   EXISTS (
+                       SELECT 1 FROM episodes e
+                       WHERE e.batch_id = b.batch_id AND e.generation_id = b.generation_id
+                         AND e.reward_valid = 1 AND e.reward IS NOT NULL
+                         {score_visibility}
+                   ) AS has_visible_task_scores
             FROM batches b
             LEFT JOIN official_results o ON o.batch_id = b.batch_id
             WHERE {proj_sql} AND b.benchmark_slug = ?
-            ORDER BY b.is_running_placeholder DESC, COALESCE(b.finished_at, b.indexed_at) DESC
+            ORDER BY b.is_running_placeholder DESC, COALESCE(b.finished_at, b.indexed_at) DESC, b.batch_id
             """,
             [*params, benchmark_slug],
         )
@@ -665,7 +889,7 @@ class ProfileService:
                     "source": b["official_source"],
                 }
             bc = dict(b)
-            for k in ("official_metric", "official_score", "official_denominator", "official_source"):
+            for k in ("official_metric", "official_score", "official_denominator", "official_source", "has_visible_task_scores"):
                 bc.pop(k, None)
             dto = _sanitize_batch_row(bc)
             dto["official_result"] = off
@@ -712,18 +936,21 @@ class ProfileService:
                     "run_scope": d["run_scope"],
                     "dataset_release_id": d["dataset_release_id"],
                     "scoring_protocol": d["scoring_protocol"],
-                    "score": round(normalize_score_to_100(rv, d["scale_type"] or "ratio_0_1"), 2) if rv is not None else None,
+                    "score": round(
+                        normalize_trial_score_to_100(rv, d["scale_type"] or "ratio_0_1", d["scoring_protocol"]), 2,
+                    ) if rv is not None else None,
                     "scored": int(d["scored"] or 0),
                     "recorded": int(d["recorded"] or 0),
                     "batch_id": d["batch_id"],
                 }
             )
+        historical = []
         if self._can_see_legacy(user):
-            leg = self.db.fetchall(
-                "SELECT * FROM legacy_leaderboard_rows WHERE benchmark_slug = ? ORDER BY norm_score_100 DESC",
+            historical = self.db.fetchall(
+                "SELECT * FROM legacy_leaderboard_rows WHERE benchmark_slug = ? ORDER BY norm_score_100 DESC, id",
                 (benchmark_slug,),
             )
-            for lr in leg:
+            for lr in historical:
                 mini_lb.append(
                     {
                         "model_canonical": lr["model_col"],
@@ -787,6 +1014,7 @@ class ProfileService:
             "releases": rels,
             "scatter_configs": scatter_configs,
             "mini_leaderboard": mini_lb,
+            "grouped_comparison": _grouped_comparison(rels, batch_rows, historical, can_holdout=can_holdout),
             "task_summary": {
                 "indexed_tasks": task_total,
                 "by_category": domain_breakdown,
