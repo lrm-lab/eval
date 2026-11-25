@@ -23,11 +23,13 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _harness_key(value: str) -> str:
+def _label_key(value: str) -> str:
     return "".join(c for c in value.casefold() if c.isalnum())
 
 
-def _comparison_reasons(batch: dict[str, Any], source: PublicSource, public: dict[str, Any]) -> list[str]:
+def _comparison_reasons(
+    batch: dict[str, Any], source: PublicSource, public: dict[str, Any], *, require_same_model: bool,
+) -> list[str]:
     if batch["benchmark_slug"] != source.benchmark_slug:
         return ["该批次未测此基准"]
     if batch["split"] != source.split:
@@ -38,6 +40,13 @@ def _comparison_reasons(batch: dict[str, Any], source: PublicSource, public: dic
         return ["批次暂无可用分数"]
 
     reasons = []
+    if require_same_model:
+        model = batch["model_canonical"]
+        public_model = public["model"]
+        if not model or not public_model:
+            reasons.append("站内或公榜缺少可核验的具体模型")
+        elif _label_key(model) != _label_key(public_model):
+            reasons.append(f"模型不同：站内 {model}，公榜 {public_model}")
     if batch["run_scope"] != "full_split" or batch["unique_tasks"] != source.task_count or public["task_count"] != source.task_count:
         reasons.append(f"题集覆盖不同：站内 {batch['unique_tasks']} 题，公榜 {public['task_count']} 题，需完整 {source.task_count} 题")
     if batch["scoring_protocol"] != source.protocol:
@@ -46,7 +55,7 @@ def _comparison_reasons(batch: dict[str, Any], source: PublicSource, public: dic
         reasons.append(f"故障处理不同：站内 {batch['fault_policy']}，公榜按官方协议处理")
     if source.runner and batch["runner"] != source.runner:
         reasons.append(f"运行器不同：站内 {batch['runner']}，公榜 {source.runner}")
-    if _harness_key(batch["harness"] or "") != _harness_key(public["harness"]):
+    if _label_key(batch["harness"] or "") != _label_key(public["harness"]):
         reasons.append(f"Harness 不同：站内 {batch['harness'] or '未记录'}，公榜 {public['harness']}")
     if batch["scored"] != public["sample_count"]:
         reasons.append(f"计分样本量不同：站内 {batch['scored']} 次，公榜 {public['sample_count']} 次")
@@ -179,6 +188,7 @@ class PublicBaselineService:
                 """SELECT b.batch_id, b.project_id, b.owner_id, b.benchmark_slug, b.dataset_release_id,
                           b.raw_dataset_name, b.batch_name, b.run_scope, b.unique_tasks, b.is_running_placeholder,
                           b.valid_mean, b.scoring_protocol, b.fault_policy, b.runner, b.harness, b.harness_version,
+                          b.model_canonical,
                           b.scored, b.generation_id, b.official_status, r.dataset_version, r.split,
                           o.dataset AS official_dataset, o.metric AS official_metric, o.score AS official_score,
                           o.denominator AS official_denominator, o.fault_policy AS official_fault_policy
@@ -223,8 +233,9 @@ class PublicBaselineService:
             }
         return batch
 
-    def default(self, user: AuthUser, batch_ids: list[str]) -> dict[str, str | None]:
-        """First visible batch with an aligned row; highest official score, then stable row ID."""
+    def default(self, user: AuthUser, batch_ids: list[str], *, require_same_model: bool = False) -> dict[str, str | None]:
+        """Prefer aligned rows, then the highest reference for the first covered benchmark."""
+        reference_id = None
         with self.db.read_snapshot() as conn:
             snapshots = {s.id: self._snapshot(s.id) for s in SOURCES}
             rows_by_source = {sid: json.loads(snap["rows_json"]) for sid, snap in snapshots.items() if snap is not None}
@@ -233,13 +244,19 @@ class PublicBaselineService:
                 source = by_benchmark.get(batch["benchmark_slug"]) if batch else None
                 if batch is None or source is None:
                     continue
+                rows = rows_by_source.get(source.id, [])
+                if rows and reference_id is None:
+                    reference_id = rows[0]["id"]
                 batch = self._use_attached_score(batch, source)
-                for row in rows_by_source.get(source.id, []):
-                    if not _comparison_reasons(batch, source, row) and not self._check_episodes(conn, batch, source, row):
-                        return {"baseline_id": row["id"]}
-        return {"baseline_id": None}
+                for row in rows:
+                    reasons = _comparison_reasons(batch, source, row, require_same_model=require_same_model)
+                    if not reasons and not self._check_episodes(conn, batch, source, row):
+                        return {"baseline_id": row["id"], "mode": "comparable"}
+        return {"baseline_id": reference_id, "mode": "reference" if reference_id else None}
 
-    def compare(self, user: AuthUser, baseline_id: str, batch_ids: list[str]) -> dict[str, Any]:
+    def compare(
+        self, user: AuthUser, baseline_id: str, batch_ids: list[str], *, require_same_model: bool = False,
+    ) -> dict[str, Any]:
         source = SOURCES_BY_ID.get(baseline_id.partition(":")[0])
         snapshot = self._snapshot(source.id) if source else None
         baseline = next((r for r in json.loads(snapshot["rows_json"]) if r["id"] == baseline_id), None) if snapshot else None
@@ -253,7 +270,7 @@ class PublicBaselineService:
                     items.append({"batch_id": batch_id, "reasons": ["批次缺失或当前账号无权读取"], "delta_pp": None})
                     continue
                 batch = self._use_attached_score(batch, source)
-                reasons = _comparison_reasons(batch, source, baseline)
+                reasons = _comparison_reasons(batch, source, baseline, require_same_model=require_same_model)
                 if not reasons:
                     reasons.extend(self._check_episodes(conn, batch, source, baseline))
                 local = batch["valid_mean"]

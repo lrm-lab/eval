@@ -9,6 +9,7 @@ import { useAppStore } from '../lib/store';
 import type { BatchDTO } from '../types/api';
 import { PageTransition, SpotlightCard } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
+import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { CardGridSkeleton, StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
 interface HarnessSummary {
@@ -199,6 +200,18 @@ function HarnessProfileView({ harnessName }: { harnessName: string }) {
               <HarnessMetricChart rows={data.score_matrix} metric="score" title="有效试验均分" />
             </div>
           )}
+
+          <PublicBaselinePanel
+            candidates={data.score_matrix.map((row, index) => ({
+              id: `${row.batch_id || 'score'}-${index}`,
+              label: `${row.model_canonical || '模型未知'} · ${row.display_name}`,
+              batchId: row.batch_id,
+              benchmark: row.benchmark_slug,
+            }))}
+            filterBenchmark
+            requireSameModel
+            emptyMessage="该 Harness 暂无所选基准的站内成绩。"
+          />
 
           <div className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden">
             <div className="px-4 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-xs font-bold text-[var(--text-primary)]">

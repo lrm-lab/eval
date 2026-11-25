@@ -74,6 +74,7 @@ def test_public_baseline_sync_alignment_and_default(isolated_settings, monkeypat
            protocol=tb.protocol, harness="Codex")
     with ctx.db.transaction() as conn:
         conn.execute("UPDATE batches SET scored = 1 WHERE batch_id = 'bad_n'")
+        conn.execute("UPDATE batches SET model_canonical = 'model-b' WHERE batch_id = 'aligned'")
 
     def fail():
         raise OSError("upstream unavailable")
@@ -102,9 +103,16 @@ def test_public_baseline_sync_alignment_and_default(isolated_settings, monkeypat
         ordered_batches = ["val", "hidden", "bad_corpus", "bad_protocol", "bad_n", "bad_harness", "aligned"]
         params = [("batch_id", batch_id) for batch_id in ordered_batches]
         auto = client.get(f"{catalog_path}/default", params=params)
-        assert auto.json() == {"baseline_id": "terminal-2.1:a"}
+        assert auto.json() == {"baseline_id": "terminal-2.1:a", "mode": "comparable"}
         no_auto = client.get(f"{catalog_path}/default", params=params[:-1])
-        assert no_auto.json() == {"baseline_id": None}
+        assert no_auto.json() == {"baseline_id": "gaia-test:a", "mode": "reference"}
+        strict = client.get(f"{catalog_path}/default", params=[("require_same_model", "true"), *params])
+        assert strict.json() == {"baseline_id": "terminal-2.1:b", "mode": "comparable"}
+        wrong_model = client.get(f"{catalog_path}/compare", params={
+            "baseline_id": "terminal-2.1:a", "batch_id": "aligned", "require_same_model": "true",
+        }).json()["items"][0]
+        assert wrong_model["delta_pp"] is None
+        assert "模型不同" in wrong_model["reasons"][0]
         gaia_test = client.get(f"{catalog_path}/compare", params={"baseline_id": "gaia-test:a", "batch_id": "val"})
         gaia_result = gaia_test.json()["items"][0]
         assert gaia_result["delta_pp"] is None

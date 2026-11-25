@@ -54,6 +54,11 @@ interface BaselineComparison {
   items: CandidateResult[];
 }
 
+interface DefaultBaseline {
+  baseline_id: string | null;
+  mode: 'comparable' | 'reference' | null;
+}
+
 export interface PublicBaselineCandidate {
   id: string;
   label: string;
@@ -85,12 +90,16 @@ function chunks(batchIds: string[]) {
 export function PublicBaselinePanel({
   candidates,
   filterBenchmark = false,
+  requireSameModel = false,
+  benchmark,
   emptyMessage,
   disabledReason,
   thresholdPp,
 }: {
   candidates: PublicBaselineCandidate[];
   filterBenchmark?: boolean;
+  requireSameModel?: boolean;
+  benchmark?: string;
   emptyMessage: string;
   disabledReason?: string;
   thresholdPp?: number;
@@ -105,22 +114,25 @@ export function PublicBaselinePanel({
     staleTime: 60_000,
     refetchInterval: 60_000,
   });
-  const sources = catalog.data?.sources || [];
+  const sources = (catalog.data?.sources || []).filter((item) => !benchmark || item.benchmark_slug === benchmark);
   const defaultBatchIds = [...new Set(candidates.flatMap((item) => item.batchId ? [item.batchId] : []))];
   const automatic = useQuery({
-    queryKey: ['public-baseline-default', userId, sources.map((item) => item.synced_at), defaultBatchIds],
+    queryKey: ['public-baseline-default', userId, requireSameModel, sources.map((item) => item.synced_at), defaultBatchIds],
     enabled: selected === 'auto' && !disabledReason && defaultBatchIds.length > 0 && sources.some((item) => item.rows.length),
     queryFn: async ({ signal }) => {
+      let reference: DefaultBaseline | null = null;
       for (const ids of chunks(defaultBatchIds)) {
         const params = new URLSearchParams();
+        if (requireSameModel) params.set('require_same_model', 'true');
         ids.forEach((id) => params.append('batch_id', id));
-        const result = await apiFetch<{ baseline_id: string | null }>(`/api/v1/public-baselines/default?${params}`, { signal });
-        if (result.baseline_id) return result.baseline_id;
+        const result = await apiFetch<DefaultBaseline>(`/api/v1/public-baselines/default?${params}`, { signal });
+        if (result.mode === 'comparable') return result;
+        if (result.mode === 'reference' && !reference) reference = result;
       }
-      return null;
+      return reference;
     },
   });
-  const baselineId = selected === 'auto' ? automatic.data : selected;
+  const baselineId = selected === 'auto' ? automatic.data?.baseline_id : selected;
   const source = sources.find((item) => item.id === baselineId?.split(':')[0]);
   const row = source?.rows.find((item) => item.id === baselineId);
   const visibleCandidates = filterBenchmark
@@ -128,12 +140,13 @@ export function PublicBaselinePanel({
     : candidates;
   const batchIds = [...new Set(visibleCandidates.flatMap((item) => item.batchId ? [item.batchId] : []))];
   const comparison = useQuery({
-    queryKey: ['public-baseline-comparison', userId, baselineId, source?.synced_at, batchIds],
+    queryKey: ['public-baseline-comparison', userId, requireSameModel, baselineId, source?.synced_at, batchIds],
     enabled: Boolean(row && batchIds.length && !disabledReason),
     retry: (count, error) => !(error instanceof ApiError && error.status === 404) && count < 1,
     queryFn: async ({ signal }) => {
       const pages = await Promise.all(chunks(batchIds).map((ids) => {
         const params = new URLSearchParams({ baseline_id: baselineId || '' });
+        if (requireSameModel) params.set('require_same_model', 'true');
         ids.forEach((id) => params.append('batch_id', id));
         return apiFetch<BaselineComparison>(`/api/v1/public-baselines/compare?${params}`, { signal });
       }));
@@ -153,7 +166,7 @@ export function PublicBaselinePanel({
           onChange={(event) => setSelected(event.target.value)}
           className="min-w-0 w-full max-w-sm truncate rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)] sm:w-auto"
         >
-          <option value="auto">自动选择可比公榜分</option>
+          <option value="auto">自动选择公开基准</option>
           <option value="">不使用公开基准</option>
           {selected && selected !== 'auto' && !row && <option value={selected} disabled>所选条目当前不可用</option>}
           {sources.filter((item) => item.rows.length).map((item) => (
@@ -178,11 +191,14 @@ export function PublicBaselinePanel({
           ))}
         </div>
       )}
-      {selected === 'auto' && !row && !catalog.isPending && (
+      {benchmark && catalog.isSuccess && !sources.length && (
+        <p className="m-0 mt-2 text-xs text-[var(--text-muted)]">该基准暂无已接入的公开榜单。</p>
+      )}
+      {selected === 'auto' && !row && sources.some((item) => item.rows.length) && (
         <p className="m-0 mt-2 text-xs text-[var(--text-muted)]" role="status">
           {disabledReason || (automatic.isFetching ? '正在查找可比的公开成绩…'
             : automatic.isError ? '暂时无法自动匹配公开基准。'
-            : '当前没有可自动匹配的公开成绩，可手动选择查看分数与口径。')}
+            : '当前没有可匹配的站内批次，可手动选择查看公开成绩。')}
         </p>
       )}
       {source && row && (
@@ -206,7 +222,11 @@ export function PublicBaselinePanel({
           </p>
 
           {selected === 'auto' && (
-            <p className="m-0 text-[var(--text-muted)]">自动选择当前首个可比批次对应的最高公开分，同分按条目 ID 排序。</p>
+            <p className="m-0 text-[var(--text-muted)]">
+              {automatic.data?.mode === 'reference'
+                ? '当前批次未与公开榜单对齐，显示首个有公榜基准的最高公开分作参考。同分按条目 ID 排序。'
+                : '自动选择当前首个可比批次对应的最高公开分，同分按条目 ID 排序。'}
+            </p>
           )}
           {disabledReason ? <p className="m-0 text-[var(--text-secondary)]">{disabledReason}</p>
             : !visibleCandidates.length ? <p className="m-0 text-[var(--text-secondary)]">{emptyMessage}</p>
