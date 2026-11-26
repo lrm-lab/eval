@@ -15,12 +15,14 @@ import {
   Lock,
   Radio,
   Terminal,
+  X,
 } from 'lucide-react';
 import { ApiError, apiFetch } from '../lib/api';
 import { fmtDuration } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import type { AtifStep, BatchDTO, BatchTasksResponse, TrialDetailDTO } from '../types/api';
 import { PageTransition, SlidingTabs } from '../components/motion/primitives';
+import { ModalOverlay } from '../components/ui/ModalOverlay';
 import { PairedAtifStepCard } from '../components/ui/PairedAtifStepCard';
 import { RunnerTrialEvidence } from '../components/ui/RunnerTrialEvidence';
 import { TokenBreakdownBar } from '../components/ui/TokenBreakdownBar';
@@ -825,19 +827,31 @@ function TrialInspector({ batchId, trialId }: { batchId: string; trialId: string
         </div>
       )}
 
-      {/* Lightbox Modal for Authenticated Trial Media */}
-      {lightboxIdx !== null && (
-        <div
+      <ModalOverlay
+        open={lightboxIdx !== null}
+        onClose={() => setLightboxIdx(null)}
+        label="试验图片预览"
+        className="flex items-center justify-center p-6"
+        backdropClassName="cursor-zoom-out bg-black/80 backdrop-blur-sm"
+        panelClassName="max-w-full"
+      >
+        <button
+          type="button"
           onClick={() => setLightboxIdx(null)}
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6 cursor-zoom-out"
+          data-dialog-autofocus
+          aria-label="关闭图片预览"
+          className="absolute top-2 right-2 rounded-md bg-black/75 p-2 text-white cursor-pointer"
         >
+          <X className="size-4" aria-hidden="true" />
+        </button>
+        {lightboxIdx !== null && (
           <img
             src={`/api/v1/batches/${encodeURIComponent(batchId)}/trials/${encodeURIComponent(trialId)}/media/${lightboxIdx}`}
             alt={`lightbox-${lightboxIdx}`}
-            className="max-h-[90vh] max-w-[92vw] object-contain rounded-xl shadow-2xl"
+            className="block max-h-[90dvh] max-w-full object-contain rounded-xl shadow-2xl"
           />
-        </div>
-      )}
+        )}
+      </ModalOverlay>
     </PageTransition>
   );
 }

@@ -1519,7 +1519,6 @@ export function ComparePage() {
           splitActionRef.current = null;
         }}
         wide
-        manageFocus
         title={splitPair ? `同题对比 · ${splitPair.taskId}` : ''}
         subtitle={
           splitPair?.kind === 'legacy'

@@ -1,11 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { AnimatePresence, m } from 'motion/react';
 import { ArrowRight, BookOpen, Database, Layers, Search, X } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
 import { archivedToolLabel } from '../../lib/archivedTools';
 import { useAppStore } from '../../lib/store';
-import { EASE_OUT_EXPO } from '../motion/primitives';
+import { ModalOverlay } from '../ui/ModalOverlay';
 
 interface SearchItem {
   entity_type: string;
@@ -26,7 +25,6 @@ const QUICK_ROUTES: SearchItem[] = [
 export function CommandPalette() {
   const open = useAppStore((s) => s.commandPaletteOpen);
   const setOpen = useAppStore((s) => s.setCommandPaletteOpen);
-  const reduced = useAppStore((s) => s.reducedMotion);
   const navigate = useNavigate();
 
   const [q, setQ] = useState('');
@@ -39,8 +37,6 @@ export function CommandPalette() {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
         setOpen(!open);
-      } else if (open && e.key === 'Escape') {
-        setOpen(false);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -93,93 +89,82 @@ export function CommandPalette() {
   };
 
   return (
-    <AnimatePresence>
-      {open && (
-        <div className="fixed inset-0 z-50 flex items-start justify-center pt-[12vh] px-4" role="dialog" aria-modal="true" aria-label="全局快捷检索">
-          <m.div
-            initial={reduced ? false : { opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={reduced ? undefined : { opacity: 0 }}
-            transition={{ duration: reduced ? 0 : 0.14 }}
-            onClick={() => setOpen(false)}
-            className="fixed inset-0 bg-black/40 backdrop-blur-xs"
-          />
-          <m.div
-            initial={reduced ? false : { opacity: 0, scale: 0.97, y: -8 }}
-            animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={reduced ? undefined : { opacity: 0, scale: 0.97, y: -8 }}
-            transition={{ duration: reduced ? 0 : 0.18, ease: EASE_OUT_EXPO }}
-            className="lrm-glass relative z-10 w-full max-w-xl rounded-2xl overflow-hidden"
-          >
-            <div className="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border-subtle)]">
-              <Search className="w-4 h-4 text-[var(--text-muted)] shrink-0" />
-              <input
-                autoFocus
-                value={q}
-                onChange={(e) => setQ(e.target.value)}
-                onKeyDown={onInputKey}
-                placeholder="搜索模型、Harness、Benchmark、批次名（FTS5 实时过滤权限）..."
-                className="flex-1 bg-transparent text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
-              />
+    <ModalOverlay
+      open={open}
+      onClose={() => setOpen(false)}
+      label="全局快捷检索"
+      className="flex items-start justify-center px-4 pt-[12vh]"
+      backdropClassName="bg-black/40 backdrop-blur-xs"
+      panelClassName="lrm-glass w-full max-w-xl overflow-hidden rounded-2xl"
+    >
+      <div className="flex items-center gap-2.5 px-4 py-3 border-b border-[var(--border-subtle)]">
+        <Search className="w-4 h-4 text-[var(--text-muted)] shrink-0" />
+        <input
+          data-dialog-autofocus
+          aria-label="检索模型、批次和基准"
+          value={q}
+          onChange={(e) => setQ(e.target.value)}
+          onKeyDown={onInputKey}
+          placeholder="搜索模型、Harness、Benchmark、批次名（FTS5 实时过滤权限）..."
+          className="flex-1 bg-transparent text-sm text-[var(--text-primary)] placeholder:text-[var(--text-muted)] focus:outline-none"
+        />
+        <button
+          type="button"
+          onClick={() => setOpen(false)}
+          aria-label="关闭全局快捷检索"
+          className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+        >
+          <X className="w-4 h-4" />
+        </button>
+      </div>
+
+      <div className="max-h-80 overflow-y-auto p-2">
+        {loading ? (
+          <div className="p-4 text-center text-xs text-[var(--text-muted)]">检索中...</div>
+        ) : results.length === 0 ? (
+          <div className="p-6 text-center text-xs text-[var(--text-muted)]">未匹配到有权查看的记录</div>
+        ) : (
+          results.map((item, idx) => {
+            const active = idx === activeIdx;
+            const Icon =
+              item.entity_type === 'benchmark'
+                ? Database
+                : item.entity_type === 'batch'
+                  ? Layers
+                  : BookOpen;
+            return (
               <button
+                key={`${item.entity_type}:${item.entity_id}`}
                 type="button"
-                onClick={() => setOpen(false)}
-                className="rounded p-1 text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+                onMouseEnter={() => setActiveIdx(idx)}
+                onClick={() => goItem(item)}
+                className={`w-full flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors cursor-pointer ${
+                  active ? 'bg-[var(--brand-tint)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]'
+                }`}
               >
-                <X className="w-4 h-4" />
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Icon className="w-4 h-4 shrink-0 text-[var(--brand-primary)]" />
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-[var(--text-primary)] truncate">{item.title}</div>
+                    <div className="text-[11px] text-[var(--text-muted)] truncate">{item.subtitle}</div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <span className="rounded px-1.5 py-0.5 text-[10px] uppercase bg-[var(--bg-elevated)] text-[var(--text-muted)]">
+                    {item.entity_type}
+                  </span>
+                  <ArrowRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
+                </div>
               </button>
-            </div>
+            );
+          })
+        )}
+      </div>
 
-            <div className="max-h-80 overflow-y-auto p-2">
-              {loading ? (
-                <div className="p-4 text-center text-xs text-[var(--text-muted)]">检索中...</div>
-              ) : results.length === 0 ? (
-                <div className="p-6 text-center text-xs text-[var(--text-muted)]">未匹配到有权查看的记录</div>
-              ) : (
-                results.map((item, idx) => {
-                  const active = idx === activeIdx;
-                  const Icon =
-                    item.entity_type === 'benchmark'
-                      ? Database
-                      : item.entity_type === 'batch'
-                        ? Layers
-                        : BookOpen;
-                  return (
-                    <button
-                      key={`${item.entity_type}:${item.entity_id}`}
-                      type="button"
-                      onMouseEnter={() => setActiveIdx(idx)}
-                      onClick={() => goItem(item)}
-                      className={`w-full flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-left transition-colors cursor-pointer ${
-                        active ? 'bg-[var(--brand-tint)] text-[var(--text-primary)]' : 'text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]'
-                      }`}
-                    >
-                      <div className="flex items-center gap-2.5 min-w-0">
-                        <Icon className="w-4 h-4 shrink-0 text-[var(--brand-primary)]" />
-                        <div className="min-w-0">
-                          <div className="text-xs font-semibold text-[var(--text-primary)] truncate">{item.title}</div>
-                          <div className="text-[11px] text-[var(--text-muted)] truncate">{item.subtitle}</div>
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1.5 shrink-0">
-                        <span className="rounded px-1.5 py-0.5 text-[10px] uppercase bg-[var(--bg-elevated)] text-[var(--text-muted)]">
-                          {item.entity_type}
-                        </span>
-                        <ArrowRight className="w-3.5 h-3.5 text-[var(--text-muted)]" />
-                      </div>
-                    </button>
-                  );
-                })
-              )}
-            </div>
-
-            <div className="flex items-center justify-between px-4 py-2 border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[11px] text-[var(--text-muted)]">
-              <span>↑↓ 选择 · Enter 跳转 · Esc 关闭</span>
-              <span>SQLite FTS5 · 按项目与 Scope 鉴权</span>
-            </div>
-          </m.div>
-        </div>
-      )}
-    </AnimatePresence>
+      <div className="flex items-center justify-between px-4 py-2 border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)] text-[11px] text-[var(--text-muted)]">
+        <span>↑↓ 选择 · Enter 跳转 · Esc 关闭</span>
+        <span>SQLite FTS5 · 按项目与 Scope 鉴权</span>
+      </div>
+    </ModalOverlay>
   );
 }

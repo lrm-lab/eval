@@ -1,7 +1,8 @@
-import { useRef, useState } from 'react';
+import { useId, useRef, useState } from 'react';
 import { SlidersHorizontal } from 'lucide-react';
 import { useDismissibleLayer } from '../../lib/dismissibleLayer';
 import { fmtDeltaPP, fmtPct } from '../../lib/format';
+import { DismissiblePanel } from './DismissiblePanel';
 
 export interface CompositeScoreCellProps {
   score: number | null | undefined;
@@ -36,10 +37,11 @@ export function CompositeScoreCell({
   ariaLabel,
 }: CompositeScoreCellProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
+  const panelId = useId();
   const breakdownLayer = useRef<HTMLDivElement>(null);
   const breakdownTrigger = useRef<HTMLButtonElement>(null);
   const dismissBreakdown = useDismissibleLayer(breakdownLayer, showBreakdown,
-    () => setShowBreakdown(false), () => breakdownTrigger.current?.focus());
+    () => setShowBreakdown(false), () => breakdownTrigger.current?.focus({ preventScroll: true }));
 
   if (isLoading) {
     return (
@@ -152,38 +154,40 @@ export function CompositeScoreCell({
             }}
             title="查看子指标拆解"
             aria-expanded={showBreakdown}
-            className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded p-0.5 text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] hover:text-[var(--brand-primary)] transition-opacity cursor-pointer"
+            aria-controls={showBreakdown ? panelId : undefined}
+            className="rounded p-0.5 text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] hover:text-[var(--brand-primary)] transition-opacity cursor-pointer pointer-fine:opacity-0 pointer-fine:group-hover:opacity-100 focus-visible:opacity-100 aria-expanded:opacity-100"
           >
             <SlidersHorizontal className="w-3 h-3" />
           </button>
-          {showBreakdown && (
-            <div
-              onClick={(e) => e.stopPropagation()}
-              className="lrm-glass absolute right-0 top-6 z-40 w-52 rounded-lg p-2.5 text-xs"
-            >
-              <div className="flex items-center justify-between mb-1.5 pb-1 border-b border-[var(--border-subtle)]">
-                <span className="font-semibold text-[var(--text-primary)]">子指标拆解</span>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowBreakdown(false);
-                    breakdownTrigger.current?.focus();
-                  }}
-                  className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
-                >
-                  关闭
-                </button>
-              </div>
-              <div className="space-y-1">
-                {breakdown.map((b) => (
-                  <div key={b.label} className="flex items-center justify-between gap-2">
-                    <span className="text-[var(--text-secondary)] truncate">{b.label}</span>
-                    <span className="font-mono tabular-nums text-[var(--text-primary)]">{b.value}</span>
-                  </div>
-                ))}
-              </div>
+          <DismissiblePanel
+            open={showBreakdown}
+            id={panelId}
+            tabIndex={-1}
+            onClick={(e) => e.stopPropagation()}
+            className="lrm-glass absolute right-0 top-6 z-40 w-52 rounded-lg p-2.5 text-xs"
+          >
+            <div className="flex items-center justify-between mb-1.5 pb-1 border-b border-[var(--border-subtle)]">
+              <span className="font-semibold text-[var(--text-primary)]">子指标拆解</span>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowBreakdown(false);
+                  breakdownTrigger.current?.focus({ preventScroll: true });
+                }}
+                className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
+              >
+                关闭
+              </button>
             </div>
-          )}
+            <div className="space-y-1">
+              {breakdown.map((b) => (
+                <div key={b.label} className="flex items-center justify-between gap-2">
+                  <span className="text-[var(--text-secondary)] truncate">{b.label}</span>
+                  <span className="font-mono tabular-nums text-[var(--text-primary)]">{b.value}</span>
+                </div>
+              ))}
+            </div>
+          </DismissiblePanel>
         </div>
       )}
     </div>
