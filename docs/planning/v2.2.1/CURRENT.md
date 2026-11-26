@@ -1,19 +1,20 @@
 # LRM Eval 现行开发与验收要求
 
-本页记录 v2.2.1 设计定稿后的产品决策 和实现差异。涉及下列模块时，以本页的现行要求为准。各模块原设计继续提供背景、数据契约与验收依据。
+本页记录 v2.2.1 设计定稿后的产品决策和实现差异。涉及下列模块时，以本页的现行要求为准。各模块原设计继续提供背景、数据契约与验收依据。
 
-**本次核对基线**为 197 的 2026-11-26 发布 `20261126T083558Z`，代码 `b9fabce`。每条待发布内容注明任务及复验条件。 [197 入口](https://10.110.158.197:8443/) · [发布基线](https://github.com/lrm-lab/eval/commit/b9fabce)
+**本次核对基线**为 197 的 2026-11-26 发布 `20261126T100712Z`，代码 `ab756f5`。每条待发布内容注明任务及复验条件。 [197 入口](https://10.110.158.197:8443/) · [发布基线](https://github.com/lrm-lab/eval/commit/ab756f5)
 
 ## 已上线
 
 | 模块 | 开发及验收要求 | 实现依据 |
 | --- | --- | --- |
-| 导航与帮助 | 侧栏按浏览资源、结果分析、执行与校验、合成与训练分组。右上角问号打开当前页面的方法学；头像菜单提供框架手册和管理员监控。跟随系统减少动效设置，页面交互高亮对应实际选中或可操作的状态。 | [导航分组](https://github.com/lrm-lab/eval/commit/fd1e830) · [工具箱原设计](02-pages/08-toolkit-and-admin.md) |
-| 首页 | 「评测态势」合并标题、统计与常用操作，最近运行单独列进度。可按数据集、模型或 Harness 分组并锁定筛选，支持搜索、放大、全屏、数据集快切和可还原的链接。板块面积按登记题量，格子面积按可见的已发布评测次数。权限过滤和同次运行去重在计数前完成。红色为上涨，绿色为下跌，幅度越大颜色越亮。持平与暂无分差分别用等号和横线表示。 | [评测态势](https://github.com/lrm-lab/eval/commit/b9fabce) · [首页原设计](02-pages/01-home-leaderboard-and-profiles.md) |
+| 导航与帮助 | 默认导航聚焦浏览资源和结果分析。执行、Direct、离线算分、参数台账、合成题库、RL/SFT 选题和 OPD 从常用入口归档，研究员和管理员可用维护入口。右上角问号打开方法学，头像菜单提供框架手册和管理员监控。浮动图例、筛选、菜单和口径说明支持点击外部与 Escape 关闭。 | [默认导航](https://github.com/lrm-lab/eval/commit/ab756f5) · [浮层交互](https://github.com/lrm-lab/eval/commit/a19c086) |
+| 首页 | 态势图上方只显示一条紧凑工具栏，提供三轴切换、搜索、全屏、筛选和读图。最近运行列在图下。板块面积按登记题量，格子面积按可见的已发布评测次数。权限过滤和同次运行去重在计数前完成。红色为上升，绿色为下降，幅度越大颜色越亮。持平和暂无分差分别用等号与横线。 | [首页细工具条](https://github.com/lrm-lab/eval/commit/ab756f5) · [首页原设计](02-pages/01-home-leaderboard-and-profiles.md) |
 | 榜单与三轴对比 | 主榜优先展示有效得分，分别列有效题、已记录和计划分母。基准档案、模型档案和 Harness 档案支持锁定交叉维度。跨数据集分别展示分数、协议及分母。同题分差核对发行版、Split、评分协议和题目身份。保留逐题证据、可分享的筛选和明确的无法判定原因。 | [三轴对比](https://github.com/lrm-lab/eval/commit/4913d60) · [分母展示](https://github.com/lrm-lab/eval/commit/4761a43) · [对比原设计](02-pages/04-dynamic-comparison.md) |
 | 公开榜参考 | 有已登记来源时，在适用的对比图上直接显示公开榜首的第三条系列。记录来源和采集信息。版本、Split、协议和样本口径可核对时才计算可比分差；不匹配的公开值保留参考标签。站内前次与公开榜首分别标注。 | [公开榜同步](https://github.com/lrm-lab/eval/commit/a0f6e9b) · [公开榜图层](https://github.com/lrm-lab/eval/commit/c2fb126) · [历史文本公开榜](https://github.com/lrm-lab/eval/commit/681b13f) |
 | 题面、报告与证据 | 页面直接显示公开题面和可见产物；缺采集、权限不足、文件缺失、批次换代分别报告。ATIF、网关窗口、验证器与媒体按各自 Scope、来源审批和发布代核验。先核验目标项目访问权、相应 Scope、来源审批和同代摘要，再去重并返回正文。撤权、缺少目标项目访问权或摘要不一致时拒绝正文。旧来源待审批时，保留已授权的状态与分母。 | [已授权题面和 Runner 证据](https://github.com/lrm-lab/eval/commit/bec6328) · [网关窗口](https://github.com/lrm-lab/eval/commit/75c52a4) · [明细原设计](02-pages/03-reports-and-trial-inspector.md) |
-| 评测执行 | 先选题库，再从就绪的运行器中匹配。登录成员可按权限预检和提交；Viewer 默认使用个人项目，只能控制有权管理的作业。创建、取消、续跑继续校验身份和作用域。Terminal 当前已验证入口限标准 Harbor 的 nginx 单题。站内区分作业实时状态、批次发布状态和只读共享证据。 | [题库优先](https://github.com/lrm-lab/eval/commit/39f242c) · [登录成员权限](https://github.com/lrm-lab/eval/commit/4e91ff2) · [Terminal 已验证入口](https://github.com/lrm-lab/eval/commit/1ed662f) · [执行原设计](02-pages/06-execution-and-direct-lab.md) |
+| 评测执行 | 归档工具的预检、提交、中止和续跑需要研究员或管理员权限。Viewer 可以查询有权读取的历史作业、状态和试验证据。维护角色先选题库，再从就绪的 Runner 中匹配。Terminal 当前已验证入口为标准 Harbor 的 nginx 单题。 | [归档权限](https://github.com/lrm-lab/eval/commit/ab756f5) · [执行原设计](02-pages/06-execution-and-direct-lab.md) |
+| 自助注册 | 登录页可进入用户名和密码注册，成功后建立同一套登录会话。新账号为默认共享项目的 Viewer，可查询已批准的评测结果、题面、轨迹、网关窗口、验证器日志和多模态问答。来源审批、个人项目、标准答案及留出集按原授权核验。 | [注册实现](https://github.com/lrm-lab/eval/commit/ab756f5) |
 
 ### 首页历史分差
 
@@ -40,7 +41,7 @@
 
 首页目录提供 `scored_run_count` 及 `has_scored_history_peer`。确认首评时直接计算起始分差。其他有效分先查询 `/api/v1/compare/history`，再按历史返回的批次与发布代选择实际分差或 0 分基线。
 
-执行页先调用 `GET /api/v1/execution/capabilities?discover_tasks=false` 加载题库登记，再用 `?suite_id=<id>` 查询所选题库。省略参数继续返回完整能力。作业和通知独立加载，预检和提交仍由服务器核验。 [首评与执行拆分](https://github.com/lrm-lab/eval/commit/7783a0c) · [审批与 ATIF](https://github.com/lrm-lab/eval/commit/e81dbd9)
+有维护权限的执行页先调用 `GET /api/v1/execution/capabilities?discover_tasks=false` 加载题库登记，再用 `?suite_id=<id>` 查询所选题库。省略参数继续返回完整能力。作业和通知独立加载，预检和提交仍由服务器核验。 [首评与执行拆分](https://github.com/lrm-lab/eval/commit/7783a0c) · [审批与 ATIF](https://github.com/lrm-lab/eval/commit/e81dbd9)
 
 ## 待验收
 
