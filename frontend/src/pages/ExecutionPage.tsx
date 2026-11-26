@@ -91,8 +91,9 @@ function defaultSuiteForRunner(suites: RegisteredSuite[], kind: RunnerKind) {
   const runner = kind === 'harbor_gateway' ? 'harbor' : kind;
   const matching = suites.filter((suite) =>
     suite.runner === runner && suite.selectable && (kind !== 'harbor_gateway' || suite.suite_id !== 'terminal'));
-  const smokeSuites = matching.filter((suite) => suite.split === 'smoke' && (suite.task_count ?? 0) > 0);
-  smokeSuites.sort((first, second) => (first.task_count ?? 0) - (second.task_count ?? 0));
+  const smokeSuites = matching.filter((suite) => suite.split === 'smoke');
+  smokeSuites.sort((first, second) =>
+    (first.task_count ?? Number.MAX_SAFE_INTEGER) - (second.task_count ?? Number.MAX_SAFE_INTEGER));
   return smokeSuites[0] ?? matching[0];
 }
 
@@ -114,9 +115,10 @@ function runnerForSuite(suite: RegisteredSuite, available: string[], preference:
   return choices.find((choice) => available.includes(choice)) ?? preferred;
 }
 
-function suiteCanRun(suite: RegisteredSuite, available: string[], agent: string): boolean {
+function suiteCanRun(suite: RegisteredSuite, available: string[], agent: string, requireDiscovery = true): boolean {
   const runner = runnerForSuite(suite, available, null, agent);
-  return suite.selectable && (suite.task_count ?? 0) > 0 && Boolean(runner && available.includes(runner));
+  const hasTasks = (suite.task_count ?? 0) > 0 || (!requireDiscovery && suite.task_discovery_status === 'not_requested');
+  return suite.selectable && hasTasks && Boolean(runner && available.includes(runner));
 }
 
 export interface UnintegratedSuite {
@@ -398,60 +400,6 @@ interface AuthorizedEvidenceResp {
   storage_tier: string;
   evidence: Record<string, unknown>;
 }
-
-/* ============================================================================
- * Static fallback metadata (prevents CLS before capabilities query resolves)
- * ============================================================================ */
-
-const FALLBACK_RUNNER_KINDS: RunnerKindMeta[] = [
-  {
-    kind: 'harbor',
-    display_name: 'Harbor 标准模式',
-    requires_docker: true,
-    native_resume_supported: true,
-    derived_resume_supported: true,
-    manual_pause_supported: false,
-    guard_pause_exit_code: 75,
-    partial_task_forces_infer: false,
-    notes:
-      '隔离容器 Runner；原生 --resume 需锁定 harness_version 且私有 0700 --work 锁完整；运行中仅支持优雅 Stop，paused_by_guard (exit 75) 仅由 DispatchGuard 连续故障熔断触发。',
-  },
-  {
-    kind: 'harbor_gateway',
-    display_name: 'Harbor Gateway 模式',
-    requires_docker: true,
-    native_resume_supported: false,
-    derived_resume_supported: true,
-    manual_pause_supported: false,
-    guard_pause_exit_code: 75,
-    partial_task_forces_infer: false,
-    notes:
-      'OpenEnv 代理抓包落 0700 独立授权证据存储；原生不支持 --resume（调用原生续跑返回 409 RESUME_UNSUPPORTED），支持 M3 任务级派生续跑。',
-  },
-  {
-    kind: 'vlmevalkit',
-    display_name: 'VLMEvalKit 多模态模式',
-    requires_docker: false,
-    native_resume_supported: false,
-    derived_resume_supported: true,
-    manual_pause_supported: false,
-    guard_pause_exit_code: null,
-    partial_task_forces_infer: true,
-    notes:
-      '无需 Docker；VLMEVALKIT.md:44 硬约束：指定 --task 局部运行时强制进入 mode=infer（仅推理不跑官方评分器、run_scope=smoke/subset、official_status=unscored）；原生不支持 --resume。',
-  },
-  {
-    kind: 'direct',
-    display_name: 'Direct 原生直测模式',
-    requires_docker: false,
-    native_resume_supported: false,
-    derived_resume_supported: true,
-    manual_pause_supported: false,
-    guard_pause_exit_code: null,
-    partial_task_forces_infer: false,
-    notes: '仅需 Python + 服务端 Gateway Profile，无需 Docker；原生不支持 --resume，支持 M3 任务级派生续跑。',
-  },
-];
 
 const RUNNER_SHORT_LABELS: Record<RunnerKind, string> = {
   harbor: 'Harbor 标准',
@@ -833,12 +781,21 @@ export function ExecutionPage() {
   // ---------- Queries ----------
   const capsQ = useQuery({
     queryKey: ['execution-capabilities', userId],
-    queryFn: () => apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities'),
+    queryFn: ({ signal }) =>
+      apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities?discover_tasks=false', { signal }),
   });
   const webhookProfiles = capsQ.data?.webhook_profiles ?? [];
   const configuredRunners = readyRunners(capsQ.data);
   const registeredSuites = capsQ.data?.suites ?? [];
-  const selectedSuite = registeredSuites.find((suite) => suite.suite_id === suiteId);
+  const selectedRegistration = registeredSuites.find((suite) => suite.suite_id === suiteId);
+  const suiteCapabilitiesQ = useQuery({
+    queryKey: ['execution-suite-capabilities', userId, suiteId],
+    enabled: Boolean(selectedRegistration),
+    queryFn: ({ signal }) =>
+      apiFetch<ExecutionCapabilitiesResp>(`/api/v1/execution/capabilities?suite_id=${encodeURIComponent(suiteId)}`, { signal }),
+  });
+  const discoveredSuite = suiteCapabilitiesQ.data?.suites.find((suite) => suite.suite_id === suiteId);
+  const selectedSuite = selectedRegistration && (discoveredSuite ?? selectedRegistration);
   const firstReadyRunner = capsQ.data?.runner_kinds.find((runner) => configuredRunners.includes(runner.kind))?.kind;
   const suggestedKind = configuredRunners.includes('direct') ? 'direct' : firstReadyRunner;
   const suiteRunner = selectedSuite && runnerForSuite(selectedSuite, configuredRunners, runnerChoice, agent);
@@ -927,7 +884,7 @@ export function ExecutionPage() {
     const caps = capsQ.data;
     if (!caps) return;
     if (!suiteId) {
-      const runnable = caps.suites.filter((suite) => suiteCanRun(suite, readyRunners(caps), agent));
+      const runnable = caps.suites.filter((suite) => suiteCanRun(suite, readyRunners(caps), agent, false));
       const match = defaultSuiteForRunner(runnable, kind) ?? runnable[0];
       if (match?.suite_id === 'terminal') selectSuite(match.suite_id);
       else if (match) setSuiteId(match.suite_id);
@@ -962,7 +919,7 @@ export function ExecutionPage() {
         setHarnessVersion('1.19.3');
       }
     }
-    const suites = registeredSuites.filter((suite) => suiteCanRun(suite, configuredRunners, agent));
+    const suites = registeredSuites.filter((suite) => suiteCanRun(suite, configuredRunners, agent, false));
     if (suites.length > 0) {
       const targetRunner = nextKind === 'harbor_gateway' ? 'harbor' : nextKind;
       const curSuite = suites.find((s) => s.suite_id === suiteId);
@@ -1048,7 +1005,7 @@ export function ExecutionPage() {
   const submitMut = useMutation({
     mutationFn: async () => {
       setEnvironmentNotice(false);
-      const fresh = await capsQ.refetch();
+      const fresh = await suiteCapabilitiesQ.refetch();
       const suite = fresh.data?.suites.find((item) => item.suite_id === suiteId);
       const available = readyRunners(fresh.data);
       const resolvedKind = suite && runnerForSuite(suite, available, runnerChoice, agent);
@@ -1074,6 +1031,7 @@ export function ExecutionPage() {
       if (err instanceof ApiError && ['RUNNER_NOT_ATTACHED', 'RUNNER_CAPABILITY_UNAVAILABLE', 'RUNNER_UNAVAILABLE'].includes(err.code)) {
         setEnvironmentNotice(true);
         void capsQ.refetch();
+        void suiteCapabilitiesQ.refetch();
         return;
       }
       pushToast('error', `启动作业失败：${err.message}`);
@@ -1463,14 +1421,19 @@ export function ExecutionPage() {
   };
 
   // ---------- Computed View Data ----------
-  const runnerKinds = capsQ.data?.runner_kinds ?? FALLBACK_RUNNER_KINDS;
+  const runnerKinds = capsQ.data?.runner_kinds ?? [];
   const dockerGroupAttached =
     planResult?.docker_group_attached ?? capsQ.data?.runner_environment.docker_group_attached ?? false;
   const isolatedRunnerReady = Boolean(capsQ.data?.runner_environment.isolated_runner_ready);
-  const activeRunnerAvailable = Boolean(selectedSuite && suiteCanRun(selectedSuite, configuredRunners, agent));
-  const runnerStatus = capsQ.isPending
-    ? '正在检查运行状态'
-    : activeRunnerAvailable && !dockerGroupAttached ? '评测可启动' : '此题库暂不可启动';
+  const suiteDiscoveryPending = Boolean(selectedRegistration && suiteCapabilitiesQ.isPending);
+  const suiteDiscoveryFailed = Boolean(selectedRegistration && (suiteCapabilitiesQ.isError ||
+    (suiteCapabilitiesQ.isSuccess && !discoveredSuite)));
+  const latestRunners = readyRunners(suiteCapabilitiesQ.data);
+  const activeRunnerAvailable = Boolean(selectedRegistration && discoveredSuite && !suiteDiscoveryFailed &&
+    suiteCanRun(discoveredSuite, configuredRunners.filter((runner) => latestRunners.includes(runner)), agent));
+  const runnerStatus = suiteDiscoveryPending ? '正在核实所选题库的任务…'
+    : suiteDiscoveryFailed ? '无法核实所选题库'
+      : activeRunnerAvailable && !dockerGroupAttached ? '评测可启动' : '此题库暂不可启动';
   const workProbeOk = capsQ.data?.runner_environment.runner_work_isolation?.ok ?? true;
   const evProbeOk = capsQ.data?.runner_environment.evidence_store_isolation?.ok ?? true;
 
@@ -1541,16 +1504,6 @@ export function ExecutionPage() {
   const isHarborFamily = kind === 'harbor' || kind === 'harbor_gateway';
   const notifications = notificationsQ.data?.items ?? [];
 
-  if (capsQ.isPending || notificationsQ.isPending || jobsQ.isPending) {
-    return (
-      <PageTransition className="max-w-7xl mx-auto px-5 py-6">
-        <p role="status" className="m-0 text-sm text-[var(--text-secondary)]">
-          正在加载评测执行配置与作业…
-        </p>
-      </PageTransition>
-    );
-  }
-
   return (
     <PageTransition className="max-w-7xl mx-auto px-5 py-6 space-y-5">
       {/* Page Header */}
@@ -1559,9 +1512,23 @@ export function ExecutionPage() {
           <Terminal aria-hidden="true" className="size-5 shrink-0 text-[var(--brand-primary)]" />
           <span>受控评测执行与实时监控 (Benchmark Execution)</span>
         </h1>
-        <p className="m-0 mt-1 text-xs text-[var(--text-secondary)]">
-          配置评测、启动隔离作业并查看实时进度。
-        </p>
+        <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-[var(--text-secondary)]">
+          {capsQ.isPending ? (
+            <span role="status">正在加载评测配置…</span>
+          ) : capsQ.isError ? (
+            <span role="status">
+              加载评测配置失败。
+              <button type="button" onClick={() => void capsQ.refetch()} className="ml-1 cursor-pointer underline">
+                重试配置
+              </button>
+            </span>
+          ) : (
+            <span>配置评测、启动隔离作业并查看实时进度。</span>
+          )}
+          <a href="#execution-job-history" className="text-[var(--brand-primary)] hover:underline">
+            查看作业历史
+          </a>
+        </div>
       </div>
 
       {/* In-App Notifications Banner */}
@@ -1615,7 +1582,8 @@ export function ExecutionPage() {
 
       <section
         aria-label="Test Configuration 评测配置卡"
-        className="grid items-start gap-4 text-xs lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.43fr)]"
+        inert={!capsQ.isSuccess}
+        className="grid items-start gap-4 text-xs inert:opacity-60 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.43fr)]"
       >
         <div className="min-w-0 space-y-4">
           <ExecutionStep number={1} title="选择题库与范围">
@@ -1629,18 +1597,19 @@ export function ExecutionPage() {
                     onChange={(e) => selectSuite(e.target.value)}
                     className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-2 text-xs text-[var(--text-primary)]"
                   >
-                    <option value="" disabled>{capsQ.isPending ? '正在加载题库' : '请选择可运行的题库'}</option>
+                    <option value="" disabled>请选择可运行的题库</option>
                     <optgroup label="已登记题库">
                       {registeredSuites.map((s) => {
-                        const runnable = suiteCanRun(s, configuredRunners, agent);
+                        const details = s.suite_id === suiteId ? selectedSuite ?? s : s;
+                        const runnable = suiteCanRun(details, configuredRunners, agent, false);
                         return (
                           <option key={s.suite_id} value={s.suite_id} disabled={!runnable}>
                             {s.display_name} ({s.suite_id}
-                            {s.ready_task_count !== undefined
-                              ? ` · ${s.ready_task_count}/${s.task_count ?? 0} 题可执行`
-                              : typeof s.task_count === 'number' ? ` · ${s.task_count} 题` : ''}
+                            {details.ready_task_count !== undefined && typeof details.task_count === 'number'
+                              ? ` · ${details.ready_task_count}/${details.task_count} 题可执行`
+                              : typeof details.task_count === 'number' ? ` · ${details.task_count} 题` : ''}
                             {s.split ? ` · ${s.split}` : ''})
-                            {!runnable && ` · ${s.reason ?? '暂不可运行'}`}
+                            {!runnable && ` · ${details.reason ?? '暂不可运行'}`}
                           </option>
                         );
                       })}
@@ -1870,7 +1839,7 @@ export function ExecutionPage() {
                     disabled={(terminalSelected && runner.kind === 'harbor_gateway')
                       || !configuredRunners.includes(runner.kind) || !registeredSuites.some((suite) =>
                       suite.runner === (runner.kind === 'harbor_gateway' ? 'harbor' : runner.kind)
-                      && suiteCanRun(suite, [runner.kind], agent)
+                      && suiteCanRun(suite, [runner.kind], agent, false)
                     )}
                     onClick={() => handleSelectRunner(runner.kind)}
                     className={`lrm-press flex min-h-16 min-w-0 cursor-pointer items-center gap-2 rounded-lg border px-2.5 py-2.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-50 sm:gap-3 sm:px-3 ${
@@ -1887,11 +1856,7 @@ export function ExecutionPage() {
                     <span className="min-w-0">
                       <span className="block font-bold text-[var(--text-primary)]">{RUNNER_SHORT_LABELS[runner.kind]}</span>
                       <span className="block text-[11px] text-[var(--text-secondary)]">
-                        {capsQ.isPending
-                          ? '正在检查状态'
-                          : isolatedRunnerReady && configuredRunners.includes(runner.kind)
-                            ? '已就绪 · 可启动'
-                            : '暂不可用'}
+                        {isolatedRunnerReady && configuredRunners.includes(runner.kind) ? '已就绪 · 可启动' : '暂不可用'}
                       </span>
                     </span>
                   </button>
@@ -1928,7 +1893,7 @@ export function ExecutionPage() {
                   className="w-full rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs text-[var(--text-primary)]"
                 >
                   {!capsQ.data?.gateway_profiles.length && (
-                    <option value={gatewayProfileId}>{capsQ.isPending ? '正在加载网关' : '暂无可用网关'}</option>
+                    <option value={gatewayProfileId}>暂无可用网关</option>
                   )}
                   {(capsQ.data?.gateway_profiles || []).map((g) => (
                     <option key={g.profile_id} value={g.profile_id}>
@@ -2220,14 +2185,16 @@ export function ExecutionPage() {
               {activeRunnerAvailable && !dockerGroupAttached
                 ? <CheckCircle2 aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />
                 : <AlertTriangle aria-hidden="true" className="mt-0.5 size-3.5 shrink-0" />}
-              <span>{runnerStatus}</span>
+              <span role="status">{runnerStatus}</span>
             </div>
             <p className="text-[11px] leading-4">
-              {capsQ.isPending
-                ? '正在查询当前可用的评测模式。'
-                : activeRunnerAvailable && !dockerGroupAttached
+              {suiteDiscoveryFailed ? (
+                  <button type="button" onClick={() => void suiteCapabilitiesQ.refetch()} className="cursor-pointer underline">
+                    重试题库检查
+                  </button>
+                ) : !suiteDiscoveryPending && (activeRunnerAvailable && !dockerGroupAttached
                   ? '配置确认后即可启动，页面会实时更新进度。'
-                  : '请选择一个标为可运行的题库，系统会自动匹配运行环境。'}
+                  : '请选择一个标为可运行的题库，系统会自动匹配运行环境。')}
             </p>
             {environmentNotice && <p role="status" className="text-[11px] leading-4">运行环境状态已变化。请选择当前可运行的题库。</p>}
           </div>
@@ -2732,14 +2699,16 @@ export function ExecutionPage() {
       </section>
 
       {/* Execution Job History List */}
-      <section aria-label="执行作业历史列表" className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
+      <section id="execution-job-history" aria-label="执行作业历史列表" className="scroll-mt-20 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden" style={{ boxShadow: 'var(--shadow-card)' }}>
         <div className="px-4 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-2">
             <History className="w-4 h-4 text-[var(--brand-primary)]" />
             <h2 className="m-0 text-sm font-bold text-[var(--text-primary)]">执行作业历史 (Execution Jobs)</h2>
-            <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)] tabular-nums">
-              {jobsQ.data?.total ?? 0} 个作业
-            </span>
+            {jobsQ.data && (
+              <span className="rounded px-1.5 py-0.5 text-[10px] font-mono bg-[var(--bg-surface)] border border-[var(--border-subtle)] text-[var(--text-secondary)] tabular-nums">
+                {jobsQ.data.total} 个作业
+              </span>
+            )}
           </div>
           <button
             type="button"

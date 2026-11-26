@@ -683,6 +683,64 @@ def test_m3_i05_real_external_runner_direct_spoof_immunity_sse_replay_and_defaul
             ctx.db.close_thread_connection()
 
 
+def test_execution_capabilities_limits_discovery_to_visible_selected_suite(m0_app, monkeypatch, tmp_path):
+    service = m0_app.state.ctx.execution
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text('{"id": "real-task"}\n', encoding="utf-8")
+    suite_ids = ("quick", "large", "private-holdout", "missing")
+    suites = [
+        {"suite_id": suite_id, "display_name": suite_id, "runner": "direct",
+         "dataset_path": str(tmp_path / "missing.jsonl" if suite_id == "missing" else cases)}
+        for suite_id in suite_ids
+    ]
+    monkeypatch.setattr(service, "_load_registered_suites", lambda: suites)
+    discover_tasks = service._discover_suite_tasks
+    calls = []
+
+    def discover(suite):
+        calls.append(suite["suite_id"])
+        return discover_tasks(suite)
+
+    monkeypatch.setattr(service, "_discover_suite_tasks", discover)
+    endpoint = "/api/v1/execution/capabilities"
+    client = TestClient(m0_app)
+    assert client.get(endpoint, params={"discover_tasks": "false"}).status_code == 401
+    login_client(client, "viewer_noscope", "StrongViewerPassword!3")
+
+    def get_suites(**params):
+        response = client.get(endpoint, params=params)
+        assert response.status_code == 200
+        assert str(tmp_path) not in response.text
+        return {suite["suite_id"]: suite for suite in response.json()["suites"]}
+
+    overview = get_suites(discover_tasks="false")
+    assert list(overview) == ["quick", "large", "missing"]
+    assert overview["quick"]["task_count"] is None
+    assert overview["quick"]["sample_tasks"] == []
+    assert overview["quick"]["task_discovery_status"] == "not_requested"
+    assert overview["missing"]["task_discovery_status"] == "dataset_file_missing"
+    assert get_suites(suite_id="private-holdout") == {}
+    assert get_suites(suite_id="unknown") == {}
+    assert calls == []
+
+    selected = get_suites(suite_id="quick")
+    assert list(selected) == ["quick"]
+    assert selected["quick"]["task_count"] == 1
+    assert selected["quick"]["sample_tasks"] == ["real-task"]
+    assert calls == ["quick"]
+
+    full = get_suites()
+    assert full["quick"] == selected["quick"]
+    assert full["large"]["task_discovery_status"] == "ok"
+    assert calls == ["quick", "quick", "large", "missing"]
+
+    login_client(client, "admin_test", "StrongAdminPassword!1")
+    holdout = get_suites(suite_id="private-holdout")
+    assert list(holdout) == ["private-holdout"]
+    assert holdout["private-holdout"]["task_count"] == 1
+    assert calls == ["quick", "quick", "large", "missing", "private-holdout"]
+
+
 def test_m3_s04_s06_disconnected_503_real_task_discovery_capabilities_resume_and_0700_authz(
     tmp_path: Path, isolated_settings: Settings
 ) -> None:

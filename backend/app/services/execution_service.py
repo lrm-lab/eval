@@ -509,18 +509,27 @@ class ExecutionService:
 
         return suites
 
-    def _discover_suite_tasks(self, suite: dict[str, Any]) -> tuple[list[str], int | None, str]:
-        """Discover REAL task IDs from the actual dataset on disk (ZERO hardcoded synthetic 4-task fallback!).
-        Returns (task_ids, total_count, discovery_status)."""
-        runner = str(suite.get("runner") or "")
+    def _suite_dataset_path(self, suite: dict[str, Any]) -> tuple[Path | None, str]:
         ds_raw = suite.get("dataset_path")
         if not ds_raw:
-            return [], None, "dataset_path_unset"
+            return None, "dataset_path_unset"
         ds_path = Path(str(ds_raw))
+        runner = suite.get("runner")
+        if runner == "harbor":
+            return (ds_path, "not_requested") if ds_path.is_dir() else (None, "requires_runner_bundle")
+        if runner in ("direct", "vlmevalkit"):
+            if not ds_path.is_file() or (runner == "direct" and ds_path.is_symlink()):
+                return None, "dataset_file_missing"
+            return ds_path, "not_requested"
+        return None, "unknown_runner"
 
+    def _discover_suite_tasks(self, suite: dict[str, Any]) -> tuple[list[str], int | None, str]:
+        """Find real task IDs and return (task_ids, total_count, discovery_status)."""
+        ds_path, status = self._suite_dataset_path(suite)
+        if ds_path is None:
+            return [], None, status
+        runner = suite.get("runner")
         if runner == "direct":
-            if not ds_path.is_file() or ds_path.is_symlink():
-                return [], None, "dataset_file_missing"
             ids: list[str] = []
             try:
                 for line in ds_path.read_text(encoding="utf-8").splitlines():
@@ -534,8 +543,6 @@ class ExecutionService:
                 return [], None, "dataset_parse_error"
 
         if runner == "harbor":
-            if not ds_path.is_dir():
-                return [], None, "requires_runner_bundle"
             try:
                 ids = sorted(p.parent.name for p in ds_path.glob("*/task.toml") if p.is_file())
                 return ids, len(ids), "ok" if ids else "empty_dataset"
@@ -543,8 +550,6 @@ class ExecutionService:
                 return [], None, "dataset_unreadable"
 
         if runner == "vlmevalkit":
-            if not ds_path.is_file():
-                return [], None, "dataset_file_missing"
             try:
                 # Stream only header + index column without reading huge base64 image columns into RAM!
                 ids = []
@@ -566,28 +571,36 @@ class ExecutionService:
 
         return [], None, "unknown_runner"
 
-    def get_capabilities(self, user: AuthUser) -> dict[str, Any]:
+    def get_capabilities(
+        self, user: AuthUser, *, discover_tasks: bool = True, suite_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Describe visible suites, with optional suite filtering and task discovery."""
         runner_env = self.probe_runner_health()
-        registered = self._load_registered_suites()
-        if not has_scope(user, "dataset:holdout_read"):
-            visible_registered = [
-                s for s in registered if s.get("split") != "holdout" and "holdout" not in s["suite_id"].lower()
-            ]
-        else:
-            visible_registered = registered
+        can_read_holdout = has_scope(user, "dataset:holdout_read")
+        visible_registered = [
+            s for s in self._load_registered_suites()
+            if (suite_id is None or s["suite_id"] == suite_id)
+            and (can_read_holdout or (s.get("split") != "holdout" and "holdout" not in s["suite_id"].lower()))
+        ]
 
         # Strip internal absolute filesystem paths before returning public capabilities (S-03)
         public_suites: list[dict[str, Any]] = []
         for s in visible_registered:
-            tasks, count, disc_status = self._discover_suite_tasks(s)
+            tasks: list[str] = []
+            count: int | None = None
+            readiness = (runner_env.get("terminal_image_readiness") or {}) if s["suite_id"] == "terminal" else {}
+            runner_task_count = readiness.get("task_count")
+            if isinstance(runner_task_count, int):
+                # The authenticated Runner inventories the private bundle on its host.
+                count, disc_status = runner_task_count, "ok"
+            elif discover_tasks:
+                tasks, count, disc_status = self._discover_suite_tasks(s)
+            else:
+                _, disc_status = self._suite_dataset_path(s)
+
             availability = {}
             if s["suite_id"] == "terminal":
-                readiness = runner_env.get("terminal_image_readiness") or {}
                 ready = set(readiness.get("ready_tasks", []))
-                # The authenticated Runner inventories the private bundle on its host.
-                if isinstance(readiness.get("task_count"), int):
-                    count = readiness["task_count"]
-                    disc_status = "ok"
                 tasks = [NGINX_TASK] if NGINX_TASK in ready else []
                 availability = {
                     "ready_task_count": len(tasks),

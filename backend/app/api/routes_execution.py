@@ -19,8 +19,12 @@ router = APIRouter(prefix="/api/v1/execution", tags=["execution"])
 def execution_capabilities(
     request: Request,
     user: AuthUser = Depends(get_current_user),
+    discover_tasks: bool = True,
+    suite_id: str | None = Query(default=None, min_length=1, max_length=128),
 ) -> dict[str, Any]:
-    capabilities = request.app.state.ctx.execution.get_capabilities(user)
+    capabilities = request.app.state.ctx.execution.get_capabilities(
+        user, discover_tasks=discover_tasks, suite_id=suite_id,
+    )
     telemetry = capabilities["runner_environment"]["telemetry"]
     telemetry["container_cgroup"] = normalize_cgroup_telemetry(telemetry["container_cgroup"])
     return capabilities

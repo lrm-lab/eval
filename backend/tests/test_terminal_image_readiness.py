@@ -102,6 +102,11 @@ def test_web_uses_runner_inventory_and_refuses_other_terminal_plans(m0_app, monk
     assert terminal["task_count"] == 89
     assert terminal["ready_tasks"] == terminal["sample_tasks"] == [NGINX_TASK]
     assert terminal["selectable"]
+    for params in ({"discover_tasks": "false"}, {"suite_id": "terminal"}):
+        response = client.get("/api/v1/execution/capabilities", params=params)
+        assert response.status_code == 200
+        [terminal_partial] = [suite for suite in response.json()["suites"] if suite["suite_id"] == "terminal"]
+        assert terminal_partial == terminal
 
     for kind, mode, tasks in (
         ("harbor_gateway", "tasks", [NGINX_TASK]),
