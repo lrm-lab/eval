@@ -1,3 +1,4 @@
+import { DismissibleDetails } from './DismissibleDetails';
 import { ChevronDown, ShieldCheck } from 'lucide-react';
 import type { CompareIssue, GainGuardrailVerdict, VerdictItem } from '../../types/api';
 import { GainGuardrailPill } from './GainGuardrailPill';
@@ -40,13 +41,14 @@ function VerdictRow({ item, mode }: { item: VerdictItem; mode: 'gain' | 'guardra
   if (!canExplain) return <div className={card + ' flex items-center gap-2 px-3 py-2'}>{row}</div>;
 
   return (
-    <details className={card + ' group/verdict'}>
+    <DismissibleDetails className={card + ' group/verdict'} summary={(
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2 [&::-webkit-details-marker]:hidden">
         {row}
         <ChevronDown aria-hidden="true" className="size-3.5 shrink-0 text-[var(--text-secondary)] group-open/verdict:rotate-180" />
       </summary>
+    )}>
       <p className="m-0 px-3 pb-3 pt-1 leading-relaxed text-[var(--text-secondary)]">{reason}</p>
-    </details>
+    </DismissibleDetails>
   );
 }
 

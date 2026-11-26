@@ -15,10 +15,11 @@ import {
   Trash2,
 } from 'lucide-react';
 import { ApiError, apiDownload, apiFetch } from '../lib/api';
+import { useDisclosureLayer } from '../lib/dismissibleLayer';
 import { fmtDeltaPP, fmtDuration, fmtPct } from '../lib/format';
 import { useAppStore } from '../lib/store';
 import type { CompareQueryResponse, CompareSubjectRef, TrialDetailDTO } from '../types/api';
-import { PageTransition, SlidingTabs } from '../components/motion/primitives';
+import { CollapsiblePanel, PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { CompositeScoreCell } from '../components/ui/CompositeScoreCell';
 import { CompareSharePanel, compareShareModeLabel } from '../components/ui/CompareSharePanel';
 import { CompareVerdict, compareIssueLabel } from '../components/ui/CompareVerdict';
@@ -218,6 +219,7 @@ export function ComparePage() {
   const scopedReleaseIds = comparisonScope?.dataset_release_ids;
   const hasFixedRelease = Boolean(scopedReleaseIds?.length);
   const [presetsExpanded, setPresetsExpanded] = useState(false);
+  const presetDisclosure = useDisclosureLayer<HTMLElement>(presetsExpanded, () => setPresetsExpanded(false));
   const [diffFilter, setDiffFilter] = useState<DiffFilterKind>(() => parseDiffFilter(searchParams.get('diff_filter')));
   const [diffSubjectA, setDiffSubjectA] = useState<string>(() => searchParams.get('diff_a') || '');
   const [diffSubjectB, setDiffSubjectB] = useState<string>(() => searchParams.get('diff_b') || '');
@@ -257,6 +259,7 @@ export function ComparePage() {
     return null;
   });
   const [showSplitTrace, setShowSplitTrace] = useState(false);
+  const traceDisclosure = useDisclosureLayer<HTMLDivElement>(showSplitTrace, () => setShowSplitTrace(false));
 
   const syncCompareUrl = (updates: Record<string, string | null>) => {
     setSearchParams(
@@ -782,10 +785,40 @@ export function ComparePage() {
           (presetSubject.model_cols?.join(',') ?? presetSubject.model_col);
     })
   );
-  const visiblePresets = presetsExpanded ? presets : presets.slice(0, COLLAPSED_PRESET_COUNT);
+  const visiblePresets = presets.slice(0, COLLAPSED_PRESET_COUNT);
   if (!presetsExpanded && selectedPreset && !visiblePresets.includes(selectedPreset)) {
     visiblePresets[COLLAPSED_PRESET_COUNT - 1] = selectedPreset;
   }
+
+  const presetGridClass = 'grid auto-rows-fr grid-cols-1 gap-2.5 @min-[310px]:grid-cols-2 @min-[780px]:grid-cols-3';
+  const renderPreset = (preset: (typeof presets)[number]) => {
+    const selected = preset === selectedPreset;
+    return (
+      <button
+        key={preset.preset_id}
+        type="button"
+        aria-pressed={selected}
+        title={`${preset.title} · ${preset.common_note}`}
+        onClick={() => applyPreset(preset)}
+        className={`grid min-h-27 min-w-0 cursor-pointer grid-rows-[auto_1fr_auto] gap-1 rounded-lg border px-2.5 py-2 text-left transition-colors hover:border-[var(--brand-primary)] @min-[480px]:px-3 ${
+          selected
+            ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)]'
+            : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)]'
+        }`}
+      >
+        <span className="flex items-center justify-between gap-1">
+          <span className="rounded bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-secondary)]">
+            {PRESET_TRACK_LABELS[preset.preset_id] ?? '其他'}
+          </span>
+          {selected && <Check aria-hidden="true" className="size-4 shrink-0 text-[var(--brand-primary)]" />}
+        </span>
+        <span className="line-clamp-3 text-xs leading-4 font-semibold text-[var(--text-primary)] @min-[480px]:line-clamp-2">
+          {preset.title}
+        </span>
+        <span className="line-clamp-2 text-[11px] leading-4 text-[var(--text-secondary)]">{preset.common_note}</span>
+      </button>
+    );
+  };
 
   return (
     <PageTransition className="max-w-[1520px] mx-auto px-5 py-6 space-y-5">
@@ -824,6 +857,7 @@ export function ComparePage() {
 
       {presets.length > 0 && (
         <section
+          {...presetDisclosure.layerProps}
           aria-labelledby="compare-presets-heading"
           className="@container rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3.5"
         >
@@ -833,9 +867,10 @@ export function ComparePage() {
             </h2>
             {presets.length > COLLAPSED_PRESET_COUNT && (
               <button
+                ref={presetDisclosure.triggerRef}
                 type="button"
                 aria-expanded={presetsExpanded}
-                aria-controls="compare-preset-grid"
+                aria-controls="compare-extra-presets"
                 onClick={() => setPresetsExpanded(!presetsExpanded)}
                 className="inline-flex cursor-pointer items-center gap-1 rounded-md px-2 py-1 text-xs font-medium text-[var(--brand-primary)] hover:bg-[var(--brand-tint)]"
               >
@@ -844,36 +879,10 @@ export function ComparePage() {
               </button>
             )}
           </div>
-          <div id="compare-preset-grid" className="grid auto-rows-fr grid-cols-1 gap-2.5 @min-[310px]:grid-cols-2 @min-[780px]:grid-cols-3">
-            {visiblePresets.map((preset) => {
-              const selected = preset === selectedPreset;
-              return (
-                <button
-                  key={preset.preset_id}
-                  type="button"
-                  aria-pressed={selected}
-                  title={`${preset.title} · ${preset.common_note}`}
-                  onClick={() => applyPreset(preset)}
-                  className={`grid min-h-27 min-w-0 cursor-pointer grid-rows-[auto_1fr_auto] gap-1 rounded-lg border px-2.5 py-2 text-left transition-colors hover:border-[var(--brand-primary)] @min-[480px]:px-3 ${
-                    selected
-                      ? 'border-[var(--brand-primary)] bg-[var(--brand-tint)]'
-                      : 'border-[var(--border-subtle)] bg-[var(--bg-elevated)]'
-                  }`}
-                >
-                  <span className="flex items-center justify-between gap-1">
-                    <span className="rounded bg-[var(--bg-surface)] px-1.5 py-0.5 text-[10px] font-medium text-[var(--text-secondary)]">
-                      {PRESET_TRACK_LABELS[preset.preset_id] ?? '其他'}
-                    </span>
-                    {selected && <Check aria-hidden="true" className="size-4 shrink-0 text-[var(--brand-primary)]" />}
-                  </span>
-                  <span className="line-clamp-3 text-xs leading-4 font-semibold text-[var(--text-primary)] @min-[480px]:line-clamp-2">
-                    {preset.title}
-                  </span>
-                  <span className="line-clamp-2 text-[11px] leading-4 text-[var(--text-secondary)]">{preset.common_note}</span>
-                </button>
-              );
-            })}
-          </div>
+          <div className={presetGridClass}>{visiblePresets.map(renderPreset)}</div>
+          <CollapsiblePanel id="compare-extra-presets" open={presetsExpanded}>
+            <div className={presetGridClass + ' pt-2.5'}>{presets.slice(COLLAPSED_PRESET_COUNT).map(renderPreset)}</div>
+          </CollapsiblePanel>
         </section>
       )}
 
@@ -1562,11 +1571,13 @@ export function ComparePage() {
           const returnToUrl = `${location.pathname}?${returnQp.toString()}`;
 
           return (
-            <div className="space-y-4 text-xs">
+            <div {...traceDisclosure.layerProps} className="space-y-4 text-xs">
               <div className="flex items-center justify-between">
                 <span className="text-[var(--text-secondary)]">按权限惰性加载两侧 ATIF 工具轨迹对比：</span>
                 <button
+                  ref={traceDisclosure.triggerRef}
                   type="button"
+                  aria-expanded={showSplitTrace}
                   onClick={() => setShowSplitTrace((v) => !v)}
                   className={`rounded-lg border px-3 py-1 font-medium cursor-pointer ${
                     showSplitTrace
@@ -1631,7 +1642,7 @@ export function ComparePage() {
                             <pre className="m-0 rounded bg-[var(--bg-surface)] p-2.5 text-[11px] font-mono whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
                               {JSON.stringify(td.verifier_rewards || {}, null, 2)}
                             </pre>
-                            {showSplitTrace && (
+                            <CollapsiblePanel open={showSplitTrace}>
                               <div className="pt-2 border-t border-[var(--border-subtle)] space-y-1.5">
                                 <div className="font-semibold text-[var(--text-primary)]">ATIF 步骤预览（前 20 步）</div>
                                 {side.tq.isLoading ? (
@@ -1658,7 +1669,7 @@ export function ComparePage() {
                                   </div>
                                 )}
                               </div>
-                            )}
+                            </CollapsiblePanel>
                           </div>
                         );
                       })()

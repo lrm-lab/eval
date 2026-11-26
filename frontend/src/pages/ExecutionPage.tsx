@@ -1,3 +1,4 @@
+import { DismissibleDetails } from '../components/ui/DismissibleDetails';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
@@ -29,10 +30,12 @@ import {
 } from 'lucide-react';
 import { ApiError, apiFetch } from '../lib/api';
 import { canMaintainArchivedTools } from '../lib/archivedTools';
+import { useDismissibleLayer } from '../lib/dismissibleLayer';
 import { fmtDateShort, fmtDuration, fmtPct, runScopeLabel } from '../lib/format';
 import { useAppStore, type ToastMessage } from '../lib/store';
 import { AnimatedNumber, PageTransition } from '../components/motion/primitives';
 import { ArchivedToolNotice } from '../components/layout/ArchivedToolRoute';
+import { DismissiblePanel } from '../components/ui/DismissiblePanel';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
@@ -772,6 +775,11 @@ export function ExecutionPage() {
   const [streamNonce, setStreamNonce] = useState<number>(0);
   const [liveOverlay, setLiveOverlay] = useState<LiveStreamOverlay | null>(null);
   const [evidenceViewer, setEvidenceViewer] = useState<AuthorizedEvidenceResp | null>(null);
+  const evidencePanel = useRef<HTMLDivElement>(null);
+  const evidenceOpener = useRef<HTMLButtonElement>(null);
+  const visibleEvidence = evidenceViewer?.job_id === selectedJobId ? evidenceViewer : null;
+  const dismissEvidence = useDismissibleLayer(evidencePanel, Boolean(visibleEvidence), () => setEvidenceViewer(null),
+    () => evidenceOpener.current?.focus({ preventScroll: true }));
 
   // Client-side (job_id, seq_id) deduplication map + monotonic lastSeq cursor
   const seenEventKeysRef = useRef<Map<string, true>>(new Map());
@@ -1825,11 +1833,12 @@ export function ExecutionPage() {
             </div>
           </ExecutionStep>
 
-          <details className="group rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
+          <DismissibleDetails className="group rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3" summary={(
             <summary className="flex cursor-pointer list-none items-center justify-between gap-2 text-xs font-semibold text-[var(--text-secondary)]">
               运行环境（高级）
               <ChevronDown aria-hidden="true" className="size-4 transition-transform group-open:rotate-180" />
             </summary>
+          )}>
             <div className="mt-3 grid auto-rows-fr grid-cols-1 gap-2.5 min-[360px]:grid-cols-2" role="radiogroup" aria-label="评测运行器模式选择">
               {runnerKinds.map((runner) => {
                 const selected = runner.kind === kind;
@@ -1867,7 +1876,7 @@ export function ExecutionPage() {
                 );
               })}
             </div>
-          </details>
+          </DismissibleDetails>
 
           <ExecutionStep number={2} title="模型与参数">
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
@@ -1977,11 +1986,12 @@ export function ExecutionPage() {
                 </>
               )}
             </div>
-            <details className="group mt-4 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+            <DismissibleDetails className="group mt-4 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]" summary={(
               <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-lg px-3 py-2.5 font-semibold text-[var(--text-primary)]">
                 高级设置
                 <ChevronDown aria-hidden="true" className="size-4 text-[var(--text-secondary)] group-open:rotate-180" />
               </summary>
+            )}>
               <div className="border-t border-[var(--border-subtle)] p-3">
                 <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
                   {isHarborFamily && (
@@ -2089,11 +2099,11 @@ export function ExecutionPage() {
                   </div>
                 </div>
               </div>
-            </details>
+            </DismissibleDetails>
           </ExecutionStep>
 
           <ExecutionStep number={3} title="预览并启动">
-            <details ref={cliPreviewRef} className="group rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+            <DismissibleDetails detailsRef={cliPreviewRef} className="group rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]" summary={(
               <summary className="flex cursor-pointer list-none flex-wrap items-center gap-2 rounded-lg px-3 py-2.5 font-semibold text-[var(--text-primary)]">
                 <Terminal aria-hidden="true" className="size-4 shrink-0 text-[var(--brand-primary)]" />
                 <span>CLI 命令预览</span>
@@ -2104,6 +2114,7 @@ export function ExecutionPage() {
                 )}
                 <ChevronDown aria-hidden="true" className="ml-auto size-4 text-[var(--text-secondary)] group-open:rotate-180" />
               </summary>
+            )}>
               <div className="space-y-2.5 border-t border-[var(--border-subtle)] p-3">
                 <div className="flex flex-wrap items-center justify-between gap-2">
                   <span className="text-[11px] text-[var(--text-secondary)]">命令已脱敏，网关凭据由服务端注入。</span>
@@ -2153,7 +2164,7 @@ export function ExecutionPage() {
                   </div>
                 )}
               </div>
-            </details>
+            </DismissibleDetails>
           </ExecutionStep>
         </div>
 
@@ -2657,7 +2668,13 @@ export function ExecutionPage() {
                         {activeSnapshot?.reconciled && (
                           <button
                             type="button"
-                            onClick={() => evidenceMut.mutate({ jobId: selectedJobId, trialId: tr.trial_id })}
+                            aria-expanded={visibleEvidence?.trial_id === tr.trial_id}
+                            aria-controls="execution-evidence-preview"
+                            onClick={(event) => {
+                              evidenceOpener.current = event.currentTarget;
+                              if (visibleEvidence?.trial_id === tr.trial_id) setEvidenceViewer(null);
+                              else evidenceMut.mutate({ jobId: selectedJobId, trialId: tr.trial_id });
+                            }}
                             className="inline-flex items-center gap-1 rounded border border-[var(--border-subtle)] bg-[var(--bg-surface)] hover:border-[var(--brand-primary)] px-1.5 py-0.5 text-[10px] text-[var(--text-primary)] cursor-pointer"
                           >
                             <Lock className="w-2.5 h-2.5" /> 受限证据
@@ -2673,15 +2690,16 @@ export function ExecutionPage() {
         )}
 
         {/* Authorized 0700 Evidence Viewer Drawer Strip */}
-        {evidenceViewer && evidenceViewer.job_id === selectedJobId && (
-          <div className="border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-3 space-y-2 text-xs">
+        <DismissiblePanel ref={evidencePanel} {...dismissEvidence} id="execution-evidence-preview"
+          open={Boolean(visibleEvidence)} className="origin-top border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)]/70 p-3 space-y-2 text-xs">
+          {visibleEvidence && <>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2 font-mono text-[11px]">
                 <ShieldCheck className="w-3.5 h-3.5 text-[var(--sem-pass-fg)]" />
                 <span className="font-semibold text-[var(--text-primary)]">
-                  0700 受限证据已鉴权 ({evidenceViewer.authorized_scope})
+                  0700 受限证据已鉴权 ({visibleEvidence.authorized_scope})
                 </span>
-                <span className="text-[var(--text-muted)]">trial={evidenceViewer.trial_id}</span>
+                <span className="text-[var(--text-muted)]">trial={visibleEvidence.trial_id}</span>
               </div>
               <button
                 type="button"
@@ -2693,10 +2711,10 @@ export function ExecutionPage() {
               </button>
             </div>
             <pre className="m-0 max-h-48 overflow-auto rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5 font-mono text-[11px] text-[var(--text-secondary)]">
-              {JSON.stringify(evidenceViewer.evidence, null, 2)}
+              {JSON.stringify(visibleEvidence.evidence, null, 2)}
             </pre>
-          </div>
-        )}
+          </>}
+        </DismissiblePanel>
       </section>
 
       {/* Execution Job History List */}

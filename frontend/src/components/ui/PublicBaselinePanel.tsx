@@ -2,8 +2,10 @@ import { useId, useState } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { ArrowUpRight } from 'lucide-react';
 import { apiFetch, ApiError } from '../../lib/api';
+import { useDisclosureLayer } from '../../lib/dismissibleLayer';
 import { fmtDeltaPP, fmtPct } from '../../lib/format';
 import { useAppStore } from '../../lib/store';
+import { DismissiblePanel } from './DismissiblePanel';
 
 interface PublicBaselineRow {
   id: string;
@@ -110,6 +112,7 @@ export function PublicBaselinePanel({
   const detailsId = useId();
   const [expanded, setExpanded] = useState(false);
   const showDetails = !compact || expanded;
+  const disclosure = useDisclosureLayer<HTMLElement>(compact && expanded, () => setExpanded(false));
   const userId = useAppStore((state) => state.user?.user_id);
   const selected = useAppStore((state) => state.publicBaselineId);
   const setSelected = useAppStore((state) => state.setPublicBaselineId);
@@ -276,7 +279,7 @@ export function PublicBaselinePanel({
   );
 
   return (
-    <section aria-labelledby={headingId} className={`min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] ${compact ? 'px-3 py-2' : 'p-3.5'}`}>
+    <section {...disclosure.layerProps} aria-labelledby={headingId} className={`min-w-0 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] ${compact ? 'px-3 py-2' : 'p-3.5'}`}>
       {compact && (
         <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-3 gap-y-1 text-xs sm:grid-cols-[auto_minmax(0,1fr)_auto]">
           <h2 id={headingId} className="col-start-1 row-start-1 m-0 font-semibold text-[var(--text-secondary)]">公开榜单</h2>
@@ -300,6 +303,7 @@ export function PublicBaselinePanel({
             </span>
           )}
           <button
+            ref={disclosure.triggerRef}
             type="button"
             aria-expanded={expanded}
             aria-controls={detailsId}
@@ -310,9 +314,11 @@ export function PublicBaselinePanel({
           </button>
         </div>
       )}
-      <div id={detailsId} hidden={!showDetails} className={compact ? "mt-2 border-t border-[var(--border-subtle)] pt-2" : undefined}>
-        {details}
-      </div>
+      {compact ? (
+        <DismissiblePanel id={detailsId} open={expanded} className="mt-2 origin-top border-t border-[var(--border-subtle)] pt-2">
+          {details}
+        </DismissiblePanel>
+      ) : <div id={detailsId}>{details}</div>}
     </section>
   );
 }

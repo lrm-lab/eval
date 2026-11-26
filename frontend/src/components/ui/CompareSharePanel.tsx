@@ -1,3 +1,4 @@
+import { DismissibleDetails } from './DismissibleDetails';
 import { useId, useRef, useState } from 'react';
 import { useMutation } from '@tanstack/react-query';
 import { ChevronDown, Copy, Link2, Share2 } from 'lucide-react';
@@ -71,12 +72,13 @@ export function CompareSharePanel({
   const control = 'w-full min-w-0 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-3 py-2 text-[var(--text-primary)]';
 
   return (
-    <details className="group/share min-w-0">
+    <DismissibleDetails className="group/share min-w-0" summary={(
       <summary className="inline-flex cursor-pointer list-none items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--brand-tint)] px-3 py-2 font-semibold text-[var(--brand-primary)] hover:border-[var(--brand-primary)] [&::-webkit-details-marker]:hidden">
         <Share2 aria-hidden="true" className="size-4" />
         分享对比
         <ChevronDown aria-hidden="true" className="size-3.5 group-open/share:rotate-180" />
       </summary>
+    )}>
       <div className="mt-3 border-t border-[var(--border-subtle)] pt-3">
         <p className="mb-3 text-[var(--text-secondary)]">生成链接以重开这组对比。打开者需拥有所选项目及来源数据的访问权限。</p>
         <form
@@ -142,6 +144,6 @@ export function CompareSharePanel({
           </div>
         )}
       </div>
-    </details>
+    </DismissibleDetails>
   );
 }

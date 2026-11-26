@@ -25,6 +25,7 @@ import {
   Table2,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
+import { useDisclosureLayer } from '../lib/dismissibleLayer';
 import { fmtDuration, fmtPct, stableColorForKey } from '../lib/format';
 import { type ColumnPreset, useAppStore } from '../lib/store';
 import type {
@@ -35,7 +36,7 @@ import type {
   LeaderboardItem,
   LeaderboardResponse,
 } from '../types/api';
-import { PageTransition, SlidingTabs } from '../components/motion/primitives';
+import { CollapsiblePanel, PageTransition, SlidingTabs } from '../components/motion/primitives';
 import { PublicBaselinePanel } from '../components/ui/PublicBaselinePanel';
 import { CompositeScoreCell } from '../components/ui/CompositeScoreCell';
 import { TokenBreakdownBar } from '../components/ui/TokenBreakdownBar';
@@ -139,6 +140,7 @@ export function LeaderboardPage() {
 
   const [sorting, setSorting] = useState<SortingState>([]);
   const [advancedOpen, setAdvancedOpen] = useState(false);
+  const advanced = useDisclosureLayer<HTMLDivElement>(advancedOpen, () => setAdvancedOpen(false));
   const [copiedLink, setCopiedLink] = useState(false);
   const advancedFilterCount = [runner, protocol, thinkingMode, !includeLegacy, trainedOnly, hasAtif, hasGateway].filter(Boolean).length;
 
@@ -502,7 +504,7 @@ export function LeaderboardPage() {
       </header>
 
       {viewMode !== 'scatter' && (
-        <div role="search" aria-label="主榜筛选" className="@container rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
+        <div {...advanced.layerProps} role="search" aria-label="主榜筛选" className="@container rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-2.5">
           <div className="@min-[68rem]:flex @min-[68rem]:items-center @min-[68rem]:gap-2">
             <div className="grid min-w-0 grid-cols-2 gap-1.5 @min-[30rem]:grid-cols-4 @min-[51rem]:grid-cols-[minmax(0,1.4fr)_minmax(0,.8fr)_minmax(0,1fr)_minmax(0,.7fr)_minmax(0,.85fr)] @min-[68rem]:flex-1">
               <div className="relative col-span-full @min-[51rem]:col-span-1">
@@ -544,6 +546,7 @@ export function LeaderboardPage() {
 
             <div className="mt-2 flex flex-wrap items-center justify-between gap-1.5 @min-[68rem]:mt-0">
               <button
+                ref={advanced.triggerRef}
                 type="button"
                 aria-controls="leaderboard-advanced"
                 aria-expanded={advancedOpen}
@@ -564,7 +567,8 @@ export function LeaderboardPage() {
             </div>
           </div>
 
-          <div id="leaderboard-advanced" hidden={!advancedOpen} className="mt-2 border-t border-[var(--border-subtle)] pt-2">
+          <CollapsiblePanel id="leaderboard-advanced" open={advancedOpen}>
+            <div className="mt-2 border-t border-[var(--border-subtle)] pt-2">
             <div className="grid grid-cols-2 gap-1.5 @min-[37rem]:grid-cols-4">
               <select aria-label="筛选 Runner" value={runner} onChange={(e) => updateParam('runner', e.target.value || null)} className={`${filterFieldClass} truncate px-2`}>
                 <option value="">全部 Runner</option>
@@ -626,7 +630,8 @@ export function LeaderboardPage() {
                 })}
               </fieldset>
             )}
-          </div>
+            </div>
+          </CollapsiblePanel>
         </div>
       )}
 

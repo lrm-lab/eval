@@ -1,3 +1,5 @@
+import { DismissibleDetails } from '../components/ui/DismissibleDetails';
+import { useDisclosureLayer } from '../lib/dismissibleLayer';
 import { useDeferredValue, useState } from 'react';
 import type { FormEvent, ReactNode } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -5,7 +7,7 @@ import { ArrowLeft, Award, ChevronDown, FileCheck2, FileUp, FolderKanban, Trash2
 import { apiFetch } from '../lib/api';
 import { fmtDateShort, fmtPct, runScopeLabel } from '../lib/format';
 import { useAppStore } from '../lib/store';
-import { PageTransition } from '../components/motion/primitives';
+import { CollapsiblePanel, PageTransition } from '../components/motion/primitives';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
@@ -90,19 +92,19 @@ function Feedback({ children, error = false }: { children: ReactNode; error?: bo
 }
 
 function RawJson({ data }: { data: JsonRecord }) {
-  const [open, setOpen] = useState(false);
   return (
-    <details className="group rounded-lg border border-[var(--border-subtle)]" onToggle={(event) => setOpen(event.currentTarget.open)}>
+    <DismissibleDetails className="group rounded-lg border border-[var(--border-subtle)]" summary={(
       <summary className="flex cursor-pointer list-none items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm font-medium hover:bg-[var(--bg-elevated)]">
         原始 JSON
         <ChevronDown aria-hidden="true" className="size-4 text-[var(--text-secondary)] group-open:rotate-180" />
       </summary>
-      {open && (
+    )}>
+      {() => (
         <pre className="m-0 max-h-[55vh] overflow-auto border-t border-[var(--border-subtle)] bg-[var(--bg-elevated)] p-3 font-mono text-xs">
           {JSON.stringify(data, null, 2)}
         </pre>
       )}
-    </details>
+    </DismissibleDetails>
   );
 }
 
@@ -211,6 +213,7 @@ export function ToolkitVerifyPage() {
   const reportKey = (id: string) => ['toolkit-offline-report', userId, id];
 
   const [task, setTask] = useState<Task | null>(null);
+  const officialDisclosure = useDisclosureLayer<HTMLElement>(task === 'official', () => setTask(null));
   const [verifyBatch, setVerifyBatch] = useState<BatchOption | null>(null);
   const [checkSmoke, setCheckSmoke] = useState(false);
   const [checkGateway, setCheckGateway] = useState(false);
@@ -222,6 +225,7 @@ export function ToolkitVerifyPage() {
   const [pasteContent, setPasteContent] = useState('');
   const [reportId, setReportId] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const deleteDisclosure = useDisclosureLayer<HTMLDivElement>(confirmDelete, () => setConfirmDelete(false));
   const [deletedName, setDeletedName] = useState('');
   const [officialBatch, setOfficialBatch] = useState<BatchOption | null>(null);
   const [official, setOfficial] = useState({ dataset: '', metric: '', score: '', denominator: '', source: '' });
@@ -534,9 +538,14 @@ export function ToolkitVerifyPage() {
                     )}
                     <RawJson key={report.report_id} data={report.summary} />
                     {canWrite && (
-                      <div className="space-y-2 border-t border-[var(--border-subtle)] pt-3">
-                        {confirmDelete ? (
-                          <>
+                      <div {...deleteDisclosure.layerProps} className="space-y-2 border-t border-[var(--border-subtle)] pt-3">
+                        <button ref={deleteDisclosure.triggerRef} type="button" aria-expanded={confirmDelete}
+                          aria-controls="verify-delete-panel" disabled={deleteMut.isPending}
+                          onClick={() => setConfirmDelete((open) => !open)} className={secondaryButton}>
+                          <Trash2 aria-hidden="true" className="size-4 text-[var(--sem-err-fg)]" /> 删除报告
+                        </button>
+                        <CollapsiblePanel id="verify-delete-panel" open={confirmDelete}>
+                          <div className="space-y-2">
                             <p className="text-sm text-[var(--text-secondary)]">删除报告及其隔离待审文件？</p>
                             <div className="flex flex-wrap gap-2">
                               <button
@@ -552,12 +561,8 @@ export function ToolkitVerifyPage() {
                                 deleteMut.reset();
                               }} className={secondaryButton}>取消</button>
                             </div>
-                          </>
-                        ) : (
-                          <button type="button" onClick={() => setConfirmDelete(true)} className={secondaryButton}>
-                            <Trash2 aria-hidden="true" className="size-4 text-[var(--sem-err-fg)]" /> 删除报告
-                          </button>
-                        )}
+                          </div>
+                        </CollapsiblePanel>
                         {deleteMut.error && <Feedback error>删除报告失败。{deleteMut.error.message}</Feedback>}
                       </div>
                     )}
@@ -585,8 +590,9 @@ export function ToolkitVerifyPage() {
       )}
 
       {isAdmin && (
-        <section aria-label="管理员操作" className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+        <section {...officialDisclosure.layerProps} aria-label="管理员操作" className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
           <button
+            ref={officialDisclosure.triggerRef}
             type="button"
             onClick={() => setTask(task === 'official' ? null : 'official')}
             aria-expanded={task === 'official'}
@@ -599,9 +605,8 @@ export function ToolkitVerifyPage() {
             </span>
             <ChevronDown aria-hidden="true" className={`size-4 text-[var(--text-secondary)] ${task === 'official' ? 'rotate-180' : ''}`} />
           </button>
-          {task === 'official' && (
+          <CollapsiblePanel id="official-score-panel" open={task === 'official'}>
             <form
-              id="official-score-panel"
               aria-label="保存官方分"
               className="space-y-4 border-t border-[var(--border-subtle)] p-4 sm:p-5"
               onSubmit={(event) => submit(event, () => canSave && officialBatch && officialMut.mutate(officialBatch))}
@@ -664,7 +669,7 @@ export function ToolkitVerifyPage() {
                 <Feedback>官方分已保存。运行范围仍为 {runScopeLabel(officialMut.data.run_scope)}。</Feedback>
               )}
             </form>
-          )}
+          </CollapsiblePanel>
         </section>
       )}
     </PageTransition>

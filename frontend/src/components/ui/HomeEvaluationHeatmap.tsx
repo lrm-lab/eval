@@ -337,16 +337,27 @@ function DetailContent({ heading, cell, history, closeButton, onClose, refreshCa
   );
 }
 
-function DesktopDetailPanel({ onClose, ...detail }: DetailPanelProps & { onClose: () => void }) {
+function isHeatmapTileClick(event: MouseEvent) {
+  return event.composedPath().some((item) => item instanceof HTMLElement && item.classList.contains('heatmap-tile'));
+}
+
+function DesktopDetailPanel({ cell, onClose, onDismiss, ...detail }: Omit<DetailPanelProps, 'cell'> & {
+  cell?: MapCell;
+  onClose: () => void;
+  onDismiss: () => void;
+}) {
   const heading = useId();
+  const panel = useRef<HTMLDivElement>(null);
   const closeButton = useRef<HTMLButtonElement>(null);
+  const { onKeyDown } = useDismissibleLayer(panel, Boolean(cell), onDismiss, onClose, isHeatmapTileClick);
   useEffect(() => {
-    closeButton.current?.focus({ preventScroll: true });
-  }, [detail.cell.id]);
+    if (cell) closeButton.current?.focus({ preventScroll: true });
+  }, [cell?.id]);
   return (
-    <aside className="heatmap-side bg-[var(--bg-surface)]" aria-labelledby={heading}>
-      <DetailContent heading={heading} closeButton={closeButton} onClose={onClose} {...detail} />
-    </aside>
+    <DismissiblePanel ref={panel} open={Boolean(cell)} onKeyDown={onKeyDown} role="complementary"
+      className="heatmap-side origin-right bg-[var(--bg-surface)]" aria-labelledby={heading}>
+      {cell && <DetailContent heading={heading} cell={cell} closeButton={closeButton} onClose={onClose} {...detail} />}
+    </DismissiblePanel>
   );
 }
 
@@ -633,7 +644,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
               {rectangles.map(({ item, ...rect }) => (
                 <SectorMap key={item.id} rect={rect} sector={item} axis={axis} zoomed={Boolean(zoom)}
                   selected={selectedId ?? undefined} history={history} onZoom={() => setZoom(zoom ? undefined : item)}
-                  onSelect={(cell) => changeUrl({ cell: cell.id })} />
+                  onSelect={(cell) => changeUrl({ cell: !phone && cell.id === selectedId ? null : cell.id })} />
               ))}
               {rectangles.length === 0 && bounds.width > 0 && (
                 <div className="grid h-full place-content-center px-4 text-center text-sm text-[var(--text-secondary)]">
@@ -643,7 +654,8 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
             </div>
             {phone ? <MobileDetailPanel cell={selected} selectionKey={selectionKey} history={history} searchButton={searchButton}
               onDismiss={() => changeUrl({ cell: null })} refreshCatalogue={() => { void catalogue.refetch(); }} />
-              : selected && <DesktopDetailPanel cell={selected} history={history} onClose={closeDetail}
+              : <DesktopDetailPanel cell={selected} history={history} onClose={closeDetail}
+                onDismiss={() => changeUrl({ cell: null })}
                 refreshCatalogue={() => { void catalogue.refetch(); }} />}
           </div>
         )}

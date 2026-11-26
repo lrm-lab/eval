@@ -6,16 +6,17 @@ function isOpen<T extends HTMLElement>(open: boolean | ((element: T) => boolean)
 
 export function useDismissibleLayer<T extends HTMLElement>(
   layer: RefObject<T | null>, open: boolean | ((element: T) => boolean), close: () => void, focusTrigger: () => void,
+  isInsideClick?: (event: MouseEvent) => boolean,
 ) {
   useEffect(() => {
     if (open === false) return;
     function onDocumentClick(event: MouseEvent) {
       const element = layer.current;
-      if (element && isOpen(open, element) && !event.composedPath().includes(element)) close();
+      if (element && isOpen(open, element) && !event.composedPath().includes(element) && !isInsideClick?.(event)) close();
     }
     document.addEventListener('click', onDocumentClick, true);
     return () => document.removeEventListener('click', onDocumentClick, true);
-  }, [layer, open, close]);
+  }, [layer, open, close, isInsideClick]);
 
   return {
     onBlur(event: FocusEvent<T>) {
@@ -31,10 +32,9 @@ export function useDismissibleLayer<T extends HTMLElement>(
   };
 }
 
-export function useDismissibleDetails() {
-  const ref = useRef<HTMLDetailsElement>(null);
-  const handlers = useDismissibleLayer(ref, (element) => element.open, () => {
-    if (ref.current) ref.current.open = false;
-  }, () => ref.current?.querySelector<HTMLElement>(':scope > summary')?.focus());
-  return { ref, ...handlers };
+export function useDisclosureLayer<T extends HTMLElement>(open: boolean, close: () => void) {
+  const ref = useRef<T>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const handlers = useDismissibleLayer(ref, open, close, () => triggerRef.current?.focus({ preventScroll: true }));
+  return { layerProps: { ref, ...handlers }, triggerRef };
 }

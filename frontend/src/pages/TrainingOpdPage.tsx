@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery } from '@tanstack/react-query';
+import { AnimatePresence, m, useIsPresent } from 'motion/react';
 import type * as echarts from 'echarts';
 import {
   Activity,
@@ -27,12 +28,28 @@ import {
   TrendingUp,
 } from 'lucide-react';
 import { apiFetch } from '../lib/api';
+import { useDisclosureLayer } from '../lib/dismissibleLayer';
 import { CHART_PALETTE, escapeHtml, fmtDeltaPP, fmtPct, fmtTokens, stableColorForKey } from '../lib/format';
 import { useAppStore } from '../lib/store';
-import { PageTransition } from '../components/motion/primitives';
+import { CollapsiblePanel, PageTransition } from '../components/motion/primitives';
+import { usePrefersReducedMotion } from '../components/ui/DismissiblePanel';
 import { EChartBox, glassTooltipConfig } from '../components/charts/EChartBox';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { CardGridSkeleton, ChartSkeleton, StateNoticeCard } from '../components/ui/Skeletons';
+
+function RolloutDetailRow({ children }: { children: React.ReactNode }) {
+  const present = useIsPresent();
+  return (
+    <m.tr
+      inert={!present}
+      aria-hidden={!present || undefined}
+      exit={{ opacity: 0, transition: { duration: 0.14 } }}
+      className="bg-[var(--bg-elevated)]/40"
+    >
+      <td colSpan={9} className="px-6 py-3">{children}</td>
+    </m.tr>
+  );
+}
 
 interface TrainingRunSummary {
   run_id: string;
@@ -580,7 +597,10 @@ export function TrainingOpdPage() {
   const [enabledExperts, setEnabledExperts] = useState<string[]>([]);
   const [expertMetricMode, setExpertMetricMode] = useState<'both' | 'kl' | 'reward'>('both');
   const [expandedStep, setExpandedStep] = useState<number | null>(null);
+  const stepDisclosure = useDisclosureLayer<HTMLTableSectionElement>(expandedStep !== null, () => setExpandedStep(null));
+  const reduceMotion = usePrefersReducedMotion();
   const [cliPanelOpen, setCliPanelOpen] = useState<boolean>(false);
+  const cliDisclosure = useDisclosureLayer<HTMLElement>(cliPanelOpen, () => setCliPanelOpen(false));
 
   const runsQ = useQuery({
     queryKey: ['training-opd-runs'],
@@ -1378,14 +1398,14 @@ export function TrainingOpdPage() {
                           <th className="py-2 px-3 font-semibold">分专家拆解 (KL / Reward)</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-[var(--border-subtle)] tabular-nums">
-                        {detail.step_series.map((row) => {
+                      {detail.step_series.map((row) => {
                           const isExpanded = expandedStep === row.step;
                           return (
-                            <React.Fragment key={row.checkpoint}>
-                              <tr className="hover:bg-[var(--bg-elevated)]/50">
+                            <tbody key={row.checkpoint} {...(isExpanded ? stepDisclosure.layerProps : {})} className="tabular-nums">
+                              <tr className="border-b border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)]/50">
                                 <td className="py-2 px-3">
                                   <button
+                                    ref={isExpanded ? stepDisclosure.triggerRef : undefined}
                                     type="button"
                                     aria-expanded={isExpanded}
                                     aria-label={`展开 Step ${row.step} Rollout 明细`}
@@ -1439,9 +1459,9 @@ export function TrainingOpdPage() {
                                   </div>
                                 </td>
                               </tr>
-                              {isExpanded && (
-                                <tr className="bg-[var(--bg-elevated)]/40">
-                                  <td colSpan={9} className="px-6 py-3">
+                              {(isExpanded || !reduceMotion) && (
+                                <AnimatePresence initial={false}>
+                                  {isExpanded && <RolloutDetailRow>
                                     <div className="text-[11px] font-semibold text-[var(--text-secondary)] mb-2">
                                       Step {row.step} 逐条 Rollout 证据（共 {row.rollouts.length} 条）
                                     </div>
@@ -1475,13 +1495,12 @@ export function TrainingOpdPage() {
                                         </tbody>
                                       </table>
                                     </div>
-                                  </td>
-                                </tr>
+                                  </RolloutDetailRow>}
+                                </AnimatePresence>
                               )}
-                            </React.Fragment>
+                            </tbody>
                           );
-                        })}
-                      </tbody>
+                      })}
                     </table>
                   </div>
                 )}
@@ -1608,12 +1627,15 @@ export function TrainingOpdPage() {
 
           {/* Collapsible CLI Generator (Accessible even when runs exist) */}
           <section
+            {...cliDisclosure.layerProps}
             aria-label="OPD 预检与训练命令生成器（折叠面板）"
             className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] overflow-hidden"
           >
             <button
+              ref={cliDisclosure.triggerRef}
               type="button"
               aria-expanded={cliPanelOpen}
+              aria-controls="opd-cli-generator"
               onClick={() => setCliPanelOpen((v) => !v)}
               className="w-full px-4 py-3 bg-[var(--bg-elevated)] flex items-center justify-between gap-2 text-left cursor-pointer border-0"
             >
@@ -1627,7 +1649,7 @@ export function TrainingOpdPage() {
               </span>
             </button>
 
-            {cliPanelOpen && (
+            <CollapsiblePanel id="opd-cli-generator" open={cliPanelOpen}>
               <div className="p-5 border-t border-[var(--border-subtle)]">
                 <TrainingCliGenerator
                   datasets={runsQ.data?.registered_train_datasets || []}
@@ -1638,7 +1660,7 @@ export function TrainingOpdPage() {
                   }
                 />
               </div>
-            )}
+            </CollapsiblePanel>
           </section>
         </div>
       )}

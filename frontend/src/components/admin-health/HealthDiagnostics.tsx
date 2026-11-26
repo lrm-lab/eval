@@ -1,3 +1,4 @@
+import { DismissibleDetails } from '../ui/DismissibleDetails';
 import { useState, type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { ChevronDown, Database, ServerCog, Wrench, type LucideIcon } from 'lucide-react';
@@ -25,7 +26,7 @@ function Panel({ id, icon: Icon, title, description, children }: {
   id: string; icon: LucideIcon; title: string; description: string; children: ReactNode;
 }) {
   return (
-    <details id={id} className="group scroll-mt-20 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
+    <DismissibleDetails id={id} className="group scroll-mt-20 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]" summary={(
       <summary className="flex min-h-15 cursor-pointer list-none items-center gap-3 rounded-xl px-4 py-2.5 hover:bg-[var(--bg-elevated)] [&::-webkit-details-marker]:hidden">
         <Icon className="size-4 shrink-0 text-[var(--brand-primary)]" aria-hidden="true" />
         <span className="min-w-0 flex-1">
@@ -34,8 +35,9 @@ function Panel({ id, icon: Icon, title, description, children }: {
         </span>
         <ChevronDown className="size-4 shrink-0 text-[var(--text-muted)] motion-safe:transition-transform group-open:rotate-180" aria-hidden="true" />
       </summary>
+    )}>
       <div className="space-y-4 border-t border-[var(--border-subtle)] p-4 text-xs">{children}</div>
-    </details>
+    </DismissibleDetails>
   );
 }
 

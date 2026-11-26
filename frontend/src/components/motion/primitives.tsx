@@ -269,18 +269,22 @@ export function CollapsiblePanel({
   instant = false,
   children,
   className = '',
+  id,
 }: {
   open: boolean;
   instant?: boolean;
   children: React.ReactNode;
   className?: string;
+  id?: string;
 }) {
   const reduced = useAppStore((s) => s.reducedMotion);
   return (
     <div
+      id={id}
       className={`lrm-collapse-grid ${className}`}
       data-open={open ? 'true' : 'false'}
       data-instant={instant || reduced ? 'true' : 'false'}
+      inert={!open}
     >
       <div>{children}</div>
     </div>

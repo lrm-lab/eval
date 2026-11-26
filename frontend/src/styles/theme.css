@@ -276,16 +276,44 @@ pre,
 .lrm-collapse-grid {
   display: grid;
   grid-template-rows: 0fr;
-  transition: grid-template-rows var(--dur-fast) var(--ease-out-expo);
+  opacity: 0;
+  pointer-events: none;
+  transition: grid-template-rows var(--dur-fast) var(--ease-out-expo), opacity var(--dur-fast) ease;
 }
 .lrm-collapse-grid[data-open="true"] {
   grid-template-rows: 1fr;
+  opacity: 1;
+  pointer-events: auto;
 }
 .lrm-collapse-grid[data-instant="true"] {
   transition: none !important;
 }
 .lrm-collapse-grid > div {
   overflow: hidden;
+}
+
+details[data-dismissible-details]::details-content {
+  display: grid;
+  grid-template-rows: 0fr;
+  content-visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+  transition: grid-template-rows var(--dur-fast) var(--ease-out-expo), opacity var(--dur-fast) ease, content-visibility var(--dur-fast) allow-discrete;
+}
+details[data-dismissible-details][open]::details-content {
+  grid-template-rows: 1fr;
+  content-visibility: visible;
+  opacity: 1;
+  pointer-events: auto;
+}
+details[data-dismissible-details] > div {
+  overflow: hidden;
+}
+[data-reduced-motion="true"] details[data-dismissible-details]::details-content {
+  transition: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  details[data-dismissible-details]::details-content { transition: none; }
 }
 
 /* Interactive press micro-feedback (90ms) */

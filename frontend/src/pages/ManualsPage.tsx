@@ -10,6 +10,7 @@ import { Link, useLocation, useSearchParams } from 'react-router-dom';
 import remarkGfm from 'remark-gfm';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 import { apiFetch } from '../lib/api';
+import { useDisclosureLayer } from '../lib/dismissibleLayer';
 import '../styles/manual-reader.css';
 
 interface ManualSummary {
@@ -121,31 +122,35 @@ const ManualArticle = memo(function ManualArticle({ doc, articleRef }: { doc: Ma
 });
 
 function ReaderSidebar({
-  id, title, icon, children, expanded, toggle,
+  id, title, icon, children, expanded, setExpanded,
 }: {
   id: string;
   title: string;
   icon: ReactNode;
   children: ReactNode;
   expanded: boolean;
-  toggle: () => void;
+  setExpanded: (value: boolean) => void;
 }) {
+  const disclosure = useDisclosureLayer<HTMLElement>(expanded, () => setExpanded(false));
   return (
-    <aside className={`manual-sidebar manual-sidebar--${id}`}>
+    <aside {...disclosure.layerProps} className={`manual-sidebar manual-sidebar--${id}`}>
       <div className="manual-sidebar-title">{icon}{title}</div>
       <button
+        ref={disclosure.triggerRef}
         type="button"
         className="manual-sidebar-toggle"
         aria-expanded={expanded}
         aria-controls={`manual-${id}`}
-        onClick={toggle}
+        onClick={() => setExpanded(!expanded)}
       >
         {icon}
         <span>{title}</span>
         <ChevronDown aria-hidden="true" size={15} />
       </button>
-      <div id={`manual-${id}`} className="manual-sidebar-content" data-expanded={expanded}>
-        {children}
+      <div id={`manual-${id}`} className="manual-sidebar-panel" data-expanded={expanded}>
+        <div className="manual-sidebar-clip">
+          <div className="manual-sidebar-content">{children}</div>
+        </div>
       </div>
     </aside>
   );
@@ -232,7 +237,7 @@ export function ManualsPage() {
           title="手册检索"
           icon={<BookOpen aria-hidden="true" size={16} />}
           expanded={catalogOpen}
-          toggle={() => setCatalogOpen(!catalogOpen)}
+          setExpanded={setCatalogOpen}
         >
           <label className="manual-search">
             <Search aria-hidden="true" size={16} />
@@ -280,7 +285,7 @@ export function ManualsPage() {
           title="On this page"
           icon={<List aria-hidden="true" size={16} />}
           expanded={outlineOpen}
-          toggle={() => setOutlineOpen(!outlineOpen)}
+          setExpanded={setOutlineOpen}
         >
           <nav aria-label="章节目录" className="manual-outline">
             {docQ.isLoading ? <p className="manual-sidebar-empty">章节加载中…</p> : sections?.length && doc ? (

@@ -1,3 +1,4 @@
+import { DismissibleDetails } from './DismissibleDetails';
 import { useId, useState } from 'react';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
@@ -419,8 +420,9 @@ export function GroupedComparePanel({
             )}
           </div>
 
-          <details className="rounded-lg border border-[var(--border-subtle)] p-2.5 text-xs text-[var(--text-secondary)]">
+          <DismissibleDetails className="rounded-lg border border-[var(--border-subtle)] p-2.5 text-xs text-[var(--text-secondary)]" summary={(
             <summary className="cursor-pointer font-medium">比较口径与评分协议 · {context.kind === 'trials' ? '共同有效题' : '历史汇总'}</summary>
+          )}>
             <div className="mt-2">
               <label className="grid min-w-0 gap-1 text-xs text-[var(--text-secondary)]">
                 评分协议
@@ -432,7 +434,7 @@ export function GroupedComparePanel({
                 </select>
               </label>
             </div>
-          </details>
+          </DismissibleDetails>
 
           {!visibleGroups.length ? (
             <StateNoticeCard kind="empty" title="此分组方式暂无已确认身份" description="可切换到模型 × Harness 查看已登记的实际组合。" />
@@ -516,8 +518,9 @@ export function GroupedComparePanel({
                             {displayed.batch_name}
                           </div>
                           {group.batches.length > 1 && (
-                            <details className="text-[11px] text-[var(--text-secondary)]">
+                            <DismissibleDetails className="text-[11px] text-[var(--text-secondary)]" summary={(
                               <summary className="cursor-pointer">更换批次（{group.batches.length}）</summary>
+                            )}>
                               <select
                                 aria-label={`${label} 候选批次`}
                                 className={`mt-1 ${selectClass}`}
@@ -535,7 +538,7 @@ export function GroupedComparePanel({
                                   </option>
                                 ))}
                               </select>
-                            </details>
+                            </DismissibleDetails>
                           )}
                           <div className="flex flex-wrap items-center justify-between gap-x-2 gap-y-1 text-[11px]">
                             <span className="tabular-nums text-[var(--text-secondary)]">

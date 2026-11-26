@@ -1,6 +1,9 @@
+import { DismissibleDetails } from './DismissibleDetails';
 import { useId, useState, type ReactNode } from 'react';
 import { BookOpen, Braces, ChevronDown } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
+import { useDisclosureLayer } from '../../lib/dismissibleLayer';
+import { DismissiblePanel } from './DismissiblePanel';
 import { TableSkeleton } from './Skeletons';
 
 export interface LegacyCompareSample {
@@ -77,19 +80,28 @@ function modelAnswer(sample: unknown): { text?: string; final: boolean } {
 
 function ExpandableText({ text, label, markdown = false }: { text: string; label: string; markdown?: boolean }) {
   const [expanded, setExpanded] = useState(false);
+  const disclosure = useDisclosureLayer<HTMLDivElement>(expanded, () => setExpanded(false));
   const id = useId();
   const long = text.length > PREVIEW_LENGTH;
-  const visibleText = long && !expanded ? text.slice(0, PREVIEW_LENGTH).trimEnd() + '…' : text;
+  const renderText = (visibleText: string) => markdown ? (
+    <div className={textStyle + ' space-y-2.5 [&_ol]:list-decimal [&_ul]:list-disc [&_ol]:pl-5 [&_ul]:pl-5 [&_li+li]:mt-1 [&_pre]:overflow-auto [&_pre]:rounded [&_pre]:bg-[var(--bg-surface)] [&_pre]:p-2'}>
+      <ReactMarkdown skipHtml disallowedElements={['a', 'img']} unwrapDisallowed>{visibleText}</ReactMarkdown>
+    </div>
+  ) : <p className={textStyle + ' whitespace-pre-wrap'}>{visibleText}</p>;
+  if (!long) return renderText(text);
+
   return (
-    <>
-      {markdown && (
-        <div id={id} className={textStyle + ' space-y-2.5 [&_ol]:list-decimal [&_ul]:list-disc [&_ol]:pl-5 [&_ul]:pl-5 [&_li+li]:mt-1 [&_pre]:overflow-auto [&_pre]:rounded [&_pre]:bg-[var(--bg-surface)] [&_pre]:p-2'}>
-          <ReactMarkdown skipHtml disallowedElements={['a', 'img']} unwrapDisallowed>{visibleText}</ReactMarkdown>
+    <div {...disclosure.layerProps}>
+      <div id={id} className="grid min-w-0">
+        <div aria-hidden={expanded || undefined} className={`col-start-1 row-start-1 min-w-0 ${expanded ? 'invisible' : ''}`}>
+          {renderText(text.slice(0, PREVIEW_LENGTH).trimEnd() + '…')}
         </div>
-      )}
-      {!markdown && <p id={id} className={textStyle + ' whitespace-pre-wrap'}>{visibleText}</p>}
-      {long && (
+        <DismissiblePanel open={expanded} className="col-start-1 row-start-1 min-w-0 origin-top">
+          {expanded && renderText(text)}
+        </DismissiblePanel>
+      </div>
         <button
+          ref={disclosure.triggerRef}
           type="button"
           aria-expanded={expanded}
           aria-controls={id}
@@ -99,24 +111,21 @@ function ExpandableText({ text, label, markdown = false }: { text: string; label
           <ChevronDown aria-hidden="true" className={expanded ? 'size-3.5 rotate-180' : 'size-3.5'} />
           {expanded ? '收起' + label : '展开完整' + label}
         </button>
-      )}
-    </>
+    </div>
   );
 }
 
 function EvidenceDetails({ label, children }: { label: ReactNode; children: () => ReactNode }) {
-  const [open, setOpen] = useState(false);
   return (
-    <details
-      className="group/evidence rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)]"
-      onToggle={(event) => setOpen(event.currentTarget.open)}
-    >
+    <DismissibleDetails
+      className="group/evidence rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)]" summary={(
       <summary className="flex cursor-pointer list-none items-center gap-2 rounded-lg px-3 py-2.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] focus-visible:outline-2 focus-visible:outline-[var(--brand-primary)] [&::-webkit-details-marker]:hidden">
         {label}
         <ChevronDown aria-hidden="true" className="ml-auto size-3.5 shrink-0 group-open/evidence:rotate-180" />
       </summary>
-      {open && children()}
-    </details>
+    )}>
+      {children}
+    </DismissibleDetails>
   );
 }
 

@@ -1,3 +1,4 @@
+import { DismissibleDetails } from '../ui/DismissibleDetails';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type * as echarts from 'echarts';
 import { escapeHtml, fmtDeltaPP, fmtPct, stableColorForKey } from '../../lib/format';
@@ -264,10 +265,11 @@ export function CompareScoreCharts({
           visibleLegend.current = (event as { selected: Record<string, boolean> }).selected;
         })}
       />
-      <details className="border-t border-[var(--border-subtle)] pt-2 text-xs">
+      <DismissibleDetails className="border-t border-[var(--border-subtle)] pt-2 text-xs" summary={(
         <summary className="cursor-pointer text-[var(--text-secondary)]">
           公开榜首来源与覆盖（{overlays.filter(({ point }) => point).length}/{rows.length}）
         </summary>
+      )}>
         <ul className="mt-2 space-y-2 p-0">
           {overlays.map(({ point, missing, deltas, reasons }, index) => (
             <li key={rows[index].dataset_release_id} className="rounded-lg bg-[var(--bg-elevated)] px-2.5 py-2">
@@ -298,7 +300,7 @@ export function CompareScoreCharts({
             </li>
           ))}
         </ul>
-      </details>
+      </DismissibleDetails>
     </section>
   );
 }

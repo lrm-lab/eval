@@ -1,6 +1,7 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useId, useState } from 'react';
 import { AlertTriangle, Brain, Check, ChevronDown, ChevronRight, Copy, Terminal } from 'lucide-react';
 import type { AtifStep } from '../../types/api';
+import { useDisclosureLayer } from '../../lib/dismissibleLayer';
 import { CollapsiblePanel } from '../motion/primitives';
 import { RowActionIcon } from './RowActionIcon';
 
@@ -25,6 +26,8 @@ export function PairedAtifStepCard({
   onCopyAnchor,
 }: PairedAtifStepCardProps) {
   const [reasonOpen, setReasonOpen] = useState(false);
+  const reasonId = useId();
+  const reasoning = useDisclosureLayer<HTMLDivElement>(reasonOpen, () => setReasonOpen(false));
   const [hoveredCallId, setHoveredCallId] = useState<string | null>(null);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -88,9 +91,12 @@ export function PairedAtifStepCard({
       </div>
 
       {step.reasoning_content && (
-        <div className="mb-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
+        <div {...reasoning.layerProps} className="mb-2.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)]">
           <button
+            ref={reasoning.triggerRef}
             type="button"
+            aria-expanded={reasonOpen}
+            aria-controls={reasonId}
             onClick={() => setReasonOpen((v) => !v)}
             className="w-full flex items-center justify-between px-3 py-1.5 text-xs font-medium text-[var(--text-secondary)] hover:text-[var(--text-primary)] cursor-pointer"
           >
@@ -100,7 +106,7 @@ export function PairedAtifStepCard({
             </span>
             {reasonOpen ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
           </button>
-          <CollapsiblePanel open={reasonOpen} instant={instantToggle}>
+          <CollapsiblePanel id={reasonId} open={reasonOpen} instant={instantToggle}>
             <pre className="m-0 px-3 pb-2.5 pt-1 text-xs leading-relaxed whitespace-pre-wrap break-words text-[var(--text-secondary)] border-t border-[var(--border-subtle)] max-h-80 overflow-y-auto">
               {step.reasoning_content}
             </pre>

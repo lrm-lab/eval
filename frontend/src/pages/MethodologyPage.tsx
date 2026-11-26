@@ -1,3 +1,4 @@
+import { DismissibleDetails } from '../components/ui/DismissibleDetails';
 import React, { useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { useQuery } from '@tanstack/react-query';
@@ -179,8 +180,9 @@ export function MethodologyPage() {
             </div>
           </article>
           {registry.data && (
-            <details className="border-t border-[var(--border-subtle)] px-5 py-3 text-xs text-[var(--text-secondary)] sm:px-7">
+            <DismissibleDetails className="border-t border-[var(--border-subtle)] px-5 py-3 text-xs text-[var(--text-secondary)] sm:px-7" summary={(
               <summary className="cursor-pointer">当前生效的口径注册表 · {registry.data.methodology_version}</summary>
+            )}>
               <dl className="mb-1 mt-3 grid gap-3">
                 {Object.entries(registry.data.sections).map(([id, section]) => (
                   <div key={id}>
@@ -190,7 +192,7 @@ export function MethodologyPage() {
                   </div>
                 ))}
               </dl>
-            </details>
+            </DismissibleDetails>
           )}
         </PageTransition>
       </div>

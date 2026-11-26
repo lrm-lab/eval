@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from 'react';
 import * as echarts from 'echarts';
 import { Download } from 'lucide-react';
 import { useAppStore } from '../../lib/store';
+import { usePrefersReducedMotion } from '../ui/DismissiblePanel';
 
 export default function EChartCanvas({
   option,
@@ -23,7 +24,7 @@ export default function EChartCanvas({
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<echarts.ECharts | null>(null);
   const theme = useAppStore((s) => s.theme);
-  const reduced = useAppStore((s) => s.reducedMotion);
+  const reduced = usePrefersReducedMotion();
 
   useEffect(() => {
     const el = containerRef.current;
@@ -37,8 +38,13 @@ export default function EChartCanvas({
       chart.resize();
     });
     ro.observe(el);
+    const dismissTooltip = (event: MouseEvent) => {
+      if (!event.composedPath().includes(el)) chart.dispatchAction({ type: 'hideTip' });
+    };
+    el.ownerDocument.addEventListener('click', dismissTooltip, true);
 
     return () => {
+      el.ownerDocument.removeEventListener('click', dismissTooltip, true);
       ro.disconnect();
       delete (el as HTMLDivElement & { __lrmChart?: echarts.ECharts }).__lrmChart;
       chart.dispose();
@@ -57,6 +63,11 @@ export default function EChartCanvas({
       backgroundColor: 'transparent',
       ...option,
     };
+    if (reduced && merged.tooltip) {
+      merged.tooltip = Array.isArray(merged.tooltip)
+        ? merged.tooltip.map((tooltip) => ({ ...tooltip, transitionDuration: 0 }))
+        : { ...merged.tooltip, transitionDuration: 0 };
+    }
     chart.setOption(merged, { notMerge: true });
   }, [option, theme, reduced]);
 

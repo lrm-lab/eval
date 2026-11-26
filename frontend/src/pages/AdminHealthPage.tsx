@@ -1,3 +1,4 @@
+import { DismissibleDetails } from '../components/ui/DismissibleDetails';
 import { type ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -215,12 +216,13 @@ function AlertList({ alerts, haveWarnings, onRefresh, refreshing }: {
         </p>
       )}
       {remaining.length > 0 && (
-        <details className="border-t border-[var(--border-subtle)]">
+        <DismissibleDetails className="border-t border-[var(--border-subtle)]" summary={(
           <summary className="cursor-pointer px-3.5 py-2 text-xs text-[var(--brand-primary)]">其余 {remaining.length} 项告警</summary>
+        )}>
           <ul className="m-0 max-h-52 list-none divide-y divide-[var(--border-subtle)] overflow-y-auto p-0">
             {remaining.map((alert) => <AlertRow key={alert.key} alert={alert} />)}
           </ul>
-        </details>
+        </DismissibleDetails>
       )}
     </section>
   );
