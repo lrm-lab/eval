@@ -465,7 +465,7 @@ def test_evaluation_history_uses_nearest_authorized_aligned_run(case) -> None:
         assert items[key]["candidate"] is None and items[key]["baseline"] is None
 
     with db.transaction() as conn:
-        conn.execute("UPDATE batches SET batch_status = 'withdrawn' WHERE batch_id = 'valid'")
+        conn.execute("UPDATE batches SET evidence_approval = 'revoked' WHERE batch_id = 'valid'")
         conn.execute("UPDATE batches SET generation_id = 'gen_new' WHERE batch_id = 'current'")
         conn.execute("UPDATE episodes SET generation_id = 'gen_new' WHERE batch_id = 'current'")
     items = _history_request(client, headers, ("current", "gen_new"), ("current", "gen_old"), ("valid", "gen_old"))
