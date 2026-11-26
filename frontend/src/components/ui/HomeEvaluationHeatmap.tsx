@@ -4,7 +4,7 @@ import { ArrowLeft, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } f
 import { useSearchParams } from 'react-router-dom';
 import { apiFetch } from '../../lib/api';
 import {
-  cellSearchText, cellTitle, changeState, datasetName, findMapLock, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
+  cellSearchText, cellTitle, changeState, datasetName, findMapLock, firstScoreHistory, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
   type EvaluationMap, type HistoryItem, type MapAxis, type MapCell, type Rectangle, type Sector,
 } from '../../lib/evaluationMap';
 import { useAppStore } from '../../lib/store';
@@ -30,6 +30,7 @@ function ChangeLegend() {
       <li className="heatmap-change" data-tone="up">↑ 上涨</li>
       <li className="heatmap-change" data-tone="down">↓ 下跌</li>
       <li>= 持平</li>
+      <li className="text-[var(--text-secondary)]">首次评测以 0 为基线</li>
       <li className="text-[var(--text-secondary)]">批次对照 / 运行快照</li>
       <li className="text-[var(--text-secondary)]">— 尚无可比前次</li>
       <li className="text-[var(--text-secondary)]">… 等待计算</li>
@@ -41,7 +42,7 @@ interface CellHistory {
   result?: HistoryItem;
   pending: boolean;
   failed: boolean;
-  retry: () => void;
+  retry?: () => void;
 }
 
 type HistoryByCell = Map<string, CellHistory>;
@@ -255,7 +256,7 @@ function DetailPanel({ phone, cell, history, onClose, refreshCatalogue }: {
       <HeatmapDetails cell={cell} history={status?.result} pending={status?.pending ?? false}
         failed={status?.failed ?? false} onRetry={() => {
           if (status?.result?.reason === 'BATCH_UNAVAILABLE' || status?.result?.reason === 'RELEASE_GENERATION_MISMATCH') refreshCatalogue();
-          else status?.retry();
+          else status?.retry?.();
         }} />
     </div>
   );
@@ -315,6 +316,14 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
   const unweightedCount = sectors.reduce((sum, sector) => sum + sector.cells.filter((cell) => (
     !(sector.registered_task_count && sector.registered_task_count > 0) || cell.published_run_count === 0
   )).length, 0);
+  const firstScores = useMemo(() => {
+    const scores: HistoryByCell = new Map();
+    for (const cell of catalogue.data?.cells ?? []) {
+      const result = firstScoreHistory(cell);
+      if (result) scores.set(cell.id, { result, pending: false, failed: false });
+    }
+    return scores;
+  }, [catalogue.data]);
 
   const batches = useMemo(() => {
     type HistoryRequest = { id: string; cellId: string; batch_id: string; generation_id: string; mode: 'auto' | 'reviewed' };
@@ -323,7 +332,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       .flatMap((sector) => sector.cells.filter((cell) => cell.published_run_count > 0));
     const needsDetail = selected && !visible.some((cell) => cell.id === selected.id) ? [selected] : [];
     for (const cell of [...needsDetail, ...visible]) {
-      if (cell.kind !== 'trials') continue;
+      if (cell.kind !== 'trials' || firstScores.has(cell.id)) continue;
       for (const [batch, mode] of [[cell.latest_scored_batch, 'auto'], [cell.reviewed_batch, 'reviewed']] as const) {
         if (!batch) continue;
         let chunk = chunks.at(-1);
@@ -335,7 +344,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       }
     }
     return chunks;
-  }, [sectors, zoom, selected]);
+  }, [sectors, zoom, selected, firstScores]);
   const histories = useQueries({
     queries: batches.map((items) => ({
       queryKey: ['home-evaluation-history', viewerKey, items],
@@ -347,7 +356,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       retry: 1,
     })),
   });
-  const history: HistoryByCell = new Map();
+  const history: HistoryByCell = new Map(firstScores);
   const reviewedHistory: HistoryByCell = new Map();
   batches.forEach((group, index) => {
     const query = histories[index];
