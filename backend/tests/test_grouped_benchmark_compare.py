@@ -501,15 +501,19 @@ def test_evaluation_history_masks_mixed_holdout_run_time_by_role(case) -> None:
     _insert_batch(db, "before", {"visible-task": (0, "same"), "hidden-task": (1, "same")})
     _insert_batch(db, "after", {"visible-task": (1, "same"), "hidden-task": (0, "same")})
     _insert_batch(db, "whole_holdout", {"hidden-task": (1, "same")}, release=HOLDOUT)
+    _insert_batch(db, "only_hidden_tasks", {"hidden-task": (1, "same")})
     with db.transaction() as conn:
         conn.execute("UPDATE batches SET finished_at = ? WHERE batch_id = 'before'", (NOW,))
         conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:15:00Z' WHERE batch_id = 'after'")
-    items = _history_request(client, headers, ("after", "gen_old"), ("whole_holdout", "gen_old"))
+    items = _history_request(
+        client, headers, ("after", "gen_old"), ("whole_holdout", "gen_old"), ("only_hidden_tasks", "gen_old"),
+    )
     assert items["0"]["reason"] == "MISSING_RECORDED_TIME"
     assert items["0"]["candidate"]["recorded_at"] is None
     assert items["0"]["candidate"]["recorded_at_source"] is None
     assert items["0"]["baseline"] is None and items["0"]["common_valid"] is None
     assert items["1"]["reason"] == "BATCH_UNAVAILABLE"
+    assert items["2"]["reason"] == "BATCH_UNAVAILABLE" and items["2"]["candidate"] is None
     with db.transaction() as conn:
         conn.execute("UPDATE users SET scopes_json = ? WHERE user_id = ?", ('["dataset:holdout_read"]', uid))
     scoped = _history_request(client, headers, ("after", "gen_old"))["0"]
