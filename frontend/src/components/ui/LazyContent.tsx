@@ -1,5 +1,13 @@
 import { Component, Suspense, type ReactNode } from 'react';
 
+const contentClassName = 'flex flex-wrap items-start gap-3 p-4 text-sm text-[var(--text-secondary)]';
+
+export function LoadingContent({ label, height }: { label: string; height?: number }) {
+  return (
+    <p role="status" className={contentClassName} style={{ minHeight: height }}>正在加载{label}…</p>
+  );
+}
+
 interface LazyContentProps {
   children: ReactNode;
   label: string;
@@ -23,11 +31,10 @@ export class LazyContent extends Component<LazyContentProps, { failed: boolean }
   render() {
     const { children, label, height } = this.props;
     const style = { minHeight: height };
-    const className = 'flex flex-wrap items-start gap-3 p-4 text-sm text-[var(--text-secondary)]';
 
     if (this.state.failed) {
       return (
-        <div role="alert" className={className} style={style}>
+        <div role="alert" className={contentClassName} style={style}>
           <p>{label}加载失败，请重新加载页面。</p>
           <button
             type="button"
@@ -41,9 +48,7 @@ export class LazyContent extends Component<LazyContentProps, { failed: boolean }
     }
 
     return (
-      <Suspense fallback={
-        <p role="status" className={className} style={style}>正在加载{label}…</p>
-      }>
+      <Suspense fallback={<LoadingContent label={label} height={height} />}>
         {children}
       </Suspense>
     );

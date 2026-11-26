@@ -1,7 +1,10 @@
-import { lazy, type ComponentProps } from 'react';
-import { LazyContent } from '../ui/LazyContent';
+import type { ComponentProps } from 'react';
+import { createModuleLoader } from '../../lib/moduleLoader';
+import { LazyContent, LoadingContent } from '../ui/LazyContent';
+import type EChartCanvas from './EChartCanvas';
 
-const EChartCanvas = lazy(() => import('./EChartCanvas'));
+const canvasModule = createModuleLoader(() => import('./EChartCanvas'));
+export const preloadEChartCanvas = canvasModule.preload;
 
 export function glassTooltipConfig(theme: 'light' | 'dark') {
   return {
@@ -19,10 +22,19 @@ export function glassTooltipConfig(theme: 'light' | 'dark') {
   };
 }
 
-export function EChartBox(props: ComponentProps<typeof EChartCanvas>) {
+type ChartProps = ComponentProps<typeof EChartCanvas>;
+
+function ChartContent(props: ChartProps) {
+  const renderer = canvasModule.useModule();
+  return renderer
+    ? <renderer.default {...props} />
+    : <LoadingContent label="图表" height={props.height ?? 380} />;
+}
+
+export function EChartBox(props: ChartProps) {
   return (
     <LazyContent label="图表" height={props.height ?? 380}>
-      <EChartCanvas {...props} />
+      <ChartContent {...props} />
     </LazyContent>
   );
 }
