@@ -641,25 +641,38 @@ class SourceApprovalRegistry:
         """Return (project_id, owner_id, approval_status, approved_evidence_classes) for target_path.
         Unmatched directories default strictly to pending with EMPTY approved_evidence_classes."""
         resolved = str(target_path.resolve())
+        resolved_parents: dict[Path, Path] = {}
+        parent_exists: dict[Path, bool] = {}
+
+        def resolve_parent(parent: Path) -> Path:
+            if parent not in resolved_parents:
+                resolved_parents[parent] = parent.resolve()
+            return resolved_parents[parent]
+
         best: dict[str, Any] | None = None
         best_len = -1
         for entry in self.sources:
             raw_root = str(entry.get("source_root") or "")
             if not raw_root:
                 continue
+            path = Path(raw_root)
+            parent = path.parent
             mode = str(entry.get("match_mode", "dir"))
             if mode == "prefix":
-                p_raw = Path(raw_root)
-                norm_prefix = (
-                    str(p_raw.parent.resolve() / p_raw.name)
-                    if p_raw.parent.exists()
-                    else raw_root
-                )
+                if parent not in parent_exists:
+                    parent_exists[parent] = parent.exists()
+                norm_prefix = str(resolve_parent(parent) / path.name) if parent_exists[parent] else raw_root
                 if resolved.startswith(norm_prefix) and len(norm_prefix) > best_len:
                     best = entry
                     best_len = len(norm_prefix)
             else:
-                root = str(Path(raw_root).resolve())
+                # Most rules share a few remote parents. Reuse their resolved
+                # paths for this lookup and still inspect each rule's leaf.
+                leaf = resolve_parent(parent) / path.name
+                try:
+                    root = str(path.resolve() if path.name in ("", "..") or leaf.is_symlink() else leaf)
+                except OSError:
+                    root = str(path.resolve())
                 if (resolved == root or resolved.startswith(root.rstrip("/") + "/")) and len(root) > best_len:
                     best = entry
                     best_len = len(root)
