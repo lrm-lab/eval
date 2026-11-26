@@ -26,7 +26,7 @@ def evaluation_recorded_at(
         public_task = sql_task_holdout_exclude_clause("?", "e.task_id")
         has_hidden_trials = conn.execute(
             f"""SELECT 1 FROM episodes e
-                WHERE e.batch_id = ? AND e.generation_id = ? AND NOT {public_task}
+                WHERE e.batch_id = ? AND e.generation_id = ? AND NOT ({public_task})
                 LIMIT 1""",
             (*params, batch["dataset_release_id"]),
         ).fetchone()

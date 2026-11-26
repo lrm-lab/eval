@@ -6,7 +6,9 @@ import io
 import json
 import math
 import secrets
+from contextlib import nullcontext
 from pathlib import Path
+from sqlite3 import Connection
 from typing import Any
 
 from app.api.errors import AppError
@@ -26,6 +28,7 @@ from app.security.authz import (
     require_scope,
 )
 from app.security.storage_probe import resolve_within_root, validate_safe_id
+from app.services.evaluation_history import build_evaluation_history
 from app.services.methodology import (
     METHODOLOGY_VERSION,
     compute_comparative_macro_avg,
@@ -521,6 +524,56 @@ class CompareService:
             out[r["task_id"]] = r
         return out
 
+    def evaluation_history(self, user: AuthUser, items: list[dict[str, Any]]) -> dict[str, Any]:
+        with self.db.read_snapshot() as conn:
+            return build_evaluation_history(conn, user, items, self.preview_batch_comparison)
+
+    def preview_batch_comparison(
+        self, user: AuthUser, pair: dict[str, Any], *, conn: Connection | None = None,
+    ) -> dict[str, Any]:
+        subjects = [
+            {
+                "id": side, "kind": "batch", "batch_id": batch["batch_id"],
+                "expected_generation_id": batch["generation_id"],
+            }
+            for side, batch in (("baseline", pair["baseline"]), ("candidate", pair["candidate"]))
+        ]
+        try:
+            result = self.query_compare(
+                user,
+                {
+                    "subjects": subjects,
+                    "baseline_subject_id": "baseline",
+                    "scoring_protocol": pair["scoring_protocol"],
+                    "scope": {"dataset_release_ids": [pair["dataset_release_id"]]},
+                    "include_verdict": False,
+                    "enable_faults_as_zero_protocol": False,
+                },
+                persist_ephemeral=False,
+                read_snapshot=conn,
+                exact_batch_context=(pair["dataset_release_id"], pair["scoring_protocol"]),
+            )
+        except AppError as exc:
+            if exc.status_code >= 500:
+                raise
+            return {"id": pair["id"], "reason": exc.code, "message": exc.message}
+        row = next(iter(result["rows"]), None)
+        if row is None or not row["comparable"]:
+            return {"id": pair["id"], "reason": "INCOMPARABLE_RELEASE"}
+        intersection = row["intersection"]
+        baseline = row["cells"]["baseline"]["common_valid"]
+        candidate = row["cells"]["candidate"]["common_valid"]
+        return {
+            "id": pair["id"],
+            "reason": None if intersection["common_valid_scored_tasks"] else "NO_COMMON_VALID_TASKS",
+            "common_valid": intersection["common_valid_scored_tasks"],
+            "common_covered": intersection["common_covered_tasks"],
+            "baseline_score": baseline["score"],
+            "candidate_score": candidate["score"],
+            "delta_pp": candidate["delta_pp"],
+            "metric_name": row["metric_name"],
+        }
+
     def query_compare(
         self,
         user: AuthUser,
@@ -528,6 +581,7 @@ class CompareService:
         *,
         persist_ephemeral: bool = True,
         exact_batch_context: tuple[str, str] | None = None,
+        read_snapshot: Connection | None = None,
     ) -> dict[str, Any]:
         subjects = payload.get("subjects") or []
         if len(subjects) < 2:
@@ -574,7 +628,8 @@ class CompareService:
         ep_maps_by_rel: dict[str, dict[str, dict[str, dict[str, Any]]]] = {}
         core_bms: list[dict[str, Any]] = []
 
-        with self.db.read_snapshot() as snap_conn:
+        snapshot = self.db.read_snapshot() if read_snapshot is None else nullcontext(read_snapshot)
+        with snapshot as snap_conn:
             for s in subjects:
                 sid = str(s["id"])
                 bid = str(s["batch_id"])

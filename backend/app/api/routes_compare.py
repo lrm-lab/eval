@@ -3,11 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import Response
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 from app.api.deps import enforce_csrf, get_current_user, require_researcher
-from app.api.errors import AppError
 from app.security.auth import AuthUser
 
 router = APIRouter(prefix="/api/v1", tags=["compare"])
@@ -40,6 +39,14 @@ class PreviewPair(BaseModel):
 
 class PreviewComparisons(BaseModel):
     pairs: list[PreviewPair] = Field(min_length=1, max_length=18)
+
+
+class HistoryItem(PreviewBatch):
+    id: str
+
+
+class HistoryComparisons(BaseModel):
+    items: list[HistoryItem] = Field(min_length=1, max_length=18)
 
 
 @router.get("/compare/options")
@@ -108,52 +115,19 @@ def preview_batch_comparisons(
 ) -> dict[str, Any]:
     """Compute short, generation-bound summaries without creating saved comparison sessions."""
     service = request.app.state.ctx.compare
-    items = []
-    for pair in body.pairs:
-        subjects = [
-            {
-                "id": side, "kind": "batch", "batch_id": batch.batch_id,
-                "expected_generation_id": batch.generation_id,
-            }
-            for side, batch in (("baseline", pair.baseline), ("candidate", pair.candidate))
-        ]
-        try:
-            result = service.query_compare(
-                user,
-                {
-                    "subjects": subjects,
-                    "baseline_subject_id": "baseline",
-                    "scoring_protocol": pair.scoring_protocol,
-                    "scope": {"dataset_release_ids": [pair.dataset_release_id]},
-                    "include_verdict": False,
-                    "enable_faults_as_zero_protocol": False,
-                },
-                persist_ephemeral=False,
-                exact_batch_context=(pair.dataset_release_id, pair.scoring_protocol),
-            )
-        except AppError as exc:
-            if exc.status_code >= 500:
-                raise
-            items.append({"id": pair.id, "reason": exc.code, "message": exc.message})
-            continue
-        row = next(iter(result["rows"]), None)
-        if row is None or not row["comparable"]:
-            items.append({"id": pair.id, "reason": "INCOMPARABLE_RELEASE"})
-            continue
-        intersection = row["intersection"]
-        baseline = row["cells"]["baseline"]["common_valid"]
-        candidate = row["cells"]["candidate"]["common_valid"]
-        items.append({
-            "id": pair.id,
-            "reason": None if intersection["common_valid_scored_tasks"] else "NO_COMMON_VALID_TASKS",
-            "common_valid": intersection["common_valid_scored_tasks"],
-            "common_covered": intersection["common_covered_tasks"],
-            "baseline_score": baseline["score"],
-            "candidate_score": candidate["score"],
-            "delta_pp": candidate["delta_pp"],
-            "metric_name": row["metric_name"],
-        })
-    return {"items": items}
+    return {"items": [service.preview_batch_comparison(user, pair.model_dump()) for pair in body.pairs]}
+
+
+@router.post("/compare/history", dependencies=[Depends(enforce_csrf)])
+def evaluation_history(
+    body: HistoryComparisons,
+    request: Request,
+    user: AuthUser = Depends(get_current_user),
+) -> JSONResponse:
+    response = request.app.state.ctx.compare.evaluation_history(
+        user, [item.model_dump() for item in body.items],
+    )
+    return JSONResponse(response, headers={"Cache-Control": "no-store"})
 
 
 @router.post("/compare/task-diff", dependencies=[Depends(enforce_csrf)])
