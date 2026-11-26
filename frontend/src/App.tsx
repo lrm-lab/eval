@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { lazy, Suspense, useEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { apiFetch, getCookieValue } from './lib/api';
@@ -8,28 +8,29 @@ import { ReducedMotionProvider } from './components/motion/primitives';
 import { AppShell } from './components/layout/AppShell';
 import { LoginPage } from './pages/LoginPage';
 import { HomePage } from './pages/HomePage';
-import { LeaderboardPage } from './pages/LeaderboardPage';
-import { ModelsPage } from './pages/ModelsPage';
-import { HarnessesPage } from './pages/HarnessesPage';
-import { BenchmarksPage } from './pages/BenchmarksPage';
-import { RecommendPage } from './pages/RecommendPage';
-import { DatasetsPage } from './pages/DatasetsPage';
-import { TaskDetailPage } from './pages/TaskDetailPage';
-import { ReportsPage } from './pages/ReportsPage';
-import { BatchDetailPage } from './pages/BatchDetailPage';
-import { TrialInspectorPage } from './pages/TrialInspectorPage';
-import { ComparePage } from './pages/ComparePage';
-import { DiagnosticsPage } from './pages/DiagnosticsPage';
-import { DirectLabPage } from './pages/DirectLabPage';
-import { ExecutionPage } from './pages/ExecutionPage';
-import { SyntheticStudioPage } from './pages/SyntheticStudioPage';
-import { SelectionBoardPage } from './pages/SelectionBoardPage';
-import { TrainingOpdPage } from './pages/TrainingOpdPage';
-import { ToolkitVerifyPage } from './pages/ToolkitVerifyPage';
-import { ToolkitParamsPage } from './pages/ToolkitParamsPage';
-import { ManualsPage } from './pages/ManualsPage';
-import { MethodologyPage } from './pages/MethodologyPage';
-import { AdminHealthPage } from './pages/AdminHealthPage';
+
+const LeaderboardPage = lazy(() => import('./pages/LeaderboardPage').then((module) => ({ default: module.LeaderboardPage })));
+const ModelsPage = lazy(() => import('./pages/ModelsPage').then((module) => ({ default: module.ModelsPage })));
+const HarnessesPage = lazy(() => import('./pages/HarnessesPage').then((module) => ({ default: module.HarnessesPage })));
+const BenchmarksPage = lazy(() => import('./pages/BenchmarksPage').then((module) => ({ default: module.BenchmarksPage })));
+const RecommendPage = lazy(() => import('./pages/RecommendPage').then((module) => ({ default: module.RecommendPage })));
+const DatasetsPage = lazy(() => import('./pages/DatasetsPage').then((module) => ({ default: module.DatasetsPage })));
+const TaskDetailPage = lazy(() => import('./pages/TaskDetailPage').then((module) => ({ default: module.TaskDetailPage })));
+const ReportsPage = lazy(() => import('./pages/ReportsPage').then((module) => ({ default: module.ReportsPage })));
+const BatchDetailPage = lazy(() => import('./pages/BatchDetailPage').then((module) => ({ default: module.BatchDetailPage })));
+const TrialInspectorPage = lazy(() => import('./pages/TrialInspectorPage').then((module) => ({ default: module.TrialInspectorPage })));
+const ComparePage = lazy(() => import('./pages/ComparePage').then((module) => ({ default: module.ComparePage })));
+const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage').then((module) => ({ default: module.DiagnosticsPage })));
+const DirectLabPage = lazy(() => import('./pages/DirectLabPage').then((module) => ({ default: module.DirectLabPage })));
+const ExecutionPage = lazy(() => import('./pages/ExecutionPage').then((module) => ({ default: module.ExecutionPage })));
+const SyntheticStudioPage = lazy(() => import('./pages/SyntheticStudioPage').then((module) => ({ default: module.SyntheticStudioPage })));
+const SelectionBoardPage = lazy(() => import('./pages/SelectionBoardPage').then((module) => ({ default: module.SelectionBoardPage })));
+const TrainingOpdPage = lazy(() => import('./pages/TrainingOpdPage').then((module) => ({ default: module.TrainingOpdPage })));
+const ToolkitVerifyPage = lazy(() => import('./pages/ToolkitVerifyPage').then((module) => ({ default: module.ToolkitVerifyPage })));
+const ToolkitParamsPage = lazy(() => import('./pages/ToolkitParamsPage').then((module) => ({ default: module.ToolkitParamsPage })));
+const ManualsPage = lazy(() => import('./pages/ManualsPage').then((module) => ({ default: module.ManualsPage })));
+const MethodologyPage = lazy(() => import('./pages/MethodologyPage').then((module) => ({ default: module.MethodologyPage })));
+const AdminHealthPage = lazy(() => import('./pages/AdminHealthPage').then((module) => ({ default: module.AdminHealthPage })));
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -84,7 +85,15 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
     return <Navigate to={`/login?returnTo=${returnTo}`} replace />;
   }
 
-  return <AppShell>{children}</AppShell>;
+  return (
+    <AppShell>
+      <Suspense fallback={
+        <p role="status" className="p-4 text-sm text-[var(--text-secondary)]">正在打开页面…</p>
+      }>
+        {children}
+      </Suspense>
+    </AppShell>
+  );
 }
 
 function ThemeAttrSync() {
