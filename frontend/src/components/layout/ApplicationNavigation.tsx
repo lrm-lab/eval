@@ -1,47 +1,30 @@
 import { useEffect, useRef, useState } from 'react';
-import { NavLink } from 'react-router-dom';
+import { Link, matchPath, useLocation } from 'react-router-dom';
 import {
-  Activity, BarChart3, Compass, Cpu, Database, FileCheck2, FileSpreadsheet, FlaskConical,
-  GitCompareArrows, Home, Layers, Menu, Play, Sliders, TrendingUp, Trophy, Wrench, X, Zap,
+  Activity, BarChart3, Compass, Cpu, Database, FileSpreadsheet,
+  GitCompareArrows, Home, Menu, Trophy, Wrench, X,
   type LucideIcon,
 } from 'lucide-react';
 
-const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: LucideIcon; end?: boolean }[] }[] = [
+const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: LucideIcon; related?: string }[] }[] = [
   {
     label: '浏览资源',
     items: [
-      { to: '/', label: '平台首页', icon: Home, end: true },
-      { to: '/models', label: '模型档案与趋势', icon: Cpu },
-      { to: '/harnesses', label: 'Harness 跨数据集表现', icon: Wrench },
-      { to: '/datasets', label: '数据集能力树', icon: Database },
-      { to: '/benchmarks', label: '基准档案与分组对比', icon: BarChart3 },
+      { to: '/', label: '首页', icon: Home },
+      { to: '/models', label: '模型档案', icon: Cpu },
+      { to: '/harnesses', label: 'Harness 档案', icon: Wrench },
+      { to: '/datasets', label: '数据集', icon: Database },
+      { to: '/benchmarks', label: '基准评测', icon: BarChart3 },
     ],
   },
   {
     label: '结果分析',
     items: [
-      { to: '/leaderboard', label: '模型与 Harness 排行', icon: Trophy },
-      { to: '/eval/compare', label: '自由对比与同题证据', icon: GitCompareArrows },
-      { to: '/eval/reports', label: '评测报告与批次', icon: FileSpreadsheet },
-      { to: '/eval/diagnostics', label: '失败与差异诊断', icon: Activity },
-      { to: '/recommend', label: '约束选型推荐', icon: Compass },
-    ],
-  },
-  {
-    label: '执行与校验',
-    items: [
-      { to: '/eval/execution', label: '受控评测执行', icon: Play },
-      { to: '/eval/direct-lab', label: 'Direct 原生验证台', icon: Zap },
-      { to: '/toolkit/verify', label: '离线校验与算分', icon: FileCheck2 },
-      { to: '/toolkit/params', label: '运行参数对照台账', icon: Sliders },
-    ],
-  },
-  {
-    label: '合成与训练',
-    items: [
-      { to: '/synth/datasets', label: '合成题库工坊', icon: FlaskConical },
-      { to: '/synth/selection', label: 'RL/SFT 四通道选题', icon: Layers },
-      { to: '/training/opd', label: '训练与 OPD 监控', icon: TrendingUp },
+      { to: '/leaderboard', label: '评测主榜', icon: Trophy },
+      { to: '/eval/compare', label: '自由对比', icon: GitCompareArrows, related: '/compare' },
+      { to: '/eval/reports', label: '评测报告', icon: FileSpreadsheet, related: '/eval/batches' },
+      { to: '/eval/diagnostics', label: '失败诊断', icon: Activity },
+      { to: '/recommend', label: '选型推荐', icon: Compass },
     ],
   },
 ];
@@ -50,39 +33,51 @@ export function ApplicationNavigation({ collapsed = false, onNavigate }: {
   collapsed?: boolean;
   onNavigate?: () => void;
 }) {
+  const { pathname } = useLocation();
+
   return (
-    <nav aria-label="应用导航" className="space-y-2 px-2.5 py-3">
+    <nav aria-label="应用导航" className="space-y-3 px-2.5 py-3">
       {NAV_GROUPS.map((group) => (
         <div key={group.label} role="group" aria-label={group.label}
-          className="border-t border-[var(--border-subtle)] pt-2 first:border-t-0 first:pt-0"
+          className="border-t border-[var(--border-subtle)] pt-3 first:border-t-0 first:pt-0"
         >
           {!collapsed && (
-            <p aria-hidden="true" className="mb-1 px-2.5 text-[11px] leading-5 font-semibold tracking-wider text-[var(--text-secondary)]">
+            <p aria-hidden="true" className="mb-1.5 px-2 text-[11px] leading-5 font-medium tracking-wide text-[var(--text-secondary)]">
               {group.label}
             </p>
           )}
-          <ul className="space-y-0.5">
-            {group.items.map(({ icon: Icon, ...item }) => (
-              <li key={item.to}>
-                <NavLink
-                  to={item.to}
-                  end={item.end}
-                  onClick={onNavigate}
-                  aria-label={collapsed ? item.label : undefined}
-                  title={collapsed ? item.label : undefined}
-                  className={({ isActive }) => [
-                    'group relative flex h-10 items-center rounded-lg border text-[13px] no-underline transition-colors motion-reduce:transition-none md:h-8',
-                    collapsed ? 'justify-center' : 'gap-2.5 px-2.5',
-                    isActive
-                      ? 'border-[var(--brand-primary)]/25 bg-[var(--brand-tint)] font-semibold text-[var(--text-primary)] before:absolute before:inset-y-2 before:-left-px before:w-0.5 before:rounded-full before:bg-[var(--brand-primary)]'
-                      : 'border-transparent font-medium text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]',
-                  ].join(' ')}
-                >
-                  <Icon aria-hidden="true" className="size-4 shrink-0 group-aria-[current=page]:text-[var(--brand-primary)]" />
-                  {!collapsed && <span className="truncate">{item.label}</span>}
-                </NavLink>
-              </li>
-            ))}
+          <ul className="space-y-1">
+            {group.items.map(({ icon: Icon, to, label, related }) => {
+              const exact = matchPath(to, pathname);
+              const active = exact || (to !== '/' && matchPath({ path: to, end: false }, pathname))
+                || (related && matchPath({ path: related, end: false }, pathname));
+              return (
+                <li key={to}>
+                  <Link
+                    to={to}
+                    onClick={onNavigate}
+                    aria-label={collapsed ? label : undefined}
+                    aria-current={exact ? 'page' : active ? 'location' : undefined}
+                    title={collapsed ? label : undefined}
+                    className={[
+                      'group relative flex min-h-11 items-center rounded-lg border py-1 text-[13px] leading-5 no-underline transition-colors motion-reduce:transition-none md:min-h-10',
+                      collapsed ? 'justify-center' : 'gap-2.5 px-2',
+                      active
+                        ? 'border-[var(--brand-primary)]/30 bg-[var(--brand-tint)] font-semibold text-[var(--text-primary)] before:absolute before:inset-y-2.5 before:-left-px before:w-[3px] before:rounded-full before:bg-[var(--brand-primary)]'
+                        : 'border-transparent font-medium text-[var(--text-secondary)] hover:border-[var(--border-subtle)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)]',
+                    ].join(' ')}
+                  >
+                    <span className={[
+                      'grid size-7 shrink-0 place-items-center rounded-md',
+                      active ? 'bg-[var(--brand-primary)]/15 text-[var(--brand-primary)]' : 'bg-[var(--bg-elevated)]',
+                    ].join(' ')}>
+                      <Icon aria-hidden="true" className="size-4" />
+                    </span>
+                    {!collapsed && <span className="min-w-0">{label}</span>}
+                  </Link>
+                </li>
+              );
+            })}
           </ul>
         </div>
       ))}

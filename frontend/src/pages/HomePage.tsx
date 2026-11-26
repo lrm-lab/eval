@@ -1,11 +1,9 @@
-import { ArrowRight, GitCompareArrows, Play, ShieldCheck, Trophy } from 'lucide-react';
+import { ArrowRight, ShieldCheck } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import { PageTransition } from '../components/motion/primitives';
 import { HomeEvaluationHeatmap, useHomeEvaluationMap } from '../components/ui/HomeEvaluationHeatmap';
 import { fmtDateShort } from '../lib/format';
 import type { EvaluationMap, MapBatch } from '../lib/evaluationMap';
-
-const navigationLink = 'lrm-press inline-flex min-h-9 shrink-0 items-center justify-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-xs font-semibold text-[var(--text-primary)] no-underline hover:bg-[var(--bg-elevated)] sm:px-3 sm:text-sm';
 
 const statusLabels: Record<string, string> = {
   running: '运行中', queued: '排队中', pending: '待开始', created: '已创建',
@@ -37,16 +35,7 @@ export function HomePage() {
   return (
     <PageTransition>
       <div className="space-y-3 px-2.5 pt-2 pb-4 sm:space-y-4 sm:px-4 sm:pt-3">
-        <HomeEvaluationHeatmap catalogue={catalogue} actions={
-          <nav aria-label="首页常用操作" className="grid w-full grid-cols-3 gap-1.5 sm:flex sm:w-auto">
-            <Link to="/eval/execution"
-              className="lrm-press inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-[color-mix(in_srgb,var(--brand-primary),black_24%)] px-2.5 py-1.5 text-xs font-semibold text-white no-underline hover:bg-[color-mix(in_srgb,var(--brand-primary),black_18%)] sm:px-3 sm:text-sm">
-              <Play className="size-3.5" aria-hidden /> 运行评测
-            </Link>
-            <Link to="/leaderboard" className={navigationLink}><Trophy className="size-3.5" aria-hidden /> 查看主榜</Link>
-            <Link to="/eval/compare" className={navigationLink}><GitCompareArrows className="size-3.5" aria-hidden /> 自由对比</Link>
-          </nav>
-        } />
+        <HomeEvaluationHeatmap catalogue={catalogue} />
 
         <section aria-labelledby="recent-runs-title" className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)]">
           <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2.5 sm:px-4">

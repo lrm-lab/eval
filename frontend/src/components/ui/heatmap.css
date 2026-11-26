@@ -1,5 +1,5 @@
 .evaluation-heatmap {
-  --heatmap-canvas-height: max(400px, calc(100dvh - 13.5rem));
+  --heatmap-canvas-height: max(400px, calc(100dvh - 8.25rem));
   --heatmap-rise-color: var(--sem-err-fg);
   --heatmap-fall-color: var(--sem-pass-fg);
   --heatmap-rise-low: #ba9ba4;
@@ -13,12 +13,6 @@
   --heatmap-rise-high: #b82f49;
   --heatmap-fall-low: #1c3028;
   --heatmap-fall-high: #16794c;
-}
-
-.heatmap-header {
-  background:
-    radial-gradient(ellipse at 10% 5%, var(--hero-glow-1), transparent 55%),
-    var(--bg-surface);
 }
 
 .heatmap-help-panel {
@@ -51,11 +45,6 @@
   overflow: auto;
   background: var(--bg-surface);
   --heatmap-canvas-height: max(360px, calc(100dvh - 8rem));
-}
-
-.evaluation-heatmap:fullscreen .heatmap-navigation,
-.evaluation-heatmap[data-fullscreen-fallback='true'] .heatmap-navigation {
-  display: none;
 }
 
 .evaluation-heatmap[data-fullscreen-fallback='true'] {
@@ -159,13 +148,15 @@
   background: rgb(0 0 0 / 45%);
 }
 
+@media (min-width: 768px) and (max-width: 1023px) {
+  .evaluation-heatmap {
+    --heatmap-canvas-height: max(400px, calc(100dvh - 10rem));
+  }
+}
+
 @media (max-width: 767px) {
   .evaluation-heatmap {
-    --heatmap-canvas-height: clamp(340px, 56dvh, 550px);
-  }
-
-  .evaluation-heatmap .heatmap-fullscreen-button {
-    display: none;
+    --heatmap-canvas-height: max(340px, calc(100dvh - 11rem));
   }
 }
 

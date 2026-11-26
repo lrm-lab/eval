@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom';
 import { AnimatePresence, m } from 'motion/react';
 import { ArrowRight, BookOpen, Database, Layers, Search, X } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import { archivedToolLabel } from '../../lib/archivedTools';
 import { useAppStore } from '../../lib/store';
 import { EASE_OUT_EXPO } from '../motion/primitives';
 
@@ -57,7 +58,7 @@ export function CommandPalette() {
       setLoading(true);
       try {
         const res = await apiFetch<{ items: SearchItem[] }>(`/api/v1/search?q=${encodeURIComponent(q.trim())}&limit=20`);
-        setResults(res.items.length > 0 ? res.items : []);
+        setResults(res.items.filter((item) => item.entity_type !== 'page' || !archivedToolLabel(item.entity_id)));
         setActiveIdx(0);
       } catch {
         setResults([]);
