@@ -4,7 +4,7 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, Request
 
-from app.api.deps import enforce_csrf, get_current_user, require_researcher
+from app.api.deps import enforce_csrf, require_researcher
 from app.security.auth import AuthUser
 
 router = APIRouter(prefix="/api/v1/direct-lab", tags=["direct-lab"])
@@ -13,7 +13,7 @@ router = APIRouter(prefix="/api/v1/direct-lab", tags=["direct-lab"])
 @router.get("/capabilities")
 def direct_lab_capabilities(
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.direct_lab.get_capabilities(user)
 
@@ -21,7 +21,7 @@ def direct_lab_capabilities(
 @router.get("/suites")
 def direct_lab_suites(
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     caps = request.app.state.ctx.direct_lab.get_capabilities(user)
     return {
@@ -34,7 +34,7 @@ def direct_lab_suites(
 @router.get("/scorers")
 def direct_lab_scorers(
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     caps = request.app.state.ctx.direct_lab.get_capabilities(user)
     return {"items": caps.get("scorers") or []}
@@ -72,7 +72,7 @@ def direct_lab_create_run(
 @router.get("/runs")
 def direct_lab_list_runs(
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.direct_lab.list_runs(user)
 
@@ -81,7 +81,7 @@ def direct_lab_list_runs(
 def direct_lab_get_run(
     run_id: str,
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.direct_lab.get_run_detail(user, run_id)
 
@@ -101,7 +101,7 @@ def direct_lab_delete_run(
 def direct_lab_compare_runs(
     payload: dict[str, Any],
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.direct_lab.compare_runs(
         user,
@@ -115,6 +115,6 @@ def direct_lab_diff_runs(
     run_id: str,
     other_id: str,
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.direct_lab.compare_runs(user, run_id, other_id)

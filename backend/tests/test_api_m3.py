@@ -276,7 +276,7 @@ def _p95_ms(samples_ms: list[float]) -> float:
     return ordered[idx]
 
 
-def test_viewer_can_run_and_manage_owned_evaluations(tmp_path: Path, isolated_settings: Settings) -> None:
+def test_researcher_manages_jobs_and_downgraded_viewer_can_read_own_job(tmp_path: Path, isolated_settings: Settings) -> None:
     gateway_key = "sk-test-isolated-gateway-key-0001"
     gateway_waiting = threading.Event()
     release_gateway = threading.Event()
@@ -302,22 +302,23 @@ def test_viewer_can_run_and_manage_owned_evaluations(tmp_path: Path, isolated_se
             app = create_app(isolated_settings, run_startup_scan=False)
             ctx = app.state.ctx
             owner = create_user(
-                ctx.db, username="viewer_owner", password="ViewerOwner!2026", role="viewer",
+                ctx.db, username="job_owner", password="JobOwner!2026", role="researcher",
                 projects=["default", "team_eval"],
             )
             private_project = personal_project_id(owner)
-            create_user(
-                ctx.db, username="viewer_peer", password="ViewerPeer!2026", role="viewer",
+            peer_id = create_user(
+                ctx.db, username="job_peer", password="JobPeer!2026", role="researcher",
                 projects=["default", "team_eval", private_project],
             )
             client = TestClient(app)
             peer = TestClient(app)
-            headers = {"X-CSRF-Token": login_client(client, "viewer_owner", "ViewerOwner!2026")}
-            peer_headers = {"X-CSRF-Token": login_client(peer, "viewer_peer", "ViewerPeer!2026")}
+            headers = {"X-CSRF-Token": login_client(client, "job_owner", "JobOwner!2026")}
+            peer_headers = {"X-CSRF-Token": login_client(peer, "job_peer", "JobPeer!2026")}
             prefix = "/api/v1/execution"
             spec = {
                 "kind": "direct", "suite_id": "direct-smoke-v1", "selection_mode": "tasks",
                 "tasks": ["smoke-arith-001"], "batch_name": "member-personal-evaluation",
+                "project_id": private_project,
             }
             caps = client.get(f"{prefix}/capabilities")
             assert caps.status_code == 200
@@ -345,10 +346,6 @@ def test_viewer_can_run_and_manage_owned_evaluations(tmp_path: Path, isolated_se
                 inline_secret = client.post(url, headers=headers, json={**spec, "api_key": gateway_key})
                 assert inline_secret.status_code == 422
                 assert gateway_key not in inline_secret.text
-                shared_publish = client.post(url, headers=headers, json={**spec, "publish_to_harbor_runs": True})
-                assert shared_publish.status_code == 403
-                webhook = client.post(url, headers=headers, json={**spec, "notify": {"webhook_profile_id": "ops-alert"}})
-                assert webhook.status_code == 403
 
             anonymous = TestClient(app, cookies=dict(client.cookies))
             anonymous.cookies.delete(SESSION_COOKIE_NAME)
@@ -362,10 +359,19 @@ def test_viewer_can_run_and_manage_owned_evaluations(tmp_path: Path, isolated_se
             assert submitted.status_code == 202, submitted.text
             assert gateway_key not in submitted.text and gateway.base_url not in submitted.text
             job_id = submitted.json()["job_id"]
+            with ctx.db.transaction() as conn:
+                conn.execute("UPDATE users SET role = 'viewer' WHERE user_id IN (?, ?)", (owner, peer_id))
+
             detail = _wait_job_terminal(client, job_id)
             assert detail["status"] == "finished"
             assert (detail["project_id"], detail["owner_id"]) == (private_project, owner)
             assert detail["shared_snapshot"]["reconciled"]
+            assert [job["job_id"] for job in client.get(f"{prefix}/jobs").json()["items"]] == [job_id]
+            assert client.get(f"{prefix}/notifications").status_code == 200
+            for action in ("cancel", "resume"):
+                denied = client.post(f"{prefix}/jobs/{job_id}/{action}", headers=headers, json={})
+                assert denied.status_code == 403
+                assert denied.json()["error"]["detail"]["required_role"] == "researcher"
             assert detail["live_channel"]["trials"][0]["reward"] == 1.0
             assert gateway_key not in json.dumps(detail)
             assert (isolated_settings.runner_work_dir / job_id).stat().st_mode & 0o777 == 0o700
@@ -377,7 +383,16 @@ def test_viewer_can_run_and_manage_owned_evaluations(tmp_path: Path, isolated_se
             assert peer.get(f"{prefix}/jobs/{job_id}/stream?once=true").status_code == 403
             assert not peer.get(f"{prefix}/jobs").json()["items"]
             trial_id = detail["live_channel"]["trials"][0]["trial_id"]
-            assert client.get(f"{prefix}/jobs/{job_id}/evidence/{trial_id}").status_code == 403
+            evidence_url = f"{prefix}/jobs/{job_id}/evidence/{trial_id}"
+            assert client.get(evidence_url).status_code == 403
+            with ctx.db.transaction() as conn:
+                conn.execute("UPDATE users SET scopes_json = ? WHERE user_id = ?", ('["direct_vlm_qa:read"]', owner))
+            evidence = client.get(evidence_url)
+            assert evidence.status_code == 200, evidence.text
+            assert evidence.json()["evidence"]["response"] == "4"
+
+            with ctx.db.transaction() as conn:
+                conn.execute("UPDATE users SET role = 'researcher' WHERE user_id = ?", (owner,))
 
             team_job = client.post(f"{prefix}/jobs", headers=headers, json={
                 **spec, "project_id": "team_eval", "batch_name": "member-team-evaluation",
@@ -705,7 +720,7 @@ def test_execution_capabilities_limits_discovery_to_visible_selected_suite(m0_ap
     endpoint = "/api/v1/execution/capabilities"
     client = TestClient(m0_app)
     assert client.get(endpoint, params={"discover_tasks": "false"}).status_code == 401
-    login_client(client, "viewer_noscope", "StrongViewerPassword!3")
+    login_client(client, "researcher_b", "StrongResearcherPass!2")
 
     def get_suites(**params):
         response = client.get(endpoint, params=params)
