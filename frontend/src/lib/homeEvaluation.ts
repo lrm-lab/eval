@@ -9,6 +9,7 @@ export interface EvaluationChoice {
   label: string;
   search?: string;
   count?: number;
+  track?: string;
 }
 
 export type EvaluationContext = GroupedComparison['contexts'][number];

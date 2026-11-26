@@ -13,6 +13,7 @@ import {
 } from '../../lib/homeEvaluation';
 import type { GainGuardrailVerdict } from '../../types/api';
 import { benchmarkGroupLink } from './DatasetPerformancePanel';
+import { HomeDatasetSwitcher } from './HomeDatasetSwitcher';
 import { StateNoticeCard, TableSkeleton } from './Skeletons';
 
 const icons = { dataset: Database, model: Cpu, harness: Wrench };
@@ -22,6 +23,7 @@ const selectClass = 'w-full min-w-0 rounded-lg border border-[var(--border-subtl
 interface DirectoryItem {
   benchmark_slug?: string;
   display_name?: string;
+  track_slug?: string;
   capability?: string;
   model_canonical?: string;
   model_routes?: string[];
@@ -76,6 +78,7 @@ function directoryChoices(items: DirectoryItem[], axis: EvaluationAxis): Evaluat
     choices.set(key, {
       key, label, search: [existing?.search, search].filter(Boolean).join(' '),
       count: (existing?.count ?? 0) + (item.batch_count ?? 0) + (item.legacy_bench_count ?? 0),
+      track: item.track_slug,
     });
   }
   return [...choices.values()].sort((a, b) => (b.count ?? 0) - (a.count ?? 0) || a.label.localeCompare(b.label));
@@ -367,6 +370,7 @@ export function HomeEvaluationExplorer({ trend }: { trend?: ModelTrend }) {
       split: context.split, metric_name: context.metric_name, source: 'legacy_20261120_csv',
     }))) : [];
   const visibleHistory = historical.filter((row) => !lockedHarness &&
+    (axis !== 'dataset' || !filters.some((item) => item.id === 'model' && item.selected)) &&
     filters.every((item) => item.id !== 'dataset' || !item.selected || item.selected === row.benchmark_slug));
   const groupLink = new URLSearchParams({ tab: 'groups', group_context: context?.context_id ?? '' });
   const anchor = filters.find((item) => item.selected);
@@ -385,6 +389,8 @@ export function HomeEvaluationExplorer({ trend }: { trend?: ModelTrend }) {
     return [{ pair, result }];
   }).slice(0, 2);
   const activeFilter = filters.some((item) => item.selected);
+  const unavailableFilters = axis === 'dataset'
+    ? filters.filter((item) => item.selected && !item.choices.some((choice) => choice.key === item.selected)) : [];
   const showVersionFilter = axis === 'dataset' && sortedContexts.length > 1;
   const hasFilters = filters.some((item) => item.choices.length) || showVersionFilter;
   const hasSubjectError = profile.error instanceof ApiError && profile.error.status === 403;
@@ -429,9 +435,12 @@ export function HomeEvaluationExplorer({ trend }: { trend?: ModelTrend }) {
       <div role="tabpanel" id={panelId} aria-labelledby={panelId + '-' + axis} className="space-y-4">
         <div className="space-y-2 rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-3">
           <div className="relative flex flex-wrap items-center justify-between gap-2">
-            <span className="min-w-0 [overflow-wrap:anywhere] text-sm font-bold text-[var(--text-primary)]">{displaySubject || current.label}</span>
+            {axis === 'dataset' ? <HomeDatasetSwitcher choices={choices} subject={subject} label={displaySubject}
+              pending={catalog.isPending} failed={catalog.isError} onRetry={catalog.refetch}
+              onChange={(key) => update({ view: 'dataset', subject: key, context: '' })} />
+              : <span className="min-w-0 [overflow-wrap:anywhere] text-sm font-bold text-[var(--text-primary)]">{displaySubject || current.label}</span>}
             <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
-              <details ref={chooser} className="group/search sm:relative"
+              {axis !== 'dataset' && <details ref={chooser} className="group/search sm:relative"
                 onToggle={(event) => { if (event.currentTarget.open) searchInput.current?.focus(); }}
                 onKeyDown={(event) => {
                   if (event.key === 'Escape' && chooser.current?.open) {
@@ -467,7 +476,7 @@ export function HomeEvaluationExplorer({ trend }: { trend?: ModelTrend }) {
                     </ul>
                   ) : <p className="m-0 text-[var(--text-secondary)]">没有匹配的{current.label}。</p>}
                 </div>
-              </details>
+              </details>}
               {subject && <Link to={chartLink} className={linkClass}>
                 {axis === 'dataset' ? '打开分组对比' : '打开' + current.label + '档案'}
                 <ArrowRight aria-hidden="true" className="size-3.5 shrink-0" />
@@ -538,7 +547,10 @@ export function HomeEvaluationExplorer({ trend }: { trend?: ModelTrend }) {
             {plotRows.length ? <BatchChart axis={axis} rows={plotRows} />
               : visibleHistory.length ? <HistoricalChart rows={visibleHistory.slice(0, 4)} subject={subject} />
                 : <StateNoticeCard kind="empty" title={activeFilter ? '当前筛选暂无实测记录' : '暂无可读取的实测批次'}
-                  action={subject ? <Link to={chartLink} className={linkClass}>查看档案与接入状态</Link> : undefined} />}
+                  description={unavailableFilters.length ? '当前数据集没有符合已锁定' + unavailableFilters.map((item) => item.label).join('、') + '的实测记录。' : undefined}
+                  action={unavailableFilters.length ? <button type="button" className={linkClass}
+                    onClick={() => update(Object.fromEntries(unavailableFilters.map((item) => ['lock_' + item.id, ''])))}>清除无匹配的锁定</button>
+                    : subject ? <Link to={chartLink} className={linkClass}>查看档案与接入状态</Link> : undefined} />}
             {shown.length > plotRows.length && <Link to={chartLink} className={linkClass + ' text-xs'}>
               查看全部档案结果 <ArrowRight aria-hidden="true" className="size-3.5" />
             </Link>}
