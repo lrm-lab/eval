@@ -125,7 +125,8 @@ export function App() {
       <ReducedMotionProvider>
         <BrowserRouter>
           <Routes>
-            <Route path="/login" element={<LoginPage />} />
+            <Route path="/login" element={<LoginPage key="login" />} />
+            <Route path="/register" element={<LoginPage key="register" mode="register" />} />
             <Route
               path="/*"
               element={
