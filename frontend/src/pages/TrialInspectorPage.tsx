@@ -96,8 +96,8 @@ const EMPTY_NOTICES: Record<EvidenceTab, { title: string; label: string; to: str
   },
   training: {
     title: '暂无训练轨迹',
-    label: '查看训练轨迹采集条件',
-    to: '/training/opd',
+    label: '查看评测报告',
+    to: '/eval/reports',
   },
 };
 

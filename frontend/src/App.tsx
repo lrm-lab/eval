@@ -8,6 +8,7 @@ import type { AuthUser } from './types/api';
 import { preloadEChartCanvas } from './components/charts/EChartBox';
 import { ReducedMotionProvider } from './components/motion/primitives';
 import { AppShell } from './components/layout/AppShell';
+import { ArchivedToolRoute } from './components/layout/ArchivedToolRoute';
 import { LazyContent, LoadingContent } from './components/ui/LazyContent';
 import { LoginPage } from './pages/LoginPage';
 import { HomePage } from './pages/HomePage';
@@ -152,12 +153,12 @@ export function App() {
                     <Route path="/compare/1v1/:a/vs/:b" element={<ComparePage />} />
                     <Route path="/eval/diagnostics" element={<DiagnosticsRoute />} />
                     <Route path="/eval/execution" element={<ExecutionPage />} />
-                    <Route path="/eval/direct-lab" element={<DirectLabPage />} />
-                    <Route path="/synth/datasets" element={<SyntheticStudioPage />} />
-                    <Route path="/synth/selection" element={<SelectionBoardPage />} />
-                    <Route path="/training/opd" element={<TrainingOpdPage />} />
-                    <Route path="/toolkit/verify" element={<ToolkitVerifyPage />} />
-                    <Route path="/toolkit/params" element={<ToolkitParamsPage />} />
+                    <Route path="/eval/direct-lab" element={<ArchivedToolRoute><DirectLabPage /></ArchivedToolRoute>} />
+                    <Route path="/synth/datasets" element={<ArchivedToolRoute><SyntheticStudioPage /></ArchivedToolRoute>} />
+                    <Route path="/synth/selection" element={<ArchivedToolRoute><SelectionBoardPage /></ArchivedToolRoute>} />
+                    <Route path="/training/opd" element={<ArchivedToolRoute><TrainingOpdPage /></ArchivedToolRoute>} />
+                    <Route path="/toolkit/verify" element={<ArchivedToolRoute><ToolkitVerifyPage /></ArchivedToolRoute>} />
+                    <Route path="/toolkit/params" element={<ArchivedToolRoute><ToolkitParamsPage /></ArchivedToolRoute>} />
                     <Route path="/toolkit/manuals" element={<ManualsPage />} />
                     <Route path="/toolkit/methodology" element={<MethodologyPage />} />
                     <Route path="/admin/health" element={<AdminHealthPage />} />

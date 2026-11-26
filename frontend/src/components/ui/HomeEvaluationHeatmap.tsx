@@ -1,6 +1,6 @@
-import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Info, LayoutGrid, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } from 'lucide-react';
+import { ArrowLeft, Info, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { apiFetch } from '../../lib/api';
 import { useDismissibleDetails } from '../../lib/dismissibleLayer';
@@ -16,6 +16,7 @@ import { StateNoticeCard } from './Skeletons';
 import './heatmap.css';
 
 const action = 'inline-flex min-h-9 min-w-0 cursor-pointer items-center justify-center gap-1.5 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2.5 py-1.5 text-sm font-semibold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] focus-visible:outline-2 focus-visible:outline-[var(--brand-primary)]';
+const toolbarAction = `${action} max-sm:min-h-11 max-sm:min-w-11`;
 const dialogClass = 'rounded-t-2xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--text-primary)] shadow-xl';
 const phoneQuery = '(max-width: 767px)';
 const subscribeToPhone = (callback: () => void) => {
@@ -29,7 +30,7 @@ function ChangeLegend() {
   const help = useDismissibleDetails();
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-      <ul aria-label="涨跌图例" className="m-0 flex list-none flex-wrap items-center gap-x-3 gap-y-1 p-0 text-xs font-semibold">
+      <ul aria-label="涨跌图例" className="m-0 flex list-none flex-wrap items-center gap-x-2 gap-y-1 p-0 text-xs font-semibold sm:gap-x-3">
         <li className="heatmap-change inline-flex items-center gap-1.5" data-tone="up">
           <span className="heatmap-scale" aria-hidden />↑ 上升
         </li>
@@ -40,7 +41,7 @@ function ChangeLegend() {
         <li className="text-[var(--text-secondary)]">— 暂无分差</li>
       </ul>
       <details className="heatmap-help" {...help}>
-        <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1 rounded-md px-1.5 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] [&::-webkit-details-marker]:hidden">
+        <summary className="flex min-h-10 cursor-pointer list-none items-center gap-1 rounded-md px-1.5 text-xs font-semibold text-[var(--text-secondary)] sm:min-h-8 [&::-webkit-details-marker]:hidden hover:bg-[var(--bg-elevated)]">
           <Info className="size-3.5 shrink-0" aria-hidden /> 读图
         </summary>
         <div className="heatmap-help-panel grid gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 text-xs leading-relaxed text-[var(--text-secondary)] shadow-lg">
@@ -301,7 +302,7 @@ export function useHomeEvaluationMap() {
   });
 }
 
-export function HomeEvaluationHeatmap({ catalogue, actions }: { catalogue: ReturnType<typeof useHomeEvaluationMap>; actions: ReactNode }) {
+export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typeof useHomeEvaluationMap> }) {
   const [params, setParams] = useSearchParams();
   const filterLayer = useDismissibleDetails();
   const [axis, locks] = useMemo(() => {
@@ -461,8 +462,7 @@ export function HomeEvaluationHeatmap({ catalogue, actions }: { catalogue: Retur
   }
 
   const rectangles = layoutTreemap(shown, (sector) => zoom ? 1 : sector.registered_task_count ?? 0, bounds);
-  const cellIds = new Set(shown.flatMap((sector) => sector.cells.map((cell) => cell.id)));
-  const published = shown.reduce((sum, sector) => sum + sector.published_run_count, 0);
+  const fullscreenLabel = fullscreen || fallbackFullscreen ? '退出全屏' : '全屏看图';
 
   return (
     <section ref={section} aria-labelledby="heatmap-title" data-fullscreen-fallback={fallbackFullscreen || undefined}
@@ -478,73 +478,56 @@ export function HomeEvaluationHeatmap({ catalogue, actions }: { catalogue: Retur
         }
       }}
       className="evaluation-heatmap relative min-w-0 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)]">
-      <header className="heatmap-header rounded-t-xl">
-        <div className="heatmap-heading flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-3 py-3 sm:px-4">
-          <div className="flex min-w-0 items-center gap-3">
-            <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--brand-primary)]" aria-hidden>
-              <LayoutGrid className="size-5" />
-            </span>
-            <div className="min-w-0">
-              <h1 id="heatmap-title" className="m-0 text-xl leading-tight font-bold tracking-tight sm:text-2xl">评测态势</h1>
-              {catalogue.data && (
-                <p className="m-0 mt-1 text-xs tabular-nums text-[var(--text-secondary)]">
-                  <strong className="font-semibold text-[var(--text-primary)]">{shown.length}</strong> 个板块
-                  {' · '}<strong className="font-semibold text-[var(--text-primary)]">{cellIds.size}</strong> 个组合
-                  {' · '}<strong className="font-semibold text-[var(--text-primary)]">{published}</strong> 次发布
-                </p>
+      <header className="relative flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-0.5 rounded-t-xl border-b border-[var(--border-subtle)] bg-[var(--bg-surface)] px-2 py-1 sm:px-3 sm:py-1.5">
+        <h1 id="heatmap-title" className="sr-only">评测态势</h1>
+        <div className="flex max-w-full flex-wrap items-center gap-1">
+          <div onKeyDown={(event) => {
+            const index = mapAxes.findIndex(({ id }) => id === axis);
+            const direction = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0;
+            if (!direction && event.key !== 'Home' && event.key !== 'End') return;
+            const next = direction ? (index + direction + mapAxes.length) % mapAxes.length : event.key === 'Home' ? 0 : mapAxes.length - 1;
+            event.preventDefault();
+            event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
+            changeUrl({ view: mapAxes[next].id, sector: null, subject: null });
+          }}>
+            <SlidingTabs layoutId="home-heatmap-axis" value={axis} options={mapAxes.map((item) => ({ ...item }))}
+              className="max-sm:p-0.5 max-sm:[&_[role=tab]]:min-h-10"
+              onChange={(value) => changeUrl({ view: value, sector: null, subject: null })} size="sm" />
+          </div>
+          <button type="button" ref={searchButton} className={toolbarAction} aria-label="搜索评测组合" title="搜索评测组合"
+            aria-haspopup="dialog" onClick={() => openSearch()}>
+            <Search className="size-4 shrink-0" aria-hidden /> <span className="hidden sm:inline">搜索</span>
+          </button>
+          <button type="button" className={toolbarAction} aria-label={fullscreenLabel} title={fullscreenLabel}
+            onClick={() => { void toggleFullscreen(); }}>
+            {fullscreen || fallbackFullscreen ? <Minimize className="size-4" aria-hidden /> : <Maximize className="size-4" aria-hidden />}
+            <span className="hidden sm:inline">{fullscreenLabel}</span>
+          </button>
+          <details className="md:relative" {...filterLayer}>
+            <summary aria-label="筛选" title="筛选" className={`${toolbarAction} relative list-none [&::-webkit-details-marker]:hidden`}>
+              <SlidersHorizontal className="size-4 shrink-0" aria-hidden /> <span className="hidden sm:inline">筛选</span>
+              {filters.some(({ active }) => active) && (
+                <span className="size-1.5 shrink-0 rounded-full bg-[var(--brand-primary)] max-sm:absolute max-sm:top-1.5 max-sm:right-1.5" title="已筛选" />
               )}
+            </summary>
+            <div className="absolute top-auto right-2 z-20 mt-2 md:top-full md:right-0 grid w-[min(16rem,calc(100vw-2rem))] gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 shadow-lg">
+              {filters.map(({ id, label, options, active }) => (
+                <label key={id} className="grid min-w-0 grid-cols-[4.25rem_1fr] items-center text-xs font-semibold">
+                  <span>{label}</span>
+                  <select value={active?.id ?? ''}
+                    onChange={(event) => changeUrl({ [`lock_${id}`]: event.target.value, sector: null, subject: null, cell: null })}
+                    className="min-w-0 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] py-1.5 text-sm">
+                    <option value="">全部</option>
+                    {active && !options.some((group) => group.id === active.id) && <option value={active.id}>{active.label}</option>}
+                    {[...options].sort((a, b) => a.label.localeCompare(b.label))
+                      .map((group) => <option key={group.id} value={group.id}>{group.label}</option>)}
+                  </select>
+                </label>
+              ))}
             </div>
-          </div>
-          <div className="heatmap-navigation w-full sm:w-auto">{actions}</div>
+          </details>
         </div>
-        <div className="heatmap-toolbar relative flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-y border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-1.5 sm:px-4">
-          <div className="flex max-w-full flex-wrap items-center gap-1.5">
-            <div onKeyDown={(event) => {
-              const index = mapAxes.findIndex(({ id }) => id === axis);
-              const direction = event.key === 'ArrowLeft' ? -1 : event.key === 'ArrowRight' ? 1 : 0;
-              if (!direction && event.key !== 'Home' && event.key !== 'End') return;
-              const next = direction ? (index + direction + mapAxes.length) % mapAxes.length : event.key === 'Home' ? 0 : mapAxes.length - 1;
-              event.preventDefault();
-              event.currentTarget.querySelectorAll<HTMLButtonElement>('[role="tab"]')[next]?.focus();
-              changeUrl({ view: mapAxes[next].id, sector: null, subject: null });
-            }}>
-              <SlidingTabs layoutId="home-heatmap-axis" value={axis} options={mapAxes.map((item) => ({ ...item }))}
-                onChange={(value) => changeUrl({ view: value, sector: null, subject: null })} size="sm" />
-            </div>
-            <button type="button" ref={searchButton} className={action} aria-label="搜索评测组合" aria-haspopup="dialog" onClick={() => openSearch()}>
-              <Search className="size-4 shrink-0" aria-hidden /> 搜索
-            </button>
-            <button type="button" className={`${action} heatmap-fullscreen-button`}
-              onClick={() => { void toggleFullscreen(); }}>
-              {fullscreen || fallbackFullscreen ? <Minimize className="size-4" aria-hidden /> : <Maximize className="size-4" aria-hidden />}
-              {fullscreen || fallbackFullscreen ? '退出全屏' : '全屏看图'}
-            </button>
-            <details className="md:relative" {...filterLayer}>
-              <summary className={`${action} list-none [&::-webkit-details-marker]:hidden`}>
-                <SlidersHorizontal className="size-3.5 shrink-0" aria-hidden /> 筛选
-                {filters.some(({ active }) => active) && (
-                  <span className="size-1.5 shrink-0 rounded-full bg-[var(--brand-primary)]" title="已筛选" />
-                )}
-              </summary>
-              <div className="absolute top-auto right-2 z-20 mt-2 md:top-full md:right-0 grid w-[min(16rem,calc(100vw-2rem))] gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 shadow-lg">
-                {filters.map(({ id, label, options, active }) => (
-                  <label key={id} className="grid min-w-0 grid-cols-[4.25rem_1fr] items-center text-xs font-semibold">
-                    <span>{label}</span>
-                    <select value={active?.id ?? ''}
-                      onChange={(event) => changeUrl({ [`lock_${id}`]: event.target.value, sector: null, subject: null, cell: null })}
-                      className="min-w-0 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] py-1.5 text-sm">
-                      <option value="">全部</option>
-                      {active && !options.some((group) => group.id === active.id) && <option value={active.id}>{active.label}</option>}
-                      {[...options].sort((a, b) => a.label.localeCompare(b.label))
-                        .map((group) => <option key={group.id} value={group.id}>{group.label}</option>)}
-                    </select>
-                  </label>
-                ))}
-              </div>
-            </details>
-          </div>
-          <ChangeLegend />
-        </div>
+        <ChangeLegend />
       </header>
 
       {zoom && (

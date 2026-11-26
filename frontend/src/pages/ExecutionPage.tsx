@@ -28,9 +28,11 @@ import {
   Zap,
 } from 'lucide-react';
 import { ApiError, apiFetch } from '../lib/api';
+import { canMaintainArchivedTools } from '../lib/archivedTools';
 import { fmtDateShort, fmtDuration, fmtPct, runScopeLabel } from '../lib/format';
 import { useAppStore, type ToastMessage } from '../lib/store';
 import { AnimatedNumber, PageTransition } from '../components/motion/primitives';
+import { ArchivedToolNotice } from '../components/layout/ArchivedToolRoute';
 import { RowActionIcon } from '../components/ui/RowActionIcon';
 import { StateNoticeCard, TableSkeleton } from '../components/ui/Skeletons';
 
@@ -738,7 +740,7 @@ export function ExecutionPage() {
     const session = useAppStore.getState();
     if (session.user?.user_id === userId) session.pushToast(tone, text);
   }, [userId]);
-  const canStart = Boolean(user);
+  const canMaintain = canMaintainArchivedTools(user?.role);
 
   // ---------- Section 1: Test Configuration State ----------
   const [runnerChoice, setKind] = useState<RunnerKind | null>(null);
@@ -781,6 +783,7 @@ export function ExecutionPage() {
   // ---------- Queries ----------
   const capsQ = useQuery({
     queryKey: ['execution-capabilities', userId],
+    enabled: canMaintain,
     queryFn: ({ signal }) =>
       apiFetch<ExecutionCapabilitiesResp>('/api/v1/execution/capabilities?discover_tasks=false', { signal }),
   });
@@ -790,7 +793,7 @@ export function ExecutionPage() {
   const selectedRegistration = registeredSuites.find((suite) => suite.suite_id === suiteId);
   const suiteCapabilitiesQ = useQuery({
     queryKey: ['execution-suite-capabilities', userId, suiteId],
-    enabled: Boolean(selectedRegistration),
+    enabled: canMaintain && Boolean(selectedRegistration),
     queryFn: ({ signal }) =>
       apiFetch<ExecutionCapabilitiesResp>(`/api/v1/execution/capabilities?suite_id=${encodeURIComponent(suiteId)}`, { signal }),
   });
@@ -1446,8 +1449,6 @@ export function ExecutionPage() {
   const activeStatus: JobStatus | null =
     liveOverlay?.status ?? selectedJobDetail?.status ?? selectedJobFromList?.status ?? null;
   const activeKind: RunnerKind | null = selectedJobDetail?.kind ?? selectedJobFromList?.kind ?? null;
-  const activeOwnerId = selectedJobDetail?.owner_id ?? selectedJobFromList?.owner_id;
-  const canManageActive = Boolean(user && (user.role !== 'viewer' || activeOwnerId === user.user_id));
   const activeBatchName = selectedJobDetail?.batch_name ?? selectedJobFromList?.batch_name ?? '';
   const activeLastSeq = Math.max(
     liveOverlay?.lastSeqId ?? 0,
@@ -1484,30 +1485,27 @@ export function ExecutionPage() {
   const stdioTruncated = selectedJobDetail?.stdio_log_truncated;
 
   const canStopActive = Boolean(
-    canManageActive && selectedJobId && (activeStatus === 'queued' || activeStatus === 'running')
+    selectedJobId && (activeStatus === 'queued' || activeStatus === 'running')
   );
   const isResumableStatus = Boolean(activeStatus && RESUMABLE_STATUSES.has(activeStatus));
   const isHarborStandard = activeKind === 'harbor';
-  const canNativeResume = Boolean(canManageActive && selectedJobId && isHarborStandard && isResumableStatus);
-  const canDerivedResume = Boolean(canManageActive && selectedJobId && isResumableStatus);
+  const canNativeResume = Boolean(selectedJobId && isHarborStandard && isResumableStatus);
+  const canDerivedResume = Boolean(selectedJobId && isResumableStatus);
 
   const nativeResumeTooltip = !selectedJobId
     ? '请先选择执行作业'
-    : !canManageActive
-      ? '当前账号无权管理此作业'
-      : !isHarborStandard
-        ? `运行器 ${activeKind ?? 'unknown'} 原生不支持 --resume（调用将返回 409 RESUME_UNSUPPORTED），请使用「任务级派生续跑」`
-        : !isResumableStatus
-          ? `仅 paused_by_guard / interrupted / failed 状态允许原生 --resume（当前：${activeStatus ?? '—'}）`
-          : '锁定相同 harness_version 与私有 0700 --work 锁执行 Harbor 原生 --resume';
+    : !isHarborStandard
+      ? `运行器 ${activeKind ?? 'unknown'} 原生不支持 --resume（调用将返回 409 RESUME_UNSUPPORTED），请使用「任务级派生续跑」`
+      : !isResumableStatus
+        ? `仅 paused_by_guard / interrupted / failed 状态允许原生 --resume（当前：${activeStatus ?? '—'}）`
+        : '锁定相同 harness_version 与私有 0700 --work 锁执行 Harbor 原生 --resume';
 
   const isHarborFamily = kind === 'harbor' || kind === 'harbor_gateway';
   const notifications = notificationsQ.data?.items ?? [];
 
   return (
     <PageTransition className="max-w-7xl mx-auto px-5 py-6 space-y-5">
-      {/* Page Header */}
-      <div>
+      {canMaintain ? <div>
         <h1 className="m-0 flex items-center gap-2 text-xl font-bold text-[var(--text-primary)]">
           <Terminal aria-hidden="true" className="size-5 shrink-0 text-[var(--brand-primary)]" />
           <span>受控评测执行与实时监控 (Benchmark Execution)</span>
@@ -1529,7 +1527,13 @@ export function ExecutionPage() {
             查看作业历史
           </a>
         </div>
-      </div>
+      </div> : (
+        <ArchivedToolNotice title="受控评测执行">
+          <a href="#execution-job-history" className="inline-flex min-h-10 items-center text-sm font-semibold text-[var(--brand-primary)] hover:underline">
+            查看作业历史
+          </a>
+        </ArchivedToolNotice>
+      )}
 
       {/* In-App Notifications Banner */}
       {!dismissedNotifBanner && notifications.length > 0 && (
@@ -1580,7 +1584,7 @@ export function ExecutionPage() {
         </section>
       )}
 
-      <section
+      {canMaintain && <section
         aria-label="Test Configuration 评测配置卡"
         inert={!capsQ.isSuccess}
         className="grid items-start gap-4 text-xs inert:opacity-60 lg:grid-cols-[minmax(0,1fr)_minmax(16rem,0.43fr)]"
@@ -2198,15 +2202,10 @@ export function ExecutionPage() {
             </p>
             {environmentNotice && <p role="status" className="text-[11px] leading-4">运行环境状态已变化。请选择当前可运行的题库。</p>}
           </div>
-          {!canStart && (
-            <p className="flex items-start gap-1.5 text-[11px] text-[var(--text-secondary)]">
-              <Lock aria-hidden="true" className="mt-0.5 size-3 shrink-0" /> 请登录后预检或启动评测。
-            </p>
-          )}
           <div className="grid gap-2">
             <button
               type="button"
-              disabled={!canStart || submitMut.isPending || !activeRunnerAvailable || !executionScopeReady || (selectionMode === 'tasks' && parsedTasks.length === 0)}
+              disabled={submitMut.isPending || !activeRunnerAvailable || !executionScopeReady || (selectionMode === 'tasks' && parsedTasks.length === 0)}
               onClick={() => submitMut.mutate()}
               aria-label="启动隔离执行作业"
               className="lrm-press inline-flex min-h-10 cursor-pointer items-center justify-center gap-2 rounded-lg bg-[var(--brand-primary)] px-3 py-2 text-sm font-semibold text-white hover:bg-[var(--brand-hover)] disabled:cursor-not-allowed disabled:opacity-45"
@@ -2216,7 +2215,7 @@ export function ExecutionPage() {
             </button>
             <button
               type="button"
-              disabled={!canStart || planMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
+              disabled={planMut.isPending || !activeRunnerAvailable || (selectionMode === 'tasks' && parsedTasks.length === 0)}
               onClick={() => {
                 const preview = cliPreviewRef.current;
                 if (preview) {
@@ -2233,7 +2232,7 @@ export function ExecutionPage() {
             </button>
           </div>
         </aside>
-      </section>
+      </section>}
 
       {/* =====================================================================
           SECTION 2 — Test Progress 实时进度卡
@@ -2247,7 +2246,7 @@ export function ExecutionPage() {
         <div className="px-4 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-wrap items-center justify-between gap-2.5">
           <div className="flex flex-wrap items-center gap-2">
             <Activity className="w-4 h-4 text-[var(--brand-primary)]" />
-            <h2 className="m-0 text-sm font-bold text-[var(--text-primary)]">2. Test Progress 实时进度卡</h2>
+            <h2 className="m-0 text-sm font-bold text-[var(--text-primary)]">{canMaintain ? '2. Test Progress 实时进度卡' : '作业实时进度'}</h2>
 
             {/* Pill 1: Runner Live Trusted Event Stream */}
             <span
@@ -2314,7 +2313,9 @@ export function ExecutionPage() {
             <StateNoticeCard
               kind="empty"
               title="尚未选中监控作业"
-              description="可在上方配置并启动隔离执行作业，或在下方执行历史中点击任意作业查看实时事件流与脱敏日志。"
+              description={canMaintain
+                ? '可在上方配置并启动隔离执行作业，或从作业历史中查看实时事件流与脱敏日志。'
+                : '在作业历史中选择可见作业，查看实时事件流与脱敏日志。'}
             />
           </div>
         ) : (
@@ -2359,7 +2360,7 @@ export function ExecutionPage() {
               </div>
 
               {/* Action Controls: Stop (NO manual Pause!), Native --resume, Derived Task Subset Resume */}
-              <div className="flex flex-wrap items-center gap-2">
+              {canMaintain && <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
                   disabled={!canStopActive || cancelMut.isPending}
@@ -2406,7 +2407,7 @@ export function ExecutionPage() {
                   <Zap className="w-3.5 h-3.5" />
                   <span>任务级派生续跑</span>
                 </button>
-              </div>
+              </div>}
             </div>
 
             {/* Guard / Failure Reason Alert & Non-Harbor Native Resume Hint */}
@@ -2426,7 +2427,7 @@ export function ExecutionPage() {
               </div>
             )}
 
-            {activeKind && !isHarborStandard && (
+            {canMaintain && activeKind && !isHarborStandard && (
               <div className="text-[11px] text-[var(--text-muted)] flex items-center gap-1.5">
                 <Info className="w-3.5 h-3.5 shrink-0" />
                 <span>
@@ -2563,7 +2564,7 @@ export function ExecutionPage() {
         <div className="px-4 py-3 border-b border-[var(--border-subtle)] bg-[var(--bg-elevated)] flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex flex-wrap items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-[var(--brand-primary)]" />
-            <h2 className="m-0 text-sm font-bold text-[var(--text-primary)]">3. Test Result 实时回收表</h2>
+            <h2 className="m-0 text-sm font-bold text-[var(--text-primary)]">{canMaintain ? '3. Test Result 实时回收表' : '逐题作业结果'}</h2>
             <span className="rounded px-2 py-0.5 text-[10px] font-mono border border-[var(--border-subtle)] bg-[var(--bg-surface)] text-[var(--text-secondary)] tabular-nums">
               已回收 {liveTrialRows.length} 条 Trial
             </span>
@@ -2739,7 +2740,7 @@ export function ExecutionPage() {
             <StateNoticeCard
               kind="empty"
               title="尚无受控执行作业记录"
-              description="使用上方配置卡生成 --plan 预检并启动首个隔离执行作业。"
+              description={canMaintain ? '使用上方配置卡生成 --plan 预检并启动首个隔离执行作业。' : undefined}
             />
           </div>
         ) : (
