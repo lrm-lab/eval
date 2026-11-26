@@ -212,7 +212,8 @@
 
 .login-input input:focus,
 .login-theme:focus-visible,
-.login-submit:focus-visible {
+.login-submit:focus-visible,
+.login-alternate a:focus-visible {
   outline: 2px solid var(--login-focus);
   outline-offset: 2px;
 }
@@ -256,6 +257,34 @@
   color: var(--sem-err-fg);
   background: var(--sem-err-bg);
   font-size: 13px;
+}
+
+.login-hint,
+.login-alternate {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.login-alternate {
+  margin-block-start: 12px;
+  text-align: center;
+}
+
+.login-alternate a {
+  display: inline-flex;
+  min-height: 40px;
+  align-items: center;
+  margin-inline-start: 4px;
+  border-radius: 4px;
+  padding-inline: 4px;
+  color: var(--login-focus);
+  font-weight: 640;
+  text-underline-offset: 3px;
+}
+
+.login-alternate a:hover {
+  text-decoration: underline;
 }
 
 @media (prefers-reduced-motion: no-preference) {
