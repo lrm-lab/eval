@@ -2,12 +2,20 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 
 from app.api.deps import enforce_csrf, get_current_user
 from app.security.auth import AuthUser
 
 router = APIRouter(prefix="/api/v1", tags=["profiles"])
+
+
+@router.get("/home/evaluation-map")
+def get_evaluation_map(
+    request: Request, response: Response, user: AuthUser = Depends(get_current_user),
+) -> dict[str, Any]:
+    response.headers["Cache-Control"] = "private, no-store"
+    return request.app.state.ctx.profiles.get_evaluation_map(user)
 
 
 @router.get("/models")
