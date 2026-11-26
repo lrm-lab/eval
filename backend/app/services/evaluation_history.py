@@ -7,7 +7,13 @@ from sqlite3 import Connection
 from typing import Any
 
 from app.security.auth import AuthUser
-from app.security.authz import can_access_project, has_scope, is_holdout_dataset_or_batch, sql_project_filter
+from app.security.authz import (
+    can_access_project,
+    has_scope,
+    is_holdout_dataset_or_batch,
+    sql_project_filter,
+    sql_task_holdout_exclude_clause,
+)
 from app.services.evaluation_time import _recorded_instant, evaluation_recorded_at
 from app.services.profile_service import _comparison_identity, _recorded_batch_settings, _recorded_identity
 
@@ -179,6 +185,14 @@ def build_evaluation_history(
     batch_ids = sorted({item["batch_id"] for item in items})
     placeholders = ",".join("?" for _ in batch_ids)
     project_filter, params = sql_project_filter(user, "b.project_id")
+    public_task = sql_task_holdout_exclude_clause("b.dataset_release_id", "e.task_id")
+    episode_generation = "e.batch_id = b.batch_id AND e.generation_id = b.generation_id"
+    visible_trials = "" if can_holdout else f"""
+        AND (
+            NOT EXISTS (SELECT 1 FROM episodes e WHERE {episode_generation})
+            OR EXISTS (SELECT 1 FROM episodes e WHERE {episode_generation} AND {public_task})
+        )
+    """
     rows = conn.execute(
         f"""
         SELECT b.batch_id, b.generation_id, b.batch_name, b.benchmark_slug,
@@ -195,7 +209,7 @@ def build_evaluation_history(
         FROM batches b
         LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
         LEFT JOIN official_results o ON o.batch_id = b.batch_id
-        WHERE {project_filter} AND b.is_running_placeholder = 0
+        WHERE {project_filter} AND b.is_running_placeholder = 0 {visible_trials}
           AND (b.batch_id IN ({placeholders}) OR b.benchmark_slug IN (
               SELECT benchmark_slug FROM batches WHERE batch_id IN ({placeholders})
           ))
