@@ -1,5 +1,7 @@
 import { useId, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Database, Search, X } from 'lucide-react';
+import { useDismissibleDialog } from '../../lib/dismissibleDialog';
+
 interface DatasetChoice {
   key: string;
   label: string;
@@ -38,8 +40,7 @@ export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, 
   onChange: (key: string) => void;
 }) {
   const titleId = useId();
-  const dialog = useRef<HTMLDialogElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
+  const { dialogProps, showModal, close } = useDismissibleDialog();
   const searchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [recent, setRecent] = useState(readRecent);
@@ -70,7 +71,7 @@ export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, 
     } catch {
       // The picker also works with storage disabled.
     }
-    dialog.current?.close();
+    close();
     if (key !== subject) onChange(key);
   }
 
@@ -92,10 +93,10 @@ export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, 
         onClick={() => { if (previous) select(previous.key); }} className={iconButton}>
         <ChevronLeft aria-hidden="true" className="size-4" />
       </button>
-      <button ref={trigger} type="button" aria-haspopup="dialog" aria-label={'切换数据集' + (subject ? '，当前 ' + label : '')}
-        onClick={() => {
+      <button type="button" aria-haspopup="dialog" aria-label={'切换数据集' + (subject ? '，当前 ' + label : '')}
+        onClick={(event) => {
           setQuery('');
-          dialog.current?.showModal();
+          showModal(event.currentTarget);
           searchInput.current?.focus();
         }}
         className="inline-flex min-h-10 min-w-0 cursor-pointer items-center gap-1.5 rounded-lg px-2 text-sm font-bold text-[var(--text-primary)] hover:bg-[var(--bg-elevated)] focus-visible:outline-2 focus-visible:outline-[var(--brand-primary)] sm:gap-2 sm:px-3">
@@ -107,13 +108,12 @@ export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, 
         onClick={() => { if (next) select(next.key); }} className={iconButton}>
         <ChevronRight aria-hidden="true" className="size-4" />
       </button>
-      <dialog ref={dialog} aria-labelledby={titleId} onClose={() => trigger.current?.focus()}
-        onClick={(event) => { if (event.target === event.currentTarget) dialog.current?.close(); }}
+      <dialog {...dialogProps} aria-labelledby={titleId}
         className="fixed inset-x-0 bottom-0 top-auto m-0 w-full max-w-none overflow-hidden rounded-t-2xl border border-[var(--border-strong)] bg-[var(--bg-surface)] p-0 text-[var(--text-primary)] shadow-2xl backdrop:bg-black/55 sm:inset-0 sm:m-auto sm:max-w-md sm:rounded-2xl">
         <div className="flex max-h-[min(82dvh,36rem)] flex-col p-3 sm:p-4">
           <div className="flex items-center justify-between gap-2">
             <h3 id={titleId} className="m-0 pl-1 text-base font-bold">切换数据集</h3>
-            <button type="button" aria-label="关闭数据集选择" className={iconButton} onClick={() => dialog.current?.close()}>
+            <button type="button" aria-label="关闭数据集选择" className={iconButton} onClick={close}>
               <X aria-hidden="true" className="size-4" />
             </button>
           </div>
