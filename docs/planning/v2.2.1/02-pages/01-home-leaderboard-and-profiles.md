@@ -1,5 +1,7 @@
 # 02-1 · 首页（三线结论卡）、高密主榜控件、ARC Prize 效率轨迹图与实体独立档案页
 
+> **现行首页和榜单**见 [开发要求与上线状态](../CURRENT.md#已上线)。首页现以全宽评测热力图呈现，三线提分与防退化保留在自由对比。
+
 > **关联元数据**
 > - **真实数据源**：SQLite 热层聚合表（`batches`, `episodes`, `legacy_leaderboard_rows`, `datasets`, `official_results`）+ `config/taxonomy.yaml`（含 `goal_type` 动态驱动）+ 冷层元数据（`bundles/*.tar(.zst)`）
 > - **核心 API**：`GET /api/v1/system/overview`、`GET /api/v1/leaderboard`、`GET /api/v1/leaderboard/efficiency-scatter`、`GET /api/v1/models`、`GET /api/v1/models/{canonical}`、`GET /api/v1/harnesses`、`GET /api/v1/harnesses/{name}`、`GET /api/v1/benchmarks/{benchmark_slug}`、`POST /api/v1/recommend`

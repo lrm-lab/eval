@@ -1,5 +1,7 @@
 # 02-5 · 深度结果诊断与客观轨迹证据中心
 
+> **现行效率图口径**见 [诊断效率图的口径](../CURRENT.md#诊断效率图的口径)。
+
 > **关联元数据**
 > - **真实数据源**：SQLite `episodes`（含 `failure_kind`, `verifier_rewards_json`, `input/cached/output/reasoning_tokens`, `duration_sec`, `tool_call_count`）+ ATIF `trajectory.json` 与 `model-gateway.json` 客观统计缓存（`trial_observable_clues`）
 > - **核心 API**：`GET /api/v1/diagnostics/failures`、`GET /api/v1/diagnostics/submetrics`、`GET /api/v1/diagnostics/efficiency`、`GET /api/v1/diagnostics/tools`、`GET /api/v1/diagnostics/clues`

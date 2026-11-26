@@ -1,5 +1,7 @@
 # 04-2 · REST & SSE API 契约、核心 JSON Schema 与错误码字典
 
+> **后续首页与对比契约**见 [首页历史分差](../CURRENT.md#首页历史分差)。
+
 本文档给出全站 `/api/v1/*` 路由清单、9 大核心接口的精确 Request/Response JSON 示例（全部经 JSON 语法与数值一致性校验，所有路径段均为 URL-safe `batch_id` / `benchmark_slug` / `dataset_release_id`）及统一业务错误码字典。
 
 ---

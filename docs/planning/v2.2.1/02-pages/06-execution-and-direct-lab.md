@@ -1,5 +1,7 @@
 # 02-6 · 受控评测执行监控（三运行器实时流）与 Direct 原生验证工作台
 
+> **现行执行**见 [开发要求与上线状态](../CURRENT.md#已上线)，含题库优先、登录成员权限和执行页分段加载状态。
+
 > **关联元数据**
 > - **真实数据源**：`/home/share-data/tianxi_benches/framework/{run.py, harbor.toml, direct.py, vlmevalkit.py, batch_guard.py, report.py, DATASET_FORMAT.md, VLMEVALKIT.md}` + 服务端受保护 `gateways.env`（本地 ext4 `0600`）+ Runner 实时 NDJSON 事件流 + SQLite `exec_jobs` / `exec_job_events` / `direct_lab_runs`
 > - **核心 API**：`GET /api/v1/execution/capabilities`、`POST /api/v1/execution/plan`、`POST /api/v1/execution/jobs`、`GET /api/v1/execution/jobs/{id}/stream` (SSE + `Last-Event-ID`)、`POST .../resume`、`POST .../cancel`、`GET/POST /api/v1/direct-lab/*`

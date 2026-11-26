@@ -1,5 +1,7 @@
 # 02-4 · 自由动态对比工作台、1v1 对决与报告导出
 
+> **现行对比**见 [开发要求与上线状态](../CURRENT.md#已上线)，含三轴、公开榜第三条系列与可比条件。
+
 > **关联元数据**
 > - **真实数据源**：SQLite 热层聚合（`batches`, `episodes`, `legacy_leaderboard_rows`, `official_results`）+ `sample_sets`（自定义样本集）+ `saved_comparisons`（实时方案 & 冻结报告快照）+ 按需懒加载 ATIF/Verifier/`vlmeval_result` 数据用于双栏 Diff
 > - **核心 API**：`GET /api/v1/compare/options`、`POST /api/v1/compare/query`、`POST /api/v1/compare/task-diff`、`GET/POST/PUT/DELETE /api/v1/sample-sets`、`GET/POST/DELETE /api/v1/compare/saved`、`GET /api/v1/compare/s/{short_id}`、`POST /api/v1/compare/export`
