@@ -96,21 +96,26 @@ export interface HistoryItem {
   baseline_score: number | null;
   candidate_score: number | null;
   delta_pp: number | null;
-  baseline_kind?: 'zero';
+  baseline_kind?: 'zero' | 'zero_reference';
+  zero_reference_reason?: string;
   reference_label?: string;
   reference_is_partial?: boolean;
 }
 
-export function firstScoreHistory(cell: MapCell, history?: HistoryItem): HistoryItem | undefined {
+export function zeroBaselineHistory(cell: MapCell, history?: HistoryItem): HistoryItem | undefined {
   const batch = cell.latest_scored_batch;
-  if (cell.kind !== 'trials' || cell.scored_run_count !== 1 || cell.missing_identity.length || cell.reviewed_batch
-      || !batch || batch.score == null || !Number.isFinite(batch.score)) return;
+  if (cell.kind !== 'trials' || !batch || batch.score == null || !Number.isFinite(batch.score)) return;
+  const firstScore = cell.scored_run_count === 1 && !cell.missing_identity.length && !cell.reviewed_batch
+    && cell.has_scored_history_peer === false;
   if (history) {
-    if (history.reason === null || history.baseline || history.candidate?.batch_id !== batch.batch_id
+    if (history.reason === null || history.reason === 'BATCH_UNAVAILABLE' || history.reason === 'RELEASE_GENERATION_MISMATCH'
+        || history.candidate?.batch_id !== batch.batch_id
         || history.candidate.generation_id !== batch.generation_id) return;
-  } else if (cell.has_scored_history_peer !== false) return;
+  } else if (!firstScore) return;
   return {
-    id: cell.id, reason: null, candidate: batch, baseline: null, baseline_kind: 'zero',
+    id: cell.id, reason: null, candidate: batch, baseline: null,
+    baseline_kind: firstScore ? 'zero' : 'zero_reference',
+    zero_reference_reason: !firstScore ? history?.reason ?? undefined : undefined,
     dataset_release_id: cell.dataset_release_id, split: cell.split, scoring_protocol: cell.scoring_protocol,
     metric_name: cell.metric_name, common_valid: null, common_covered: null,
     baseline_score: 0, candidate_score: batch.score, delta_pp: batch.score,
@@ -118,6 +123,8 @@ export function firstScoreHistory(cell: MapCell, history?: HistoryItem): History
 }
 
 export function referenceBadge(result: HistoryItem | undefined) {
+  if (result?.baseline_kind === 'zero') return '首评基线';
+  if (result?.baseline_kind === 'zero_reference') return '0 分基线';
   if (!result?.reference_label) return null;
   return result.reference_is_partial ? '运行快照' : '批次对照';
 }
@@ -209,7 +216,8 @@ const reasons: Record<string, string> = {
 };
 
 export function historyReason(cell: MapCell, result: HistoryItem | undefined) {
-  if (result?.reason) return reasons[result.reason] ?? '缺少可比记录';
+  const reason = result?.reason ?? result?.zero_reference_reason;
+  if (reason) return reasons[reason] ?? '缺少可比记录';
   if (cell.kind === 'historical_summary') return '历史汇总缺少可比前次';
   if (cell.missing_identity.length) return '评测组合身份未登记';
   if (cell.running_count && !cell.published_run_count) return '运行中，尚未发布';

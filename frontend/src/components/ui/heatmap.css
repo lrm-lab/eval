@@ -2,6 +2,46 @@
   --heatmap-canvas-height: max(400px, calc(100dvh - 13.5rem));
   --heatmap-rise-color: var(--sem-err-fg);
   --heatmap-fall-color: var(--sem-pass-fg);
+  --heatmap-rise-low: #ba9ba4;
+  --heatmap-rise-high: #ffa5b8;
+  --heatmap-fall-low: #94ab9e;
+  --heatmap-fall-high: #66dfa3;
+}
+
+[data-theme='dark'] .evaluation-heatmap {
+  --heatmap-rise-low: #352128;
+  --heatmap-rise-high: #b82f49;
+  --heatmap-fall-low: #1c3028;
+  --heatmap-fall-high: #16794c;
+}
+
+.heatmap-header {
+  background:
+    radial-gradient(ellipse at 10% 5%, var(--hero-glow-1), transparent 55%),
+    var(--bg-surface);
+}
+
+.heatmap-help-panel {
+  position: absolute;
+  z-index: 18;
+  top: calc(100% + 0.375rem);
+  right: 0.75rem;
+  width: min(19rem, calc(100vw - 2rem));
+}
+
+.heatmap-scale {
+  display: inline-block;
+  width: 1.75rem;
+  height: 0.42rem;
+  border-radius: 99px;
+}
+
+.heatmap-change[data-tone='up'] .heatmap-scale {
+  background: linear-gradient(90deg, var(--heatmap-rise-low), var(--heatmap-rise-high));
+}
+
+.heatmap-change[data-tone='down'] .heatmap-scale {
+  background: linear-gradient(90deg, var(--heatmap-fall-low), var(--heatmap-fall-high));
 }
 
 .evaluation-heatmap:fullscreen,
@@ -11,6 +51,11 @@
   overflow: auto;
   background: var(--bg-surface);
   --heatmap-canvas-height: max(360px, calc(100dvh - 8rem));
+}
+
+.evaluation-heatmap:fullscreen .heatmap-navigation,
+.evaluation-heatmap[data-fullscreen-fallback='true'] .heatmap-navigation {
+  display: none;
 }
 
 .evaluation-heatmap[data-fullscreen-fallback='true'] {
@@ -59,15 +104,21 @@
 }
 
 .heatmap-tile[data-tone='up'] {
-  background: color-mix(in srgb, var(--heatmap-rise-color) var(--heat-intensity, 26%), var(--bg-surface));
+  background: color-mix(in srgb, var(--heatmap-rise-low), var(--heatmap-rise-high) var(--heat-intensity, 0%));
 }
 
 .heatmap-tile[data-tone='down'] {
-  background: color-mix(in srgb, var(--heatmap-fall-color) var(--heat-intensity, 26%), var(--bg-surface));
+  background: color-mix(in srgb, var(--heatmap-fall-low), var(--heatmap-fall-high) var(--heat-intensity, 0%));
 }
 
 .heatmap-tile[data-tone='flat'] {
   background: color-mix(in srgb, var(--text-muted) 27%, var(--bg-surface));
+}
+
+.heatmap-tile[data-tone='unknown'] {
+  background: repeating-linear-gradient(135deg,
+    var(--bg-elevated) 0 6px,
+    color-mix(in srgb, var(--bg-elevated), var(--border-subtle) 24%) 6px 7px);
 }
 
 .heatmap-change[data-tone='up'] { color: var(--heatmap-rise-color); }

@@ -26,9 +26,10 @@ export function HeatmapDetails({ cell, history, pending, failed, onRetry }: {
 }) {
   const change = changeState(history, pending);
   const compare = history && historicalCompareHref(history);
-  const zeroBaseline = history?.baseline_kind === 'zero';
+  const zeroBaseline = Boolean(history?.baseline_kind);
+  const zeroReference = history?.baseline_kind === 'zero_reference';
   const showsBaseline = zeroBaseline || Boolean(compare);
-  const reference = referenceBadge(history);
+  const reference = zeroBaseline ? null : referenceBadge(history);
   const grouped = groupedCompareHref(cell);
   const unavailable = history?.reason === 'BATCH_UNAVAILABLE' || history?.reason === 'RELEASE_GENERATION_MISMATCH';
   const scoredBatch = unavailable ? null : cell.latest_scored_batch;
@@ -97,7 +98,7 @@ export function HeatmapDetails({ cell, history, pending, failed, onRetry }: {
       ) : (
         <section aria-label="前后成绩" className="rounded-lg bg-[var(--bg-elevated)] p-3">
           <div className="flex items-baseline justify-between gap-2">
-            <h4 className="m-0 text-sm font-bold">{reference ?? (zeroBaseline ? '首次有效评测' : compare ? '共同有效题得分' : '本次成绩')}</h4>
+            <h4 className="m-0 text-sm font-bold">{reference ?? (zeroReference ? '对照 0 分基线' : zeroBaseline ? '首次有效评测' : compare ? '共同有效题得分' : '本次成绩')}</h4>
             {change.value && <span data-tone={change.tone} className="heatmap-change font-bold tabular-nums">
               {change.symbol} {change.value}
             </span>}
@@ -111,6 +112,9 @@ export function HeatmapDetails({ cell, history, pending, failed, onRetry }: {
             <p className="mt-1 mb-3 text-xs text-[var(--text-secondary)]">
               {history?.reference_label}{history?.reference_is_partial && ' · 有批次未完成，分差以当前已计分的共同题为准'}
             </p>
+          )}
+          {zeroReference && (
+            <p className="m-0 mb-3 text-xs text-[var(--text-secondary)]">{historyReason(cell, history)}，本次成绩对照 0 分。</p>
           )}
           {candidate && (
             <div className={showsBaseline ? 'grid grid-cols-2 gap-3' : ''}>

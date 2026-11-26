@@ -1,10 +1,10 @@
-import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type ReactNode } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
-import { ArrowLeft, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } from 'lucide-react';
+import { ArrowLeft, Info, LayoutGrid, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { apiFetch } from '../../lib/api';
 import {
-  cellSearchText, cellTitle, changeState, datasetName, findMapLock, firstScoreHistory, historyReason, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
+  cellSearchText, cellTitle, changeState, datasetName, findMapLock, zeroBaselineHistory, historyReason, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
   type EvaluationMap, type HistoryItem, type MapAxis, type MapCell, type Rectangle, type Sector,
 } from '../../lib/evaluationMap';
 import { useAppStore } from '../../lib/store';
@@ -26,15 +26,28 @@ const getPhone = () => window.matchMedia(phoneQuery).matches;
 
 function ChangeLegend() {
   return (
-    <ul aria-label="涨跌图例" className="m-0 flex list-none flex-wrap items-center gap-x-3 gap-y-0.5 p-0 text-xs font-semibold">
-      <li className="heatmap-change" data-tone="up">↑ 上涨</li>
-      <li className="heatmap-change" data-tone="down">↓ 下跌</li>
-      <li>= 持平</li>
-      <li className="text-[var(--text-secondary)]">首次有效评测以 0 为基线</li>
-      <li className="text-[var(--text-secondary)]">批次对照 / 运行快照</li>
-      <li className="text-[var(--text-secondary)]">— 尚无可比前次</li>
-      <li className="text-[var(--text-secondary)]">… 等待计算</li>
-    </ul>
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      <ul aria-label="涨跌图例" className="m-0 flex list-none flex-wrap items-center gap-x-3 gap-y-1 p-0 text-xs font-semibold">
+        <li className="heatmap-change inline-flex items-center gap-1.5" data-tone="up">
+          <span className="heatmap-scale" aria-hidden />↑ 上涨
+        </li>
+        <li className="heatmap-change inline-flex items-center gap-1.5" data-tone="down">
+          <span className="heatmap-scale" aria-hidden />↓ 下跌
+        </li>
+        <li>= 持平</li>
+        <li className="text-[var(--text-secondary)]">— 暂无分差</li>
+      </ul>
+      <details className="heatmap-help">
+        <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1 rounded-md px-1.5 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] [&::-webkit-details-marker]:hidden">
+          <Info className="size-3.5 shrink-0" aria-hidden /> 读图
+        </summary>
+        <div className="heatmap-help-panel grid gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 text-xs leading-relaxed text-[var(--text-secondary)] shadow-lg">
+          <p className="m-0">板块按登记题量分配面积，格子大小代表已发布评测次数。</p>
+          <p className="m-0">涨跌幅越大，颜色越亮。首次出分或缺可比前次时，有效评分对照 0 分。</p>
+          <p className="m-0">点开格子可查看评分、对照来源和暂无分差的原因。</p>
+        </div>
+      </details>
+    </div>
   );
 }
 
@@ -57,9 +70,10 @@ function Tile({ rect, axis, cell, history, selected, onSelect }: {
 }) {
   const [primary, secondary] = cellTitle(cell, axis);
   const state = changeState(history?.result, history?.pending, history?.failed);
-  const reference = referenceBadge(history?.result) ?? (history?.result?.baseline_kind === 'zero' ? '首评基线' : null);
-  const statusLabel = !cell.latest_scored_batch && !history ? historyReason(cell, undefined) : state.label;
-  const intensity = Math.min(51, 21 + Math.sqrt(Math.abs(history?.result?.delta_pp ?? 0)) * 3.6);
+  const reference = referenceBadge(history?.result);
+  const statusLabel = state.tone === 'unknown' && !history?.pending && !history?.failed
+    ? historyReason(cell, history?.result) : state.label;
+  const intensity = Math.sqrt(Math.min(100, Math.abs(history?.result?.delta_pp ?? 0))) * 10;
   const text = [datasetName(cell), primary, secondary, cell.dataset_version, cell.split, statusLabel, state.value, reference,
     `${cell.published_run_count} 次已发布`].filter(Boolean).join(' · ');
   const showTitle = rect.width >= 68 && rect.height >= 34;
@@ -202,7 +216,9 @@ function MapSearch({ sectors, axis, history, onSector, onCell, dialogRef, unweig
                   const status = history.get(cell.id);
                   const change = changeState(status?.result,
                     status?.pending || (!status && Boolean(cell.latest_scored_batch)), status?.failed);
-                  const statusLabel = !cell.latest_scored_batch && !status ? historyReason(cell, undefined) : change.label;
+                  const statusLabel = change.tone === 'unknown' && !status?.pending && !status?.failed
+                    && (!cell.latest_scored_batch || status?.result) ? historyReason(cell, status?.result) : change.label;
+                  const reference = referenceBadge(status?.result);
                   return (
                     <li key={cell.id}>
                       <button type="button" onClick={() => submit(sector, cell)}
@@ -214,7 +230,7 @@ function MapSearch({ sectors, axis, history, onSector, onCell, dialogRef, unweig
                           </span>
                         </span>
                         <span data-tone={change.tone} className="heatmap-change shrink-0 text-xs font-semibold tabular-nums">
-                          {change.value ? `${change.symbol} ${change.value}` : statusLabel}
+                          {change.value ? `${change.symbol} ${change.value}${reference ? ` · ${reference}` : ''}` : statusLabel}
                         </span>
                       </button>
                     </li>
@@ -283,7 +299,7 @@ export function useHomeEvaluationMap() {
   });
 }
 
-export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typeof useHomeEvaluationMap> }) {
+export function HomeEvaluationHeatmap({ catalogue, actions }: { catalogue: ReturnType<typeof useHomeEvaluationMap>; actions: ReactNode }) {
   const [params, setParams] = useSearchParams();
   const [axis, locks] = useMemo(() => {
     const view = params.get('view');
@@ -325,7 +341,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       .flatMap((sector) => sector.cells.filter((cell) => cell.published_run_count > 0));
     const needsDetail = selected && !visible.some((cell) => cell.id === selected.id) ? [selected] : [];
     for (const cell of [...needsDetail, ...visible]) {
-      if (cell.kind !== 'trials' || firstScoreHistory(cell)) continue;
+      if (cell.kind !== 'trials' || zeroBaselineHistory(cell)) continue;
       for (const [batch, mode] of [[cell.latest_scored_batch, 'auto'], [cell.reviewed_batch, 'reviewed']] as const) {
         if (!batch) continue;
         let chunk = chunks.at(-1);
@@ -370,7 +386,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
   for (const cell of catalogue.data?.cells ?? []) {
     const entry = history.get(cell.id);
     if (entry && !entry.result) continue;
-    const result = firstScoreHistory(cell, entry?.result);
+    const result = zeroBaselineHistory(cell, entry?.result);
     if (result) history.set(cell.id, { result, pending: false, failed: false });
   }
 
@@ -459,14 +475,26 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
         }
       }}
       className="evaluation-heatmap relative min-w-0 rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)]">
-      <div className="border-b border-[var(--border-strong)] px-2.5 py-2 sm:px-4">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1">
-            <h2 id="heatmap-title" className="m-0 text-lg leading-tight font-bold tracking-tight">评测热力图</h2>
-            {catalogue.data && (
-              <p className="m-0 text-xs tabular-nums text-[var(--text-secondary)]">{shown.length} 个板块 · {cellIds.size} 个组合 · {published} 次已发布</p>
-            )}
+      <header className="heatmap-header rounded-t-xl">
+        <div className="heatmap-heading flex flex-wrap items-center justify-between gap-x-5 gap-y-3 px-3 py-3 sm:px-4">
+          <div className="flex min-w-0 items-center gap-3">
+            <span className="grid size-10 shrink-0 place-items-center rounded-xl border border-[var(--border-strong)] bg-[var(--bg-surface)] text-[var(--brand-primary)]" aria-hidden>
+              <LayoutGrid className="size-5" />
+            </span>
+            <div className="min-w-0">
+              <h1 id="heatmap-title" className="m-0 text-xl leading-tight font-bold tracking-tight sm:text-2xl">评测态势</h1>
+              {catalogue.data && (
+                <p className="m-0 mt-1 text-xs tabular-nums text-[var(--text-secondary)]">
+                  <strong className="font-semibold text-[var(--text-primary)]">{shown.length}</strong> 个板块
+                  {' · '}<strong className="font-semibold text-[var(--text-primary)]">{cellIds.size}</strong> 个组合
+                  {' · '}<strong className="font-semibold text-[var(--text-primary)]">{published}</strong> 次发布
+                </p>
+              )}
+            </div>
           </div>
+          <div className="heatmap-navigation w-full sm:w-auto">{actions}</div>
+        </div>
+        <div className="heatmap-toolbar relative flex min-w-0 flex-wrap items-center justify-between gap-x-4 gap-y-1 border-y border-[var(--border-subtle)] bg-[var(--bg-surface)] px-3 py-1.5 sm:px-4">
           <div className="flex max-w-full flex-wrap items-center gap-1.5">
             <div onKeyDown={(event) => {
               const index = mapAxes.findIndex(({ id }) => id === axis);
@@ -480,7 +508,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
               <SlidingTabs layoutId="home-heatmap-axis" value={axis} options={mapAxes.map((item) => ({ ...item }))}
                 onChange={(value) => changeUrl({ view: value, sector: null, subject: null })} size="sm" />
             </div>
-            <button type="button" ref={searchButton} className={action} aria-label="搜索热力图" aria-haspopup="dialog" onClick={() => openSearch()}>
+            <button type="button" ref={searchButton} className={action} aria-label="搜索评测组合" aria-haspopup="dialog" onClick={() => openSearch()}>
               <Search className="size-4 shrink-0" aria-hidden /> 搜索
             </button>
             <button type="button" className={`${action} heatmap-fullscreen-button`}
@@ -512,12 +540,9 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
               </div>
             </details>
           </div>
-        </div>
-        <div className="mt-2 flex flex-wrap items-center justify-between gap-x-4 gap-y-1.5">
-          <p className="m-0 text-xs text-[var(--text-secondary)]">板块按登记题量 · 色块按已发布评测次数</p>
           <ChangeLegend />
         </div>
-      </div>
+      </header>
 
       {zoom && (
         <div className="flex min-w-0 flex-wrap items-center gap-2 border-b border-[var(--border-strong)] px-2.5 py-1 sm:px-4">
@@ -535,10 +560,10 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
 
       {catalogue.isPending ? <div role="status" className="heatmap-canvas flex items-center justify-center text-sm text-[var(--text-secondary)]">正在载入可见评测…</div>
         : catalogue.isError && !catalogue.data ? (
-          <div className="p-4"><StateNoticeCard kind="error" title="评测热力图加载失败" onRetry={() => catalogue.refetch()} /></div>
+          <div className="p-4"><StateNoticeCard kind="error" title="评测态势加载失败" onRetry={() => catalogue.refetch()} /></div>
         ) : (
           <div className="heatmap-workspace">
-            <div ref={canvas} className="heatmap-canvas" aria-label="评测矩形热力图" role="group">
+            <div ref={canvas} className="heatmap-canvas" aria-label="评测态势图" role="group">
               {rectangles.map(({ item, ...rect }) => (
                 <SectorMap key={item.id} rect={rect} sector={item} axis={axis} zoomed={Boolean(zoom)}
                   selected={selectedId ?? undefined} history={history} onZoom={() => setZoom(zoom ? undefined : item)}
