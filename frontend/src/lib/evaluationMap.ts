@@ -55,6 +55,7 @@ export interface MapCell {
   metric_name: string | null;
   missing_identity: string[];
   published_run_count: number;
+  scored_run_count: number;
   published_run_counts_by_scope?: Record<string, number>;
   attempts_per_task?: number | null;
   timeout_seconds?: number | null;
@@ -94,8 +95,21 @@ export interface HistoryItem {
   baseline_score: number | null;
   candidate_score: number | null;
   delta_pp: number | null;
+  baseline_kind?: 'zero';
   reference_label?: string;
   reference_is_partial?: boolean;
+}
+
+export function firstScoreHistory(cell: MapCell): HistoryItem | undefined {
+  const batch = cell.latest_scored_batch;
+  if (cell.kind !== 'trials' || cell.scored_run_count !== 1 || cell.missing_identity.length || cell.reviewed_batch
+      || !batch || batch.score == null || !Number.isFinite(batch.score)) return;
+  return {
+    id: cell.id, reason: null, candidate: batch, baseline: null, baseline_kind: 'zero',
+    dataset_release_id: cell.dataset_release_id, split: cell.split, scoring_protocol: cell.scoring_protocol,
+    metric_name: cell.metric_name, common_valid: null, common_covered: null,
+    baseline_score: 0, candidate_score: batch.score, delta_pp: batch.score,
+  };
 }
 
 export function referenceBadge(result: HistoryItem | undefined) {
