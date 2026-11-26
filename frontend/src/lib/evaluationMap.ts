@@ -174,7 +174,7 @@ const reasons: Record<string, string> = {
   NO_COMMON_VALID_TASKS: '没有共同有效题',
   INCOMPARABLE_PROTOCOL: '评分协议或指标不同',
   INCOMPARABLE_RELEASE: '数据集发行版或 Split 不同',
-  INCOMPARABLE_CONFIGURATION: '运行配置不同',
+  INCOMPARABLE_CONFIGURATION: '无法核实运行配置一致',
   MISSING_IDENTITY: '评测组合身份未登记',
   MISSING_VALID_SCORE: '缺少有效评分',
   BATCH_UNAVAILABLE: '批次不可用',
