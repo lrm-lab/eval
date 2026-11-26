@@ -1,3 +1,9 @@
+/* Disable pending transitions on reopen and when reduced motion takes effect. */
+dialog[data-dismissible-dialog],
+dialog[data-dismissible-dialog]::backdrop {
+  transition-property: none;
+}
+
 /* The dialog is already closed when the visual transition starts. */
 dialog[data-dismissible-dialog]:not([open]),
 dialog[data-dismissible-dialog]:not([open])::backdrop {
