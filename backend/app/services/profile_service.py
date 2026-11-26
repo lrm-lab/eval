@@ -343,6 +343,7 @@ def _evaluation_cell(
         "scoring_protocol": protocol,
         "missing_identity": missing,
         "published_run_count": 0,
+        "scored_run_count": 0,
         "published_run_counts_by_scope": {},
         "running_count": 0,
         "latest_batch": None,
@@ -506,11 +507,11 @@ class ProfileService:
                 if cell_id not in latest or display_order > latest[cell_id]:
                     cell["latest_batch"] = batch
                     latest[cell_id] = display_order
-                if is_published and batch["score"] is not None and (
-                    cell_id not in latest_scored or order > latest_scored[cell_id]
-                ):
-                    cell["latest_scored_batch"] = batch
-                    latest_scored[cell_id] = order
+                if is_published and batch["score"] is not None:
+                    cell["scored_run_count"] += 1
+                    if cell_id not in latest_scored or order > latest_scored[cell_id]:
+                        cell["latest_scored_batch"] = batch
+                        latest_scored[cell_id] = order
 
             historical_count = 0
             if self._can_see_legacy(user):
