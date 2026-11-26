@@ -4,6 +4,8 @@ import hashlib
 import json
 import math
 from collections import defaultdict
+from datetime import datetime, timezone
+from sqlite3 import Connection
 from typing import Any
 
 from app.api.errors import AppError
@@ -19,6 +21,7 @@ from app.security.authz import (
     sql_task_holdout_exclude_clause,
 )
 from app.security.storage_probe import validate_safe_id
+from app.services.evaluation_time import evaluation_recorded_at
 from app.services.methodology import METHODOLOGY_VERSION, finite, normalize_score_to_100, normalize_trial_score_to_100
 from app.services.query_service import _project_filter_sql, _sanitize_batch_row
 
@@ -246,6 +249,139 @@ def _grouped_comparison(
     return {"contexts": list(contexts.values()), "empty_reason": None if contexts else "no_authorized_results"}
 
 
+_ACTIVE_EVALUATION_STATUSES = frozenset({
+    "created", "pending", "queued", "starting", "preparing", "running", "paused", "cancelling", "retrying",
+})
+_WITHDRAWN_EVALUATION_STATUSES = frozenset({"revoked", "withdrawn", "deleted"})
+_EARLIEST_EVALUATION_TIME = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _evaluation_run_key(row: dict[str, Any]) -> tuple[str, ...]:
+    job_id = row["managed_job_id"] or row["native_job_id"]
+    if job_id:
+        return "job", row["project_id"], row["owner_id"], row["runner"], job_id
+    return "batch", row["batch_id"]
+
+
+def _evaluation_group_order(batch: dict[str, Any], indexed_at: str) -> tuple[datetime, str, str]:
+    recorded_at = batch["recorded_at"]
+    instant = datetime.fromisoformat(recorded_at.replace("Z", "+00:00")) if recorded_at else _EARLIEST_EVALUATION_TIME
+    return instant, indexed_at, batch["batch_id"]
+
+
+def _evaluation_batch_projection(
+    conn: Connection, row: dict[str, Any], *, can_holdout: bool, active: bool,
+) -> dict[str, Any] | None:
+    recorded, scored, planned = row["recorded"], row["scored"], row["planned"]
+    valid_mean, official_score = row["valid_mean"], row["official_score"]
+    recorded_at, recorded_at_source = None, None
+    if row["has_hidden_trials"]:
+        public_task = sql_task_holdout_exclude_clause("?", "e.task_id")
+        visibility = conn.execute(
+            f"""
+            SELECT COUNT(*) AS recorded,
+                   COUNT(CASE WHEN e.reward_valid AND e.reward IS NOT NULL THEN 1 END) AS scored,
+                   AVG(CASE WHEN e.reward_valid THEN e.reward END) AS valid_mean
+            FROM episodes e
+            WHERE e.batch_id = ? AND e.generation_id = ? AND {public_task}
+            """,
+            (row["batch_id"], row["generation_id"], row["dataset_release_id"]),
+        ).fetchone()
+        if not visibility["recorded"]:
+            return None
+        recorded, scored, valid_mean = visibility["recorded"], visibility["scored"], visibility["valid_mean"]
+        planned, official_score = None, None
+    elif not active:
+        recorded_at, recorded_at_source = evaluation_recorded_at(conn, row, can_holdout=can_holdout)
+
+    score, score_kind = None, "unscored"
+    if row["scale_type"] and _recorded_identity(row["scoring_protocol"]):
+        if finite(official_score):
+            score = normalize_score_to_100(official_score, row["scale_type"])
+            score_kind = "official_summary"
+        elif scored and finite(valid_mean):
+            score = normalize_trial_score_to_100(valid_mean, row["scale_type"], row["scoring_protocol"])
+            score_kind = "trial_valid_mean"
+    return {
+        **{key: row[key] for key in ("batch_id", "generation_id", "batch_name", "batch_status", "run_scope")},
+        "recorded_at": recorded_at,
+        "recorded_at_source": recorded_at_source,
+        "score": round(score, 2) if finite(score) else None,
+        "score_kind": score_kind,
+        "scored": scored,
+        "recorded": recorded,
+        "planned": planned,
+    }
+
+
+def _evaluation_cell(
+    row: dict[str, Any], *, kind: str, source_id: tuple[str, ...] | str,
+) -> dict[str, Any]:
+    identity = _comparison_identity(row)
+    protocol = _recorded_identity(row["scoring_protocol"])
+    missing = [
+        key for key, value in (
+            ("dataset_release_id", row["dataset_release_id"]), ("model_canonical", identity["model_canonical"]),
+            ("harness", identity["harness"]), ("scoring_protocol", protocol),
+        ) if not value
+    ]
+    settings = _recorded_batch_settings(row)
+    cell_id = _profile_key(
+        "cell", kind, row["benchmark_slug"], row["dataset_release_id"], protocol, row["metric_name"],
+        row["scale_type"], identity["model_key"], identity["model_route"], identity["harness_key"],
+        settings["attempts_per_task"], settings["timeout_seconds"], row.get("fault_policy"),
+        source_id if missing else None,
+    )
+    return {
+        "id": cell_id,
+        "kind": kind,
+        **identity,
+        **settings,
+        **{key: row[key] for key in ("benchmark_slug", "dataset_release_id", "dataset_version", "split", "metric_name")},
+        "display_name": row["release_display_name"] or row["raw_dataset_name"] or row["benchmark_slug"],
+        "scoring_protocol": protocol,
+        "missing_identity": missing,
+        "published_run_count": 0,
+        "published_run_counts_by_scope": {},
+        "running_count": 0,
+        "latest_batch": None,
+        "latest_scored_batch": None,
+        "historical_scores": [],
+    }
+
+
+def _evaluation_sectors(
+    cells: list[dict[str, Any]], releases: dict[str, dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    by_dimension = {
+        "dataset": ("benchmark_slug", "display_name"), "model": ("model_canonical", "model_canonical"),
+        "harness": ("harness", "harness"),
+    }
+    result: dict[str, list[dict[str, Any]]] = {}
+    for dimension, (id_key, label_key) in by_dimension.items():
+        sectors: dict[str | None, list[dict[str, Any]]] = defaultdict(list)
+        for cell in cells:
+            sectors[cell[id_key]].append(cell)
+        groups = []
+        for sector_id, members in sectors.items():
+            release_ids = sorted({cell["dataset_release_id"] for cell in members if cell["dataset_release_id"]})
+            weights = [releases[release_id]["registered_task_count"] for release_id in release_ids]
+            known = [weight for weight in weights if weight is not None]
+            groups.append({
+                "id": sector_id or "__unmapped__",
+                "label": (members[0][label_key] or sector_id) if sector_id else "未登记",
+                "dataset_release_ids": release_ids,
+                "registered_task_count": sum(known) if known else None,
+                "unknown_release_count": len(weights) - len(known),
+                "published_run_count": sum(cell["published_run_count"] for cell in members),
+                "cell_ids": [cell["id"] for cell in members],
+            })
+        result[dimension] = sorted(groups, key=lambda group: (
+            group["id"] == "__unmapped__", -(group["registered_task_count"] or 0), group["id"],
+        ))
+    return result
+
+
 class ProfileService:
     """Entity Profiles (Models, Harnesses, Benchmarks, Hardest Tasks) & Constraint Recommender (M1).
     Strictly anchored to real evaluated Harbor / lrm-eval / 2026-11-20 fields with auth-before-dedup."""
@@ -263,6 +399,181 @@ class ProfileService:
     def _can_see_legacy(self, user: AuthUser) -> bool:
         proj_id, owner_id, _, _ = self.approval_registry.lookup_full(self.settings.legacy_root_dir / "leaderboard.csv")
         return can_access_project(user, proj_id, owner_id=owner_id)
+
+    def get_evaluation_map(self, user: AuthUser) -> dict[str, Any]:
+        can_holdout = has_scope(user, "dataset:holdout_read")
+        proj_sql, params = _project_filter_sql(user, "b.project_id")
+        public_task = sql_task_holdout_exclude_clause("b.dataset_release_id", "e.task_id")
+        has_hidden_trials = "0" if can_holdout else f"""EXISTS (
+            SELECT 1 FROM episodes e WHERE e.batch_id = b.batch_id AND e.generation_id = b.generation_id
+              AND NOT {public_task}
+        )"""
+        releases: dict[str, dict[str, Any]] = {}
+        cells: dict[str, dict[str, Any]] = {}
+        latest: dict[str, tuple[bool, tuple[datetime, str, str]]] = {}
+        latest_scored: dict[str, tuple[datetime, str, str]] = {}
+
+        def add_release(row: dict[str, Any]) -> None:
+            release_id = row["dataset_release_id"]
+            if release_id and release_id not in releases:
+                releases[release_id] = {
+                    **{key: row[key] for key in ("dataset_release_id", "benchmark_slug", "dataset_version", "split")},
+                    "display_name": row["release_display_name"],
+                    "registered_task_count": row["known_task_count"],
+                }
+
+        with self.db.read_snapshot() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT b.batch_id, b.generation_id, b.batch_name, b.batch_status, b.run_scope,
+                       b.project_id, b.owner_id, b.native_job_id, b.evidence_approval, b.is_running_placeholder,
+                       b.raw_dataset_name, b.model_canonical, b.model_route, b.checkpoint, b.thinking_mode,
+                       b.harness, b.harness_version, b.runner, b.scoring_protocol, b.fault_policy, b.run_config_json,
+                       b.finished_at, b.indexed_at, b.recorded, b.scored, b.planned, b.valid_mean,
+                       r.dataset_release_id, r.dataset_version, r.split, r.known_task_count, r.scale_type,
+                       COALESCE(r.benchmark_slug, b.benchmark_slug) AS benchmark_slug,
+                       r.metric_name, o.metric AS official_metric, o.score AS official_score,
+                       bm.display_name AS release_display_name,
+                       {has_hidden_trials} AS has_hidden_trials,
+                       (SELECT j.job_id FROM exec_jobs j
+                        WHERE j.batch_id = b.batch_id AND j.project_id = b.project_id
+                          AND j.owner_id = b.owner_id AND j.kind = b.runner
+                        ORDER BY j.job_id LIMIT 1) AS managed_job_id
+                FROM batches b
+                LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
+                LEFT JOIN benchmarks bm ON bm.benchmark_slug = COALESCE(r.benchmark_slug, b.benchmark_slug)
+                LEFT JOIN official_results o ON o.batch_id = b.batch_id
+                WHERE {proj_sql}
+                ORDER BY b.is_running_placeholder, managed_job_id IS NULL, b.indexed_at DESC, b.batch_id
+                """,
+                params,
+            )
+            seen_runs = set()
+            published = 0
+            running = 0
+            unmapped = 0
+            for record in rows:
+                row = dict(record)
+                status = str(row["batch_status"] or "").strip().lower()
+                if (
+                    not can_access_project(user, row["project_id"], owner_id=row["owner_id"])
+                    or not _task_details_allowed(row, row["split"], can_holdout=can_holdout)
+                    or status in _WITHDRAWN_EVALUATION_STATUSES
+                    or row["evidence_approval"] == "revoked"
+                ):
+                    continue
+                run_key = _evaluation_run_key(row)
+                if run_key in seen_runs:
+                    continue
+                active = status in _ACTIVE_EVALUATION_STATUSES
+                batch = _evaluation_batch_projection(conn, row, can_holdout=can_holdout, active=active)
+                if batch is None:
+                    continue
+                seen_runs.add(run_key)
+                add_release(row)
+                if batch["score_kind"] == "official_summary":
+                    row["metric_name"] = row["official_metric"]
+                cell = _evaluation_cell(row, kind="trials", source_id=run_key)
+                cell_id = cell["id"]
+                cell = cells.setdefault(cell_id, cell)
+
+                is_published = (
+                    not row["is_running_placeholder"] and not active
+                    and (batch["recorded"] > 0 or batch["score_kind"] == "official_summary")
+                )
+                if is_published:
+                    scope = row["run_scope"]
+                    scope_counts = cell["published_run_counts_by_scope"]
+                    scope_counts[scope] = scope_counts.get(scope, 0) + 1
+                    cell["published_run_count"] += 1
+                    published += 1
+                if active:
+                    cell["running_count"] += 1
+                    running += 1
+                unmapped += not row["is_running_placeholder"] and row["dataset_release_id"] is None
+
+                order = _evaluation_group_order(batch, row["indexed_at"])
+                display_order = active, order
+                if cell_id not in latest or display_order > latest[cell_id]:
+                    cell["latest_batch"] = batch
+                    latest[cell_id] = display_order
+                if is_published and batch["score"] is not None and (
+                    cell_id not in latest_scored or order > latest_scored[cell_id]
+                ):
+                    cell["latest_scored_batch"] = batch
+                    latest_scored[cell_id] = order
+
+            historical_count = 0
+            if self._can_see_legacy(user):
+                historical_rows = conn.execute(
+                    """
+                    SELECT l.model_col, l.model_canonical, l.checkpoint, l.thinking_mode, l.harness,
+                           l.metric AS metric_name, l.raw_score, l.norm_score_100, l.scale_type,
+                           l.benchmark AS raw_dataset_name, l.benchmark AS batch_name,
+                           COALESCE(r.benchmark_slug, l.benchmark_slug) AS benchmark_slug,
+                           r.dataset_release_id, r.dataset_version, r.split, r.known_task_count,
+                           bm.display_name AS release_display_name,
+                           EXISTS (SELECT 1 FROM task_definitions t WHERE t.dataset_release_id = r.dataset_release_id
+                                   AND LOWER(COALESCE(t.split, '')) = 'holdout') AS has_holdout_tasks,
+                           'legacy' AS runner, 'legacy-20261120-csv' AS scoring_protocol
+                    FROM legacy_leaderboard_rows l
+                    LEFT JOIN dataset_releases r ON r.dataset_release_id = l.dataset_release_id
+                    LEFT JOIN benchmarks bm ON bm.benchmark_slug = COALESCE(r.benchmark_slug, l.benchmark_slug)
+                    ORDER BY l.model_col, l.benchmark, l.metric, l.id
+                    """,
+                )
+                for record in historical_rows:
+                    row = dict(record)
+                    if (
+                        not _task_details_allowed(row, row["split"], can_holdout=can_holdout)
+                        or (not can_holdout and row["has_holdout_tasks"])
+                        or not (finite(row["norm_score_100"]) and finite(row["raw_score"]))
+                    ):
+                        continue
+                    add_release(row)
+                    cell = _evaluation_cell(row, kind="historical_summary", source_id=(
+                        row["model_col"], row["raw_dataset_name"], row["metric_name"],
+                    ))
+                    cell = cells.setdefault(cell["id"], cell)
+                    score = {
+                        "model_col": row["model_col"], "score": round(row["norm_score_100"], 2),
+                        "raw_score": row["raw_score"], "denominator": None,
+                    }
+                    if score not in cell["historical_scores"]:
+                        cell["historical_scores"].append(score)
+                        historical_count += 1
+
+            task_counts = conn.execute(
+                """
+                SELECT dataset_release_id, COUNT(*) AS total,
+                       SUM(LOWER(COALESCE(split, '')) = 'holdout') AS holdout
+                FROM task_definitions WHERE dataset_release_id IN (SELECT value FROM json_each(?))
+                GROUP BY dataset_release_id
+                """,
+                (json.dumps(list(releases)),),
+            )
+            for count in task_counts:
+                release = releases[count["dataset_release_id"]]
+                if not can_holdout and count["holdout"]:
+                    release["registered_task_count"] = count["total"] - count["holdout"]
+                elif release["registered_task_count"] is None:
+                    release["registered_task_count"] = count["total"]
+
+        cell_list = list(cells.values())
+        for cell in cell_list:
+            release = releases.get(cell["dataset_release_id"])
+            cell["registered_task_count"] = release["registered_task_count"] if release else None
+        cell_list.sort(key=lambda cell: (-cell["published_run_count"], cell["id"]))
+        return {
+            "summary": {
+                "cell_count": len(cell_list), "batch_count": len(seen_runs),
+                "published_run_count": published, "running_count": running,
+                "unmapped_batch_count": unmapped, "historical_summary_count": historical_count,
+            },
+            "releases": [releases[release_id] for release_id in sorted(releases)],
+            "groups": _evaluation_sectors(cell_list, releases),
+            "cells": cell_list,
+        }
 
     # --- 1. Models ---
 
