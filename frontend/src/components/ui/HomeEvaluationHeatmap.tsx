@@ -1,15 +1,17 @@
-import { useEffect, useId, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { useQueries, useQuery } from '@tanstack/react-query';
 import { ArrowLeft, Info, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } from 'lucide-react';
-import { useSearchParams } from 'react-router-dom';
+import { useLocation, useSearchParams } from 'react-router-dom';
 import { apiFetch } from '../../lib/api';
-import { useDismissibleDetails } from '../../lib/dismissibleLayer';
+import { useDismissibleDialog } from '../../lib/dismissibleDialog';
+import { useDismissibleLayer } from '../../lib/dismissibleLayer';
 import {
   cellSearchText, cellTitle, changeState, datasetName, findMapLock, zeroBaselineHistory, historyReason, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
   type EvaluationMap, type HistoryItem, type MapAxis, type MapCell, type Rectangle, type Sector,
 } from '../../lib/evaluationMap';
 import { useAppStore } from '../../lib/store';
 import { SlidingTabs } from '../motion/primitives';
+import { DismissiblePanel } from './DismissiblePanel';
 import { HeatmapDetails } from './HeatmapDetails';
 import { HomeDatasetSwitcher } from './HomeDatasetSwitcher';
 import { StateNoticeCard } from './Skeletons';
@@ -26,8 +28,28 @@ const subscribeToPhone = (callback: () => void) => {
 };
 const getPhone = () => window.matchMedia(phoneQuery).matches;
 
+function useToolbarPopover() {
+  const id = useId();
+  const container = useRef<HTMLDivElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const [open, setOpen] = useState(false);
+  const dismiss = useDismissibleLayer(container, open, () => setOpen(false), () => trigger.current?.focus());
+
+  return {
+    id,
+    open,
+    containerProps: { ref: container, ...dismiss },
+    triggerProps: {
+      ref: trigger,
+      'aria-expanded': open,
+      'aria-controls': id,
+      onClick: () => setOpen((visible) => !visible),
+    },
+  };
+}
+
 function ChangeLegend() {
-  const help = useDismissibleDetails();
+  const help = useToolbarPopover();
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <ul aria-label="涨跌图例" className="m-0 flex list-none flex-wrap items-center gap-x-2 gap-y-1 p-0 text-xs font-semibold sm:gap-x-3">
@@ -40,16 +62,53 @@ function ChangeLegend() {
         <li>= 持平</li>
         <li className="text-[var(--text-secondary)]">— 暂无分差</li>
       </ul>
-      <details className="heatmap-help" {...help}>
-        <summary className="flex min-h-10 cursor-pointer list-none items-center gap-1 rounded-md px-1.5 text-xs font-semibold text-[var(--text-secondary)] sm:min-h-8 [&::-webkit-details-marker]:hidden hover:bg-[var(--bg-elevated)]">
+      <div {...help.containerProps}>
+        <button type="button" {...help.triggerProps} className="flex min-h-10 cursor-pointer items-center gap-1 rounded-md px-1.5 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] sm:min-h-8">
           <Info className="size-3.5 shrink-0" aria-hidden /> 读图
-        </summary>
-        <div className="heatmap-help-panel grid gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 text-xs leading-relaxed text-[var(--text-secondary)] shadow-lg">
+        </button>
+        <DismissiblePanel open={help.open} id={help.id} className="heatmap-help-panel grid origin-top-right gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 text-xs leading-relaxed text-[var(--text-secondary)] shadow-lg">
           <p className="m-0">板块按登记题量分配面积，格子大小代表已发布评测次数。</p>
           <p className="m-0">涨跌幅越大，颜色越亮。首次出分或缺可比前次时，有效评分对照 0 分。</p>
           <p className="m-0">点开格子可查看评分、对照来源和暂无分差的原因。</p>
-        </div>
-      </details>
+        </DismissiblePanel>
+      </div>
+    </div>
+  );
+}
+
+function HeatmapFilters({ catalogue, locks, onSelect }: {
+  catalogue?: EvaluationMap;
+  locks: Record<MapAxis, string>;
+  onSelect: (axis: MapAxis, value: string) => void;
+}) {
+  const layer = useToolbarPopover();
+  const filters = mapAxes.map(({ id, label }) => ({
+    id, label, options: catalogue?.groups[id] ?? [],
+    active: catalogue ? findMapLock(catalogue, id, locks[id]) : undefined,
+  }));
+
+  return (
+    <div className="md:relative" {...layer.containerProps}>
+      <button type="button" aria-label="筛选" title="筛选" {...layer.triggerProps} className={`${toolbarAction} relative`}>
+        <SlidersHorizontal className="size-4 shrink-0" aria-hidden /> <span className="hidden sm:inline">筛选</span>
+        {filters.some(({ active }) => active) && (
+          <span className="size-1.5 shrink-0 rounded-full bg-[var(--brand-primary)] max-sm:absolute max-sm:top-1.5 max-sm:right-1.5" title="已筛选" />
+        )}
+      </button>
+      <DismissiblePanel open={layer.open} id={layer.id} className="absolute top-auto right-2 z-20 mt-2 grid w-[min(16rem,calc(100vw-2rem))] origin-top-right gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 shadow-lg md:top-full md:right-0">
+        {filters.map(({ id, label, options, active }) => (
+          <label key={id} className="grid min-w-0 grid-cols-[4.25rem_1fr] items-center text-xs font-semibold">
+            <span>{label}</span>
+            <select value={active?.id ?? ''} onChange={(event) => onSelect(id, event.target.value)}
+              className="min-w-0 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] py-1.5 text-sm">
+              <option value="">全部</option>
+              {active && !options.some((group) => group.id === active.id) && <option value={active.id}>{active.label}</option>}
+              {[...options].sort((a, b) => a.label.localeCompare(b.label))
+                .map((group) => <option key={group.id} value={group.id}>{group.label}</option>)}
+            </select>
+          </label>
+        ))}
+      </DismissiblePanel>
     </div>
   );
 }
@@ -157,17 +216,19 @@ function SectorMap({ sector, rect, axis, zoomed, history, selected, onZoom, onSe
   );
 }
 
-function MapSearch({ sectors, axis, history, onSector, onCell, dialogRef, unweighted }: {
+function MapSearch({ sectors, axis, history, onSector, onCell, dialog, unweighted, session }: {
   sectors: Sector[];
   axis: MapAxis;
   history: HistoryByCell;
   onSector: (sector: Sector) => void;
   onCell: (sector: Sector, cell: MapCell) => void;
-  dialogRef: React.RefObject<HTMLDialogElement | null>;
+  dialog: ReturnType<typeof useDismissibleDialog>;
   unweighted: boolean;
+  session: number;
 }) {
   const titleId = useId();
   const [term, setTerm] = useState('');
+  useLayoutEffect(() => setTerm(''), [session]);
   const terms = term.trim().toLowerCase().split(/\s+/).filter(Boolean);
   const matches = sectors.flatMap((sector) => {
     const cells = sector.cells.filter((cell) => {
@@ -179,19 +240,18 @@ function MapSearch({ sectors, axis, history, onSector, onCell, dialogRef, unweig
   });
 
   function submit(sector: Sector, cell?: MapCell) {
-    dialogRef.current?.close();
+    dialog.close();
     if (cell) onCell(sector, cell);
     else onSector(sector);
   }
 
   return (
-    <dialog ref={dialogRef} aria-labelledby={titleId} onClose={() => setTerm('')}
-      onClick={(event) => { if (event.target === event.currentTarget) dialogRef.current?.close(); }}
-      className={`fixed inset-x-0 bottom-0 top-auto m-0 w-full max-w-none overflow-hidden p-0 backdrop:bg-black/45 md:inset-0 md:m-auto md:max-w-xl md:rounded-2xl ${dialogClass}`}>
+    <dialog {...dialog.dialogProps} aria-labelledby={titleId}
+      className={`fixed inset-x-0 bottom-0 top-auto m-0 w-full max-w-none origin-bottom overflow-hidden p-0 backdrop:bg-black/45 md:inset-0 md:m-auto md:max-w-xl md:origin-center md:rounded-2xl ${dialogClass}`}>
       <div className="flex max-h-[min(82dvh,42rem)] flex-col p-3 md:p-4">
         <div className="mb-2 flex items-center justify-between gap-3">
           <h3 id={titleId} className="m-0 text-base font-bold">{unweighted ? '查找未绘制记录' : '查找评测组合'}</h3>
-          <button type="button" aria-label="关闭搜索" className={action} onClick={() => dialogRef.current?.close()}>
+          <button type="button" aria-label="关闭搜索" className={action} onClick={dialog.close}>
             <X className="size-4" aria-hidden />
           </button>
         </div>
@@ -248,29 +308,23 @@ function MapSearch({ sectors, axis, history, onSector, onCell, dialogRef, unweig
   );
 }
 
-function DetailPanel({ phone, cell, history, onClose, refreshCatalogue }: {
-  phone: boolean;
+type DetailPanelProps = {
   cell: MapCell;
   history: HistoryByCell;
-  onClose: () => void;
   refreshCatalogue: () => void;
-}) {
-  const dialog = useRef<HTMLDialogElement>(null);
-  const close = useRef<HTMLButtonElement>(null);
-  const heading = useId();
-  useEffect(() => {
-    const element = dialog.current;
-    if (phone && element && !element.open) element.showModal();
-    else close.current?.focus({ preventScroll: true });
-    return () => { if (element?.open) element.close(); };
-  }, [phone, cell.id]);
+};
 
+function DetailContent({ heading, cell, history, closeButton, onClose, refreshCatalogue }: DetailPanelProps & {
+  heading: string;
+  closeButton?: React.RefObject<HTMLButtonElement | null>;
+  onClose: () => void;
+}) {
   const status = history.get(cell.id);
-  const detail = (
+  return (
     <div className="p-3 sm:p-4">
       <div className="mb-3 flex items-center justify-between gap-2">
         <h3 id={heading} className="m-0 text-xs font-semibold tracking-wide text-[var(--text-secondary)]">评测详情</h3>
-        <button ref={close} type="button" aria-label="关闭评测详情" className={action} onClick={onClose}>
+        <button ref={closeButton} type="button" aria-label="关闭评测详情" className={action} onClick={onClose}>
           <X className="size-4" aria-hidden />
         </button>
       </div>
@@ -281,14 +335,62 @@ function DetailPanel({ phone, cell, history, onClose, refreshCatalogue }: {
         }} />
     </div>
   );
-  if (phone) return (
-    <dialog ref={dialog} aria-labelledby={heading} className={`heatmap-dialog p-0 ${dialogClass}`}
-      onCancel={(event) => { event.preventDefault(); onClose(); }}
-      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}>
-      {detail}
+}
+
+function DesktopDetailPanel({ onClose, ...detail }: DetailPanelProps & { onClose: () => void }) {
+  const heading = useId();
+  const closeButton = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    closeButton.current?.focus({ preventScroll: true });
+  }, [detail.cell.id]);
+  return (
+    <aside className="heatmap-side bg-[var(--bg-surface)]" aria-labelledby={heading}>
+      <DetailContent heading={heading} closeButton={closeButton} onClose={onClose} {...detail} />
+    </aside>
+  );
+}
+
+function MobileDetailPanel({ cell, selectionKey, searchButton, onDismiss, ...detail }: Omit<DetailPanelProps, 'cell'> & {
+  cell?: MapCell;
+  selectionKey: string;
+  searchButton: React.RefObject<HTMLButtonElement | null>;
+  onDismiss: () => void;
+}) {
+  const heading = useId();
+  const { dialogProps, showModal, close } = useDismissibleDialog();
+  const [lastCell, setLastCell] = useState(cell);
+  const animationRun = useRef(0);
+  const shownCell = cell ?? lastCell;
+
+  // A second click on the same cell can produce a fresh URL entry during exit.
+  useLayoutEffect(() => {
+    if (!cell) {
+      close();
+      return;
+    }
+    setLastCell(cell);
+    if (!dialogProps.ref.current?.open) {
+      animationRun.current += 1;
+      showModal(document.getElementById(`heatmap-tile-${cell.id}`) ?? searchButton.current ?? undefined);
+    }
+  }, [cell, close, dialogProps.ref, searchButton, selectionKey, showModal]);
+
+  return (
+    <dialog {...dialogProps} aria-labelledby={heading} className={`heatmap-dialog p-0 ${dialogClass}`}
+      onClose={(event) => {
+        const element = event.currentTarget;
+        if (element.open) return;
+        if (cell) onDismiss();
+        const run = ++animationRun.current;
+        const animations = element.getAnimations();
+        if (animations.length === 0) setLastCell(undefined);
+        else void Promise.allSettled(animations.map((animation) => animation.finished)).then(() => {
+          if (animationRun.current === run) setLastCell(undefined);
+        });
+      }}>
+      {shownCell && <DetailContent heading={heading} cell={shownCell} onClose={close} {...detail} />}
     </dialog>
   );
-  return <aside className="heatmap-side bg-[var(--bg-surface)]" aria-labelledby={heading}>{detail}</aside>;
 }
 
 export function useHomeEvaluationMap() {
@@ -304,7 +406,7 @@ export function useHomeEvaluationMap() {
 
 export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typeof useHomeEvaluationMap> }) {
   const [params, setParams] = useSearchParams();
-  const filterLayer = useDismissibleDetails();
+  const { key: selectionKey } = useLocation();
   const [axis, locks] = useMemo(() => {
     const view = params.get('view');
     return [
@@ -313,7 +415,8 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
     ] as const;
   }, [params]);
   const [unweightedSearch, setUnweightedSearch] = useState(false);
-  const search = useRef<HTMLDialogElement>(null);
+  const [searchSession, setSearchSession] = useState(0);
+  const search = useDismissibleDialog();
   const searchButton = useRef<HTMLButtonElement>(null);
   const section = useRef<HTMLElement>(null);
   const canvas = useRef<HTMLDivElement>(null);
@@ -329,10 +432,6 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
   const zoomId = params.get('sector') || params.get('subject');
   const zoom = zoomId ? sectors.find((sector) => sector.id === zoomId || sector.label.toLowerCase() === zoomId.toLowerCase()) : undefined;
   const shown = zoom ? [zoom] : sectors;
-  const filters = mapAxes.map(({ id, label }) => ({
-    id, label, options: catalogue.data?.groups[id] ?? [],
-    active: catalogue.data ? findMapLock(catalogue.data, id, locks[id]) : undefined,
-  }));
   const selectedId = params.get('cell');
   const selected = shown.flatMap((sector) => sector.cells).find((cell) => cell.id === selectedId);
   const unweightedCount = sectors.reduce((sum, sector) => sum + sector.cells.filter((cell) => (
@@ -441,9 +540,11 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
     });
   }
 
-  function openSearch(onlyUnweighted = false) {
+  function openSearch(trigger: HTMLElement, onlyUnweighted = false) {
     setUnweightedSearch(onlyUnweighted);
-    search.current?.showModal();
+    setSearchSession((session) => session + 1);
+    search.showModal(trigger);
+    search.dialogProps.ref.current?.querySelector('input')?.focus({ preventScroll: true });
   }
 
   async function toggleFullscreen() {
@@ -495,7 +596,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
               onChange={(value) => changeUrl({ view: value, sector: null, subject: null })} size="sm" />
           </div>
           <button type="button" ref={searchButton} className={toolbarAction} aria-label="搜索评测组合" title="搜索评测组合"
-            aria-haspopup="dialog" onClick={() => openSearch()}>
+            aria-haspopup="dialog" onClick={(event) => openSearch(event.currentTarget)}>
             <Search className="size-4 shrink-0" aria-hidden /> <span className="hidden sm:inline">搜索</span>
           </button>
           <button type="button" className={toolbarAction} aria-label={fullscreenLabel} title={fullscreenLabel}
@@ -503,29 +604,8 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
             {fullscreen || fallbackFullscreen ? <Minimize className="size-4" aria-hidden /> : <Maximize className="size-4" aria-hidden />}
             <span className="hidden sm:inline">{fullscreenLabel}</span>
           </button>
-          <details className="md:relative" {...filterLayer}>
-            <summary aria-label="筛选" title="筛选" className={`${toolbarAction} relative list-none [&::-webkit-details-marker]:hidden`}>
-              <SlidersHorizontal className="size-4 shrink-0" aria-hidden /> <span className="hidden sm:inline">筛选</span>
-              {filters.some(({ active }) => active) && (
-                <span className="size-1.5 shrink-0 rounded-full bg-[var(--brand-primary)] max-sm:absolute max-sm:top-1.5 max-sm:right-1.5" title="已筛选" />
-              )}
-            </summary>
-            <div className="absolute top-auto right-2 z-20 mt-2 md:top-full md:right-0 grid w-[min(16rem,calc(100vw-2rem))] gap-2 rounded-lg border border-[var(--border-strong)] bg-[var(--bg-surface)] p-3 shadow-lg">
-              {filters.map(({ id, label, options, active }) => (
-                <label key={id} className="grid min-w-0 grid-cols-[4.25rem_1fr] items-center text-xs font-semibold">
-                  <span>{label}</span>
-                  <select value={active?.id ?? ''}
-                    onChange={(event) => changeUrl({ [`lock_${id}`]: event.target.value, sector: null, subject: null, cell: null })}
-                    className="min-w-0 rounded-md border border-[var(--border-subtle)] bg-[var(--bg-elevated)] py-1.5 text-sm">
-                    <option value="">全部</option>
-                    {active && !options.some((group) => group.id === active.id) && <option value={active.id}>{active.label}</option>}
-                    {[...options].sort((a, b) => a.label.localeCompare(b.label))
-                      .map((group) => <option key={group.id} value={group.id}>{group.label}</option>)}
-                  </select>
-                </label>
-              ))}
-            </div>
-          </details>
+          <HeatmapFilters catalogue={catalogue.data} locks={locks}
+            onSelect={(id, value) => changeUrl({ [`lock_${id}`]: value, sector: null, subject: null, cell: null })} />
         </div>
         <ChangeLegend />
       </header>
@@ -561,14 +641,16 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
                 </div>
               )}
             </div>
-            {selected && <DetailPanel phone={phone} cell={selected} history={history} onClose={closeDetail}
-              refreshCatalogue={() => { void catalogue.refetch(); }} />}
+            {phone ? <MobileDetailPanel cell={selected} selectionKey={selectionKey} history={history} searchButton={searchButton}
+              onDismiss={() => changeUrl({ cell: null })} refreshCatalogue={() => { void catalogue.refetch(); }} />
+              : selected && <DesktopDetailPanel cell={selected} history={history} onClose={closeDetail}
+                refreshCatalogue={() => { void catalogue.refetch(); }} />}
           </div>
         )}
       {unweightedCount > 0 && (
         <div className="flex flex-wrap items-center justify-between gap-1 border-t border-[var(--border-subtle)] px-2.5 py-1.5 text-xs text-[var(--text-secondary)] sm:px-4">
           <span>未参与面积计算的记录</span>
-          <button type="button" aria-haspopup="dialog" onClick={() => openSearch(true)}
+          <button type="button" aria-haspopup="dialog" onClick={(event) => openSearch(event.currentTarget, true)}
             className="min-h-8 cursor-pointer font-semibold text-[var(--brand-primary)] hover:underline">{unweightedCount} 个组合，查看详情</button>
         </div>
       )}
@@ -578,7 +660,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
         </div>
       )}
 
-      <MapSearch dialogRef={search} sectors={sectors} axis={axis} history={history}
+      <MapSearch dialog={search} sectors={sectors} axis={axis} history={history} session={searchSession}
         unweighted={unweightedSearch} onSector={setZoom}
         onCell={(sector, cell) => changeUrl({ sector: sector.id, subject: null, cell: cell.id })} />
     </section>
