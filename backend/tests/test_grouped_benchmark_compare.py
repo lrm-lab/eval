@@ -412,3 +412,158 @@ def test_expected_generation_rejects_stale_selection_and_guards_read_snapshot(ca
         subject.pop("expected_generation_id")
     new = client.post("/api/v1/compare/query", json=old_caller, headers=headers).json()
     assert new["rows"][0]["cells"]["b"]["common_valid"]["score"] == 100
+
+
+def _history_request(client, headers, *batches: tuple[str, str]) -> dict:
+    response = client.post("/api/v1/compare/history", headers=headers, json={"items": [
+        {"id": str(i), "batch_id": batch, "generation_id": generation}
+        for i, (batch, generation) in enumerate(batches)
+    ]})
+    assert response.status_code == 200, response.text
+    assert response.headers["Cache-Control"] == "no-store"
+    return {item["id"]: item for item in response.json()["items"]}
+
+
+def test_evaluation_history_uses_nearest_authorized_aligned_run(case) -> None:
+    _, db, client, headers, _ = case
+    _insert_batch(db, "current", {"a": (1, "same"), "drift": (1, "new"), "fault": (1, "same")})
+    _insert_batch(db, "valid", {"a": (0, "same"), "drift": (1, "old"), "fault": (None, "same")})
+    _insert_batch(db, "older", {"a": (1, "same")})
+    _insert_batch(db, "disjoint", {"other": (0, "same")})
+    _insert_batch(db, "other_project", {"a": (1, "same")}, project="team-other")
+    _insert_batch(db, "other_protocol", {"a": (1, "same")}, protocol="other")
+    _insert_batch(db, "other_release", {"a": (1, "same")}, release=NEXT)
+    _insert_batch(db, "other_configuration", {"a": (1, "same")}, route="other-endpoint")
+    _insert_batch(db, "copy", {"a": (1, "same")})
+    _insert_batch(db, "running", {"a": (1, "same")}, status="running")
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T04:30:00-05:00' WHERE batch_id = 'current'")
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:29:00Z' WHERE batch_id IN "
+                     "('other_project', 'other_protocol', 'other_release', 'copy', 'running', 'other_configuration')")
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:27:00Z' WHERE batch_id = 'disjoint'")
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:20:00Z' WHERE batch_id = 'older'")
+        conn.execute("UPDATE batches SET native_job_id = 'same-job' WHERE batch_id IN ('current','copy')")
+        conn.execute("UPDATE episodes SET finished_at = '2026-11-25T09:25:00Z' WHERE batch_id = 'valid'")
+
+    items = _history_request(
+        client, headers, ("current", "gen_old"), ("other_project", "gen_old"),
+        ("current", "outdated"), ("absent", "gen_old"),
+    )
+    current = items["0"]
+    assert current["reason"] is None
+    assert current["candidate"]["recorded_at"] == "2026-11-25T09:30:00Z"
+    assert current["baseline"] == {
+        "batch_id": "valid", "batch_name": "valid", "generation_id": "gen_old",
+        "recorded_at": "2026-11-25T09:25:00Z", "recorded_at_source": "latest_trial_finished_at",
+    }
+    assert (current["common_valid"], current["common_covered"]) == (1, 2)
+    assert (current["baseline_score"], current["candidate_score"], current["delta_pp"]) == (0.0, 100.0, 100.0)
+    assert (items["1"]["reason"], items["2"]["reason"], items["3"]["reason"]) == (
+        "BATCH_UNAVAILABLE", "RELEASE_GENERATION_MISMATCH", "BATCH_UNAVAILABLE",
+    )
+    for key in ("1", "2", "3"):
+        assert items[key]["candidate"] is None and items[key]["baseline"] is None
+
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET batch_status = 'withdrawn' WHERE batch_id = 'valid'")
+        conn.execute("UPDATE batches SET generation_id = 'gen_new' WHERE batch_id = 'current'")
+        conn.execute("UPDATE episodes SET generation_id = 'gen_new' WHERE batch_id = 'current'")
+    items = _history_request(client, headers, ("current", "gen_new"), ("current", "gen_old"), ("valid", "gen_old"))
+    assert items["0"]["baseline"]["batch_id"] == "older"
+    assert items["0"]["delta_pp"] == 0.0
+    assert items["1"]["reason"] == "RELEASE_GENERATION_MISMATCH"
+    assert items["2"]["reason"] == "BATCH_UNAVAILABLE"
+    assert db.fetchone("SELECT COUNT(*) AS n FROM saved_comparisons")["n"] == 0
+
+
+def test_evaluation_history_explains_missing_time_and_no_common_tasks(case) -> None:
+    _, db, client, headers, _ = case
+    _insert_batch(db, "first", {"a": (0, "same")})
+    _insert_batch(db, "disjoint", {"b": (1, "same")})
+    _insert_batch(db, "missing", {"c": (1, "same"), "d": (1, "same")})
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET finished_at = ? WHERE batch_id = 'first'", (NOW,))
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:15:00Z' WHERE batch_id = 'disjoint'")
+        conn.execute("UPDATE episodes SET finished_at = '2026-11-25T09:20:00Z' WHERE batch_id = 'missing' AND task_id = 'c'")
+    items = _history_request(client, headers, ("first", "gen_old"), ("disjoint", "gen_old"), ("missing", "gen_old"))
+    assert items["0"]["reason"] == "MISSING_RECORDED_TIME"
+    assert items["1"]["reason"] == "NO_COMMON_VALID_TASKS"
+    assert items["1"]["delta_pp"] is None and items["1"]["common_valid"] == 0
+    assert items["2"]["reason"] == "MISSING_RECORDED_TIME"
+    assert items["2"]["candidate"]["recorded_at"] is None
+    with db.transaction() as conn:
+        conn.execute("DELETE FROM batches WHERE batch_id = 'missing'")
+    assert _history_request(client, headers, ("first", "gen_old"))["0"]["reason"] == "NO_PREVIOUS_RUN"
+
+
+def test_evaluation_history_masks_mixed_holdout_run_time_by_role(case) -> None:
+    _, db, client, headers, uid = case
+    _insert_batch(db, "before", {"visible-task": (0, "same"), "hidden-task": (1, "same")})
+    _insert_batch(db, "after", {"visible-task": (1, "same"), "hidden-task": (0, "same")})
+    _insert_batch(db, "whole_holdout", {"hidden-task": (1, "same")}, release=HOLDOUT)
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET finished_at = ? WHERE batch_id = 'before'", (NOW,))
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:15:00Z' WHERE batch_id = 'after'")
+    items = _history_request(client, headers, ("after", "gen_old"), ("whole_holdout", "gen_old"))
+    assert items["0"]["reason"] == "MISSING_RECORDED_TIME"
+    assert items["0"]["candidate"]["recorded_at"] is None
+    assert items["0"]["candidate"]["recorded_at_source"] is None
+    assert items["0"]["baseline"] is None and items["0"]["common_valid"] is None
+    assert items["1"]["reason"] == "BATCH_UNAVAILABLE"
+    with db.transaction() as conn:
+        conn.execute("UPDATE users SET scopes_json = ? WHERE user_id = ?", ('["dataset:holdout_read"]', uid))
+    scoped = _history_request(client, headers, ("after", "gen_old"))["0"]
+    assert scoped["reason"] is None
+    assert scoped["candidate"]["recorded_at"] == "2026-11-25T09:15:00Z"
+    assert scoped["common_valid"] == 2 and scoped["delta_pp"] == 0.0
+
+
+def test_evaluation_history_keeps_pair_selection_and_scores_in_one_snapshot(case, monkeypatch) -> None:
+    app, db, client, headers, _ = case
+    _insert_batch(db, "before", {"a": (0, "same")})
+    _insert_batch(db, "after", {"a": (1, "same")})
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET finished_at = ? WHERE batch_id = 'before'", (NOW,))
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:15:00Z' WHERE batch_id = 'after'")
+
+    service = app.state.ctx.compare
+    preview = service.preview_batch_comparison
+
+    def replace_baseline_before_preview(user, pair, **kwargs):
+        with db.transaction() as conn:
+            conn.execute("UPDATE batches SET generation_id = 'gen_replaced' WHERE batch_id = 'before'")
+            conn.execute("UPDATE episodes SET generation_id = 'gen_replaced', reward = 1 WHERE batch_id = 'before'")
+        return preview(user, pair, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(service, "preview_batch_comparison", replace_baseline_before_preview)
+        item = _history_request(client, headers, ("after", "gen_old"))["0"]
+    assert item["baseline"]["generation_id"] == "gen_old"
+    assert item["baseline_score"] == 0.0 and item["delta_pp"] == 100.0
+
+    item = _history_request(client, headers, ("after", "gen_old"))["0"]
+    assert item["baseline"]["generation_id"] == "gen_replaced"
+    assert item["baseline_score"] == 100.0 and item["delta_pp"] == 0.0
+
+
+def test_evaluation_history_requires_recorded_gateway_configuration(case) -> None:
+    _, db, client, headers, _ = case
+    _insert_batch(db, "before", {"a": (1, "same")})
+    _insert_batch(db, "after", {"a": (0, "same")})
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET has_gateway = 1")
+        conn.execute("UPDATE batches SET finished_at = ? WHERE batch_id = 'before'", (NOW,))
+        conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:15:00Z' WHERE batch_id = 'after'")
+    item = _history_request(client, headers, ("after", "gen_old"))["0"]
+    assert item["reason"] == "INCOMPARABLE_CONFIGURATION"
+    assert item["candidate"]["recorded_at"] and item["delta_pp"] is None
+
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET run_config_json = ?", ('{"wire_api":"responses"}',))
+        conn.execute("UPDATE batches SET run_config_json = ? WHERE batch_id = 'before'", ('{"wire_api":"chat"}',))
+    assert _history_request(client, headers, ("after", "gen_old"))["0"]["reason"] == "INCOMPARABLE_CONFIGURATION"
+
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET run_config_json = ? WHERE batch_id = 'before'", ('{"wire_api":"responses"}',))
+    result = _history_request(client, headers, ("after", "gen_old"))["0"]
+    assert result["reason"] is None and result["delta_pp"] == -100.0
