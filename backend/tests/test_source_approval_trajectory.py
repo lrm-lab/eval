@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from threading import Event
+from unittest.mock import Mock
 
 import pytest
 
@@ -64,7 +68,8 @@ def test_source_approval_reloads_and_resolves_live_directory_aliases(tmp_path, p
     assert not registry.is_evidence_class_approved(second, "atif_trajectory", "approved_restricted")
 
 
-def test_atif_paged_tools_keep_original_positions_and_verify_complete_file(tmp_path, monkeypatch):
+@pytest.fixture()
+def atif_source(tmp_path, monkeypatch):
     config = tmp_path / "config"
     config.mkdir()
     settings = Settings(tianxi_root=tmp_path / "source", config_dir=config, runtime_dir=tmp_path / "runtime")
@@ -75,7 +80,7 @@ def test_atif_paged_tools_keep_original_positions_and_verify_complete_file(tmp_p
             "source_root": str(root),
             "approval_status": "approved_restricted",
             "approved_evidence_classes": ["atif_trajectory"],
-        }],
+        }, *[{"source_root": str(root.parent / f"other-{index}")} for index in range(16)]],
     }))
     service = QueryService(settings, Database(settings.db_path))
     trajectory = root / "trajectory.json"
@@ -104,7 +109,11 @@ def test_atif_paged_tools_keep_original_positions_and_verify_complete_file(tmp_p
     }
     monkeypatch.setattr(service, "_load_batch_and_episode", lambda *args: (batch, episode))
     user = AuthUser("user", "user", "user", "researcher", frozenset({"trace:read"}), frozenset({"default"}), True)
+    return service, user, batch, episode, trajectory, raw
 
+
+def test_atif_paged_tools_keep_original_positions_and_verify_complete_file(tmp_path, atif_source):
+    service, user, batch, episode, trajectory, raw = atif_source
     full = service.read_trial_trajectory(user, "b", "t", step_limit=1)
     assert full["total_steps"] == 4 and [step["step_id"] for step in full["steps"]] == [2]
     tools = service.read_trial_trajectory(user, "b", "t", only_tools=True, step_offset=1, step_limit=1)
@@ -129,3 +138,74 @@ def test_atif_paged_tools_keep_original_positions_and_verify_complete_file(tmp_p
     with pytest.raises(AppError) as tampered:
         service.read_trial_trajectory(user, "b", "t", only_tools=True, step_offset=1, step_limit=1)
     assert tampered.value.code == "GENERATION_MISMATCH"
+
+
+@pytest.mark.parametrize("pause_at", ["target_path", "computed_result"])
+def test_atif_reload_rejects_in_flight_authorization(atif_source, monkeypatch, pause_at):
+    service, user, _, _, trajectory, _ = atif_source
+    registry = service.approval_registry
+    waiting = Event()
+    resume = Event()
+    verify = Mock(wraps=service._verify_lazy_file)
+    monkeypatch.setattr(service, "_verify_lazy_file", verify)
+
+    def pause_once():
+        if not waiting.is_set():
+            waiting.set()
+            assert resume.wait(5)
+
+    if pause_at == "target_path":
+        original_resolve = Path.resolve
+
+        def pause_before_resolution(path, *args, **kwargs):
+            if path == trajectory.parent:
+                pause_once()
+            return original_resolve(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", pause_before_resolution)
+    else:
+        original_lookup = registry._lookup_resolved
+
+        def pause_before_adoption(*args):
+            result = original_lookup(*args)
+            pause_once()
+            return result
+
+        monkeypatch.setattr(registry, "_lookup_resolved", pause_before_adoption)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(service.read_trial_trajectory, user, "b", "t")
+        try:
+            assert waiting.wait(5)
+            registry.config_file.write_text('{"sources": []}')
+            registry.reload()
+        finally:
+            resume.set()
+        with pytest.raises(AppError) as in_flight:
+            request.result(timeout=5)
+        assert in_flight.value.status_code == 403
+    with pytest.raises(AppError) as next_request:
+        service.read_trial_trajectory(user, "b", "t")
+    assert next_request.value.status_code == 403
+    verify.assert_not_called()
+
+
+def test_atif_continuous_approval_reload_fails_closed(atif_source, monkeypatch):
+    service, user, *_ = atif_source
+    registry = service.approval_registry
+    original_lookup = registry._lookup_resolved
+    verify = Mock(wraps=service._verify_lazy_file)
+    monkeypatch.setattr(service, "_verify_lazy_file", verify)
+
+    def replace_rules(*args):
+        result = original_lookup(*args)
+        registry.reload()
+        return result
+
+    lookup = Mock(side_effect=replace_rules)
+    monkeypatch.setattr(registry, "_lookup_resolved", lookup)
+    with pytest.raises(AppError) as unstable:
+        service.read_trial_trajectory(user, "b", "t")
+    assert (unstable.value.status_code, unstable.value.code) == (503, "SOURCE_UNAVAILABLE")
+    assert lookup.call_count == 3
+    verify.assert_not_called()

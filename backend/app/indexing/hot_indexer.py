@@ -647,8 +647,18 @@ class SourceApprovalRegistry:
 
     def lookup_full(self, target_path: Path) -> tuple[str, str, str, frozenset[str]]:
         """Return project, owner, approval and evidence classes using current filesystem paths."""
-        project, owner, sources = self._rules
-        resolved = str(target_path.resolve())
+        for _ in range(3):
+            resolved = str(target_path.resolve())
+            rules = self._rules
+            result = self._lookup_resolved(resolved, *rules)
+            # Reload can replace the rules while filesystem probes are running.
+            if rules is self._rules:
+                return result
+        raise AppError(503, "SOURCE_UNAVAILABLE", "来源审批清册正在更新，请重试")
+
+    def _lookup_resolved(
+        self, resolved: str, project: str, owner: str, sources: list[dict[str, Any]],
+    ) -> tuple[str, str, str, frozenset[str]]:
         rules: list[tuple[dict[str, Any], str, Path, bool]] = []
         parents: dict[Path, bool] = {}
         for entry in sources:
