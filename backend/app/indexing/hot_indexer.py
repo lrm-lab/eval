@@ -16,6 +16,7 @@ from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack, contextmanager
 from pathlib import Path, PurePosixPath
+from threading import BoundedSemaphore
 from typing import Any, Iterator
 
 import yaml
@@ -618,74 +619,109 @@ def write_runner_submission(state_dir: Path, doc: dict[str, Any]) -> None:
                 pass
 
 
-class SourceApprovalRegistry:
-    """Granular directory/prefix approval registry enforcing `approved_evidence_classes` per evidence class."""
+# Limit parallel metadata probes across simultaneous lookups. Each lookup still resolves live paths.
+_SOURCE_APPROVAL_POOL = ThreadPoolExecutor(max_workers=12, thread_name_prefix="source-approval")
+_SOURCE_APPROVAL_SLOTS = BoundedSemaphore(2)
 
-    def __init__(self, config_file: Path) -> None:
+
+class SourceApprovalRegistry:
+    """Granular directory/prefix approval registry enforcing evidence-class permissions."""
+
+    def __init__(self, config_file: Path, *, parallel_lookup: bool = False) -> None:
         self.config_file = config_file
-        self.default_project_id = "default"
-        self.default_owner_id = "system"
-        self.sources: list[dict[str, Any]] = []
+        self._parallel_lookup = parallel_lookup
+        self._rules: tuple[str, str, list[dict[str, Any]]] = ("default", "system", [])
         self.reload()
 
     def reload(self) -> None:
         if self.config_file.is_file():
             cfg = yaml.safe_load(self.config_file.read_text(encoding="utf-8")) or {}
-            self.default_project_id = cfg.get("default_project_id", "default")
-            self.default_owner_id = cfg.get("default_owner_id", "system")
-            self.sources = cfg.get("sources", [])
+            self._rules = (
+                cfg.get("default_project_id", "default"),
+                cfg.get("default_owner_id", "system"),
+                cfg.get("sources", []),
+            )
         else:
-            self.sources = []
+            project, owner, _ = self._rules
+            self._rules = (project, owner, [])
 
     def lookup_full(self, target_path: Path) -> tuple[str, str, str, frozenset[str]]:
-        """Return (project_id, owner_id, approval_status, approved_evidence_classes) for target_path.
-        Unmatched directories default strictly to pending with EMPTY approved_evidence_classes."""
+        """Return project, owner, approval and evidence classes using current filesystem paths."""
+        project, owner, sources = self._rules
         resolved = str(target_path.resolve())
-        best: dict[str, Any] | None = None
-        best_len = -1
-        for entry in self.sources:
+        rules: list[tuple[dict[str, Any], str, Path, bool]] = []
+        parents: dict[Path, bool] = {}
+        for entry in sources:
             raw_root = str(entry.get("source_root") or "")
             if not raw_root:
                 continue
-            mode = str(entry.get("match_mode", "dir"))
-            if mode == "prefix":
-                p_raw = Path(raw_root)
-                norm_prefix = (
-                    str(p_raw.parent.resolve() / p_raw.name)
-                    if p_raw.parent.exists()
-                    else raw_root
-                )
-                if resolved.startswith(norm_prefix) and len(norm_prefix) > best_len:
-                    best = entry
-                    best_len = len(norm_prefix)
-            else:
-                root = str(Path(raw_root).resolve())
-                if (resolved == root or resolved.startswith(root.rstrip("/") + "/")) and len(root) > best_len:
+            path = Path(raw_root)
+            prefix = str(entry.get("match_mode", "dir")) == "prefix"
+            rules.append((entry, raw_root, path, prefix))
+            parents[path.parent] = parents.get(path.parent, False) or prefix
+
+        def resolve_parent(item: tuple[Path, bool]) -> tuple[Path, Path, bool]:
+            parent, has_prefix = item
+            return parent, parent.resolve(), has_prefix and parent.exists()
+
+        def resolve_rule(rule: tuple[dict[str, Any], str, Path, bool]) -> tuple[dict[str, Any], str, bool]:
+            entry, raw, path, prefix = rule
+            parent, exists = canonical_parents[path.parent]
+            leaf = parent / path.name
+            if prefix:
+                root = str(leaf) if exists else raw
+                return entry, root, resolved.startswith(root)
+            try:
+                if (path.name in ("", "..") or leaf.is_symlink()
+                        or self._contains_path(str(leaf), resolved)):
+                    leaf = path.resolve()
+            except OSError:
+                leaf = path.resolve()
+            root = str(leaf)
+            return entry, root, self._contains_path(root, resolved)
+
+        parallel = (
+            self._parallel_lookup and len(rules) >= 16 and _SOURCE_APPROVAL_SLOTS.acquire(blocking=False)
+        )
+        resolve_all = _SOURCE_APPROVAL_POOL.map if parallel else map
+        best: dict[str, Any] | None = None
+        best_len = -1
+        try:
+            canonical_parents = {
+                path: (canonical, exists) for path, canonical, exists in resolve_all(resolve_parent, parents.items())
+            }
+            for entry, root, matches in resolve_all(resolve_rule, rules):
+                if matches and len(root) > best_len:
                     best = entry
                     best_len = len(root)
+        finally:
+            if parallel:
+                _SOURCE_APPROVAL_SLOTS.release()
         if best is not None:
-            classes = frozenset(str(c) for c in (best.get("approved_evidence_classes") or []))
             return (
-                str(best.get("project_id", self.default_project_id)),
-                str(best.get("owner_id", self.default_owner_id)),
+                str(best.get("project_id", project)),
+                str(best.get("owner_id", owner)),
                 str(best.get("approval_status", "pending")),
-                classes,
+                frozenset(str(c) for c in (best.get("approved_evidence_classes") or [])),
             )
-        return self.default_project_id, self.default_owner_id, "pending", frozenset()
+        return project, owner, "pending", frozenset()
+
+    @staticmethod
+    def _contains_path(root: str, target: str) -> bool:
+        return target == root or target.startswith(root.rstrip("/") + "/")
 
     def lookup(self, target_path: Path) -> tuple[str, str, str]:
         p, o, s, _ = self.lookup_full(target_path)
         return p, o, s
 
     def is_evidence_class_approved(self, target_path: Path | None, evidence_class: str, batch_approval: str) -> bool:
-        if batch_approval == "pending":
+        approved = ("approved_public", "approved_restricted")
+        if batch_approval not in approved:
             return False
         if target_path is None:
-            return batch_approval in ("approved_public", "approved_restricted")
+            return True
         _, _, status, classes = self.lookup_full(target_path)
-        if status == "pending":
-            return False
-        return evidence_class in classes
+        return status in approved and evidence_class in classes
 
 
 class HotIndexer:
