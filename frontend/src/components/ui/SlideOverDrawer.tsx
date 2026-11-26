@@ -68,7 +68,7 @@ export function SlideOverDrawer({
           </button>
         </div>
       </div>
-      <div className="flex-1 overflow-y-auto p-5">{children}</div>
+      <div className="min-w-0 flex-1 overflow-y-auto p-5 [overflow-wrap:anywhere]">{children}</div>
     </ModalOverlay>
   );
 }
