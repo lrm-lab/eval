@@ -27,8 +27,8 @@ const getPhone = () => window.matchMedia(phoneQuery).matches;
 function ChangeLegend() {
   return (
     <ul aria-label="涨跌图例" className="m-0 flex list-none flex-wrap items-center gap-x-3 gap-y-0.5 p-0 text-xs font-semibold">
-      <li className="heatmap-change" data-tone="up">↑ 上升</li>
-      <li className="heatmap-change" data-tone="down">↓ 回落</li>
+      <li className="heatmap-change" data-tone="up">↑ 上涨</li>
+      <li className="heatmap-change" data-tone="down">↓ 下跌</li>
       <li>= 持平</li>
       <li className="text-[var(--text-secondary)]">批次对照 / 运行快照</li>
       <li className="text-[var(--text-secondary)]">— 尚无可比前次</li>

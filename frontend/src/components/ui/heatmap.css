@@ -1,5 +1,7 @@
 .evaluation-heatmap {
   --heatmap-canvas-height: max(400px, calc(100dvh - 13.5rem));
+  --heatmap-rise-color: var(--sem-err-fg);
+  --heatmap-fall-color: var(--sem-pass-fg);
 }
 
 .evaluation-heatmap:fullscreen,
@@ -57,19 +59,19 @@
 }
 
 .heatmap-tile[data-tone='up'] {
-  background: color-mix(in srgb, var(--sem-pass-fg) var(--heat-intensity, 26%), var(--bg-surface));
+  background: color-mix(in srgb, var(--heatmap-rise-color) var(--heat-intensity, 26%), var(--bg-surface));
 }
 
 .heatmap-tile[data-tone='down'] {
-  background: color-mix(in srgb, var(--sem-err-fg) var(--heat-intensity, 26%), var(--bg-surface));
+  background: color-mix(in srgb, var(--heatmap-fall-color) var(--heat-intensity, 26%), var(--bg-surface));
 }
 
 .heatmap-tile[data-tone='flat'] {
   background: color-mix(in srgb, var(--text-muted) 27%, var(--bg-surface));
 }
 
-.heatmap-change[data-tone='up'] { color: var(--sem-pass-fg); }
-.heatmap-change[data-tone='down'] { color: var(--sem-err-fg); }
+.heatmap-change[data-tone='up'] { color: var(--heatmap-rise-color); }
+.heatmap-change[data-tone='down'] { color: var(--heatmap-fall-color); }
 
 .heatmap-tile:hover,
 .heatmap-tile[aria-pressed='true'] {
