@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.config import Settings
 from app.db.database import Database
 from app.main import create_app
+from app.services.evaluation_reference import EVALUATION_REFERENCES, EvaluationReference
 from tests.conftest import create_user, login_client
 
 
@@ -414,9 +415,9 @@ def test_expected_generation_rejects_stale_selection_and_guards_read_snapshot(ca
     assert new["rows"][0]["cells"]["b"]["common_valid"]["score"] == 100
 
 
-def _history_request(client, headers, *batches: tuple[str, str]) -> dict:
+def _history_request(client, headers, *batches: tuple[str, str], mode: str = "strict") -> dict:
     response = client.post("/api/v1/compare/history", headers=headers, json={"items": [
-        {"id": str(i), "batch_id": batch, "generation_id": generation}
+        {"id": str(i), "batch_id": batch, "generation_id": generation, "mode": mode}
         for i, (batch, generation) in enumerate(batches)
     ]})
     assert response.status_code == 200, response.text
@@ -555,19 +556,47 @@ def test_evaluation_history_requires_recorded_gateway_configuration(case) -> Non
     _insert_batch(db, "before", {"a": (1, "same")})
     _insert_batch(db, "after", {"a": (0, "same")})
     with db.transaction() as conn:
-        conn.execute("UPDATE batches SET has_gateway = 1")
+        conn.execute("UPDATE batches SET has_gateway = 1, evidence_approval = 'approved_restricted'")
         conn.execute("UPDATE batches SET finished_at = ? WHERE batch_id = 'before'", (NOW,))
         conn.execute("UPDATE batches SET finished_at = '2026-11-25T09:15:00Z' WHERE batch_id = 'after'")
     item = _history_request(client, headers, ("after", "gen_old"))["0"]
     assert item["reason"] == "INCOMPARABLE_CONFIGURATION"
     assert item["candidate"]["recorded_at"] and item["delta_pp"] is None
+    item = _history_request(client, headers, ("after", "gen_old"), mode="auto")["0"]
+    assert item["reference_label"] and item["delta_pp"] == -100.0
+    assert item["common_valid"] == 1
 
     with db.transaction() as conn:
         conn.execute("UPDATE batches SET run_config_json = ?", ('{"wire_api":"responses"}',))
         conn.execute("UPDATE batches SET run_config_json = ? WHERE batch_id = 'before'", ('{"wire_api":"chat"}',))
     assert _history_request(client, headers, ("after", "gen_old"))["0"]["reason"] == "INCOMPARABLE_CONFIGURATION"
+    item = _history_request(client, headers, ("after", "gen_old"), mode="auto")["0"]
+    assert item["reference_label"] and item["delta_pp"] == -100.0
 
     with db.transaction() as conn:
         conn.execute("UPDATE batches SET run_config_json = ? WHERE batch_id = 'before'", ('{"wire_api":"responses"}',))
     result = _history_request(client, headers, ("after", "gen_old"))["0"]
     assert result["reason"] is None and result["delta_pp"] == -100.0
+    result = _history_request(client, headers, ("after", "gen_old"), mode="auto")["0"]
+    assert "reference_label" not in result
+
+
+def test_reviewed_history_rechecks_active_snapshot_pins_and_access(case, monkeypatch) -> None:
+    _, db, client, headers, _ = case
+    monkeypatch.setitem(EVALUATION_REFERENCES, "after", EvaluationReference("before", "gen_old", "gen_old", "fixture"))
+    _insert_batch(db, "before", {"a": (1, "same"), "b": (0, "same")}, status="interrupted")
+    _insert_batch(db, "after", {"a": (0, "same"), "b": (0, "same")}, status="running")
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET evidence_approval = 'approved_restricted'")
+    response = client.get("/api/v1/home/evaluation-map").json()
+    assert any(cell.get("reviewed_batch") == {"batch_id": "after", "generation_id": "gen_old"}
+               for cell in response["cells"])
+    assert _history_request(client, headers, ("after", "gen_old"))["0"]["reason"] == "BATCH_UNAVAILABLE"
+    item = _history_request(client, headers, ("after", "gen_old"), mode="reviewed")["0"]
+    assert item["reference_is_partial"] and item["common_valid"] == 2 and item["delta_pp"] == -50.0
+    assert _history_request(client, headers, ("after", "wrong"), mode="reviewed")["0"]["reason"] == "BATCH_UNAVAILABLE"
+
+    with db.transaction() as conn:
+        conn.execute("UPDATE batches SET evidence_approval = 'revoked' WHERE batch_id = 'before'")
+    item = _history_request(client, headers, ("after", "gen_old"), mode="reviewed")["0"]
+    assert item["reason"] == "BATCH_UNAVAILABLE" and item["baseline"] is None and item["candidate"] is None

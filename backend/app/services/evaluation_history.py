@@ -14,6 +14,7 @@ from app.security.authz import (
     sql_project_filter,
     sql_task_holdout_exclude_clause,
 )
+from app.services.evaluation_reference import APPROVED_REFERENCE_EVIDENCE, EVALUATION_REFERENCES
 from app.services.evaluation_time import _recorded_instant, evaluation_recorded_at
 from app.services.profile_service import _comparison_identity, _recorded_batch_settings, _recorded_identity
 
@@ -53,12 +54,13 @@ def _configuration(row: dict[str, Any], identity: dict[str, Any]) -> tuple | Non
     )
 
 
-def _visible(row, user: AuthUser, *, can_holdout: bool) -> bool:
+def _visible(row, user: AuthUser, *, can_holdout: bool, allow_running: bool = False) -> bool:
     if row["evidence_approval"] == "revoked" or not can_access_project(
         user, row["project_id"], owner_id=row["owner_id"],
     ):
         return False
-    if str(row["batch_status"] or "").strip().lower() in _NONCOMPLETED_STATUSES:
+    status = str(row["batch_status"] or "").strip().lower()
+    if status in _NONCOMPLETED_STATUSES and not (allow_running and status == "running"):
         return False
     return can_holdout or not is_holdout_dataset_or_batch(
         dataset_release_id=row["dataset_release_id"],
@@ -104,6 +106,7 @@ def _compare_history_item(
     preview: Callable[..., dict[str, Any]],
     *,
     can_holdout: bool,
+    allow_references: bool = False,
 ) -> dict[str, Any]:
     outcome = _outcome(
         None, candidate=_reference(conn, current, can_holdout=can_holdout),
@@ -119,11 +122,12 @@ def _compare_history_item(
     if current_time is None:
         return {**outcome, "reason": "MISSING_RECORDED_TIME"}
 
-    if current["configuration"] is None:
+    verified_configuration = current["configuration"] is not None
+    if not verified_configuration and not allow_references:
         return {**outcome, "reason": "INCOMPARABLE_CONFIGURATION"}
-
-    reasons = set()
+    reasons = set() if verified_configuration else {"INCOMPARABLE_CONFIGURATION"}
     prior = []
+    references = []
     for peer in peers:
         if peer["run_key"] == current["run_key"]:
             continue
@@ -131,7 +135,8 @@ def _compare_history_item(
         when = _recorded_instant(reference["recorded_at"])
         if when is not None and when > current_time:
             continue
-        if peer["configuration"] != current["configuration"]:
+        same_configuration = verified_configuration and peer["configuration"] == current["configuration"]
+        if not same_configuration and not allow_references:
             reasons.add("INCOMPARABLE_CONFIGURATION")
         elif peer["dataset_release_id"] != current["dataset_release_id"]:
             reasons.add("INCOMPARABLE_RELEASE")
@@ -143,28 +148,39 @@ def _compare_history_item(
             reasons.add("MISSING_VALID_SCORE")
         elif when is None or when == current_time:
             reasons.add("MISSING_RECORDED_TIME")
-        else:
+        elif same_configuration:
             prior.append((when, reference))
+        else:
+            reasons.add("INCOMPARABLE_CONFIGURATION")
+            if (
+                peer["reference_identity"] == current["reference_identity"]
+                and all(row["batch_status"] == "finished" and row["evidence_approval"] in APPROVED_REFERENCE_EVIDENCE
+                        for row in (peer, current))
+            ):
+                references.append((when, reference))
 
     nearest_result = None
-    for _, reference in sorted(prior, key=lambda pair: (pair[0], pair[1]["batch_id"]), reverse=True):
-        score = preview(
-            user,
-            {
-                "id": current["batch_id"],
-                "baseline": reference,
-                "candidate": outcome["candidate"],
-                "dataset_release_id": current["dataset_release_id"],
-                "scoring_protocol": current["scoring_protocol"],
-            },
-            conn=conn,
-        )
-        score.pop("id")
-        compared = {**outcome, **score, "baseline": reference}
-        if compared["reason"] is None:
-            return compared
-        if nearest_result is None:
-            nearest_result = compared
+    for candidates, is_reference in ((prior, False), (references, True)):
+        for _, reference in sorted(candidates, key=lambda pair: (pair[0], pair[1]["batch_id"]), reverse=True):
+            score = preview(
+                user,
+                {
+                    "id": current["batch_id"],
+                    "baseline": reference,
+                    "candidate": outcome["candidate"],
+                    "dataset_release_id": current["dataset_release_id"],
+                    "scoring_protocol": current["scoring_protocol"],
+                },
+                conn=conn,
+            )
+            score.pop("id")
+            compared = {**outcome, **score, "baseline": reference}
+            if compared["reason"] is None:
+                if is_reference:
+                    compared["reference_label"] = "同题批次对照 · 运行配置未确认一致"
+                return compared
+            if nearest_result is None:
+                nearest_result = compared
 
     if nearest_result is not None:
         return nearest_result
@@ -173,6 +189,51 @@ def _compare_history_item(
         "INCOMPARABLE_RELEASE", "INCOMPARABLE_CONFIGURATION",
     ) if code in reasons), "NO_PREVIOUS_RUN")
     return {**outcome, "reason": reason}
+
+
+def _reviewed_comparison(
+    conn: Connection,
+    user: AuthUser,
+    item: dict[str, Any],
+    rows: dict[str, dict[str, Any]],
+    preview: Callable[..., dict[str, Any]],
+    *,
+    can_holdout: bool,
+) -> dict[str, Any]:
+    candidate = rows.get(item["batch_id"])
+    reference = EVALUATION_REFERENCES.get(item["batch_id"])
+    if candidate is None or reference is None or item["generation_id"] != reference.candidate_generation:
+        return _outcome("BATCH_UNAVAILABLE")
+    baseline = rows.get(reference.baseline_id)
+    if (
+        baseline is None or baseline["generation_id"] != reference.baseline_generation
+        or candidate["generation_id"] != reference.candidate_generation
+    ):
+        return _outcome("BATCH_UNAVAILABLE")
+
+    context = ("dataset_release_id", "split", "scoring_protocol", "recorded_metric")
+    if not all(candidate[key] and baseline[key] == candidate[key] for key in context):
+        return _outcome("INCOMPARABLE_RELEASE")
+    before = _reference(conn, baseline, can_holdout=can_holdout)
+    after = _reference(conn, candidate, can_holdout=can_holdout)
+    score = preview(
+        user,
+        {
+            "id": item["id"], "baseline": before, "candidate": after,
+            "dataset_release_id": candidate["dataset_release_id"], "scoring_protocol": candidate["scoring_protocol"],
+        },
+        conn=conn,
+    )
+    if score["reason"]:
+        return _outcome(score["reason"])
+    score.pop("id")
+    outcome = _outcome(
+        None, baseline=before, candidate=after,
+        dataset_release_id=candidate["dataset_release_id"], split=candidate["split"],
+        scoring_protocol=candidate["scoring_protocol"], reference_label=reference.label,
+        reference_is_partial=any(row["batch_status"] != "finished" for row in (baseline, candidate)),
+    )
+    return {**outcome, **score}
 
 
 def build_evaluation_history(
@@ -218,13 +279,29 @@ def build_evaluation_history(
     )
     by_id = {}
     by_identity = defaultdict(list)
+    reviewed_ids = {
+        batch_id
+        for item in items
+        if item.get("mode") == "reviewed" and (reference := EVALUATION_REFERENCES.get(item["batch_id"])) is not None
+        for batch_id in (item["batch_id"], reference.baseline_id)
+    }
+    reviewed_rows = {}
     for raw in rows:
+        if (
+            raw["batch_id"] in reviewed_ids and raw["evidence_approval"] in APPROVED_REFERENCE_EVIDENCE
+            and _visible(raw, user, can_holdout=can_holdout, allow_running=raw["batch_id"] in EVALUATION_REFERENCES)
+        ):
+            reviewed_rows[raw["batch_id"]] = dict(raw)
         if not _visible(raw, user, can_holdout=can_holdout):
             continue
         row = dict(raw)
         identity = _comparison_identity(row)
         row["configuration"] = _configuration(row, identity)
         row["peer_key"] = row["benchmark_slug"], identity["model_canonical"], identity["harness"]
+        row["reference_identity"] = (
+            identity["model_key"], identity["model_route"], row["model_provider"], identity["harness_key"],
+            row["runner"], row["run_scope"], row["fault_policy"],
+        )
         job_id = row["managed_job_id"] or row["native_job_id"]
         row["run_key"] = (
             ("job", row["project_id"], row["owner_id"], row["runner"], job_id)
@@ -235,17 +312,24 @@ def build_evaluation_history(
 
     results = {}
     for item in items:
-        key = item["batch_id"], item["generation_id"]
+        mode = item.get("mode", "strict")
+        key = item["batch_id"], item["generation_id"], mode
         if key in results:
             continue
         current = by_id.get(item["batch_id"])
-        if current is None:
+        if mode == "reviewed":
+            result = _reviewed_comparison(conn, user, item, reviewed_rows, preview, can_holdout=can_holdout)
+        elif current is None:
             result = _outcome("BATCH_UNAVAILABLE")
         elif current["generation_id"] != item["generation_id"]:
             result = _outcome("RELEASE_GENERATION_MISMATCH")
         else:
             result = _compare_history_item(
                 user, conn, current, by_identity[current["peer_key"]], preview, can_holdout=can_holdout,
+                allow_references=mode == "auto",
             )
         results[key] = result
-    return {"items": [{"id": item["id"], **results[item["batch_id"], item["generation_id"]]} for item in items]}
+    return {"items": [
+        {"id": item["id"], **results[item["batch_id"], item["generation_id"], item.get("mode", "strict")]}
+        for item in items
+    ]}

@@ -4,7 +4,7 @@ import { ArrowLeft, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } f
 import { useSearchParams } from 'react-router-dom';
 import { apiFetch } from '../../lib/api';
 import {
-  cellSearchText, cellTitle, changeState, datasetName, findMapLock, layoutTreemap, mapAxes, visibleSectors,
+  cellSearchText, cellTitle, changeState, datasetName, findMapLock, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
   type EvaluationMap, type HistoryItem, type MapAxis, type MapCell, type Rectangle, type Sector,
 } from '../../lib/evaluationMap';
 import { useAppStore } from '../../lib/store';
@@ -30,6 +30,7 @@ function ChangeLegend() {
       <li className="heatmap-change" data-tone="up">↑ 上升</li>
       <li className="heatmap-change" data-tone="down">↓ 回落</li>
       <li>= 持平</li>
+      <li className="text-[var(--text-secondary)]">批次对照 / 运行快照</li>
       <li className="text-[var(--text-secondary)]">— 尚无可比前次</li>
       <li className="text-[var(--text-secondary)]">… 等待计算</li>
     </ul>
@@ -55,8 +56,9 @@ function Tile({ rect, axis, cell, history, selected, onSelect }: {
 }) {
   const [primary, secondary] = cellTitle(cell, axis);
   const state = changeState(history?.result, history?.pending, history?.failed);
+  const reference = referenceBadge(history?.result);
   const intensity = Math.min(51, 21 + Math.sqrt(Math.abs(history?.result?.delta_pp ?? 0)) * 3.6);
-  const text = [datasetName(cell), primary, secondary, cell.dataset_version, cell.split, state.label, state.value,
+  const text = [datasetName(cell), primary, secondary, cell.dataset_version, cell.split, state.label, state.value, reference,
     `${cell.published_run_count} 次已发布`].filter(Boolean).join(' · ');
   const showTitle = rect.width >= 68 && rect.height >= 34;
   const showValue = rect.width >= 73 && rect.height >= (showTitle ? 55 : 20);
@@ -82,7 +84,7 @@ function Tile({ rect, axis, cell, history, selected, onSelect }: {
       {(showValue || rect.width >= 17 && rect.height >= 19) && (
         <span className={`block w-full truncate font-semibold tabular-nums ${showValue ? 'mt-0.5 px-2 text-[11px] sm:text-xs' : 'text-center text-[10px]'}`}>
           {state.symbol}{showValue && (state.value
-            ? ` ${state.value}` : rect.width >= 125 ? ` ${state.label}` : null)}
+            ? ` ${state.value}${reference ? ` · ${reference}` : ''}` : rect.width >= 125 ? ` ${state.label}` : null)}
         </span>
       )}
     </button>
@@ -315,19 +317,22 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
   )).length, 0);
 
   const batches = useMemo(() => {
-    const chunks: Array<Array<{ id: string; batch_id: string; generation_id: string }>> = [];
+    type HistoryRequest = { id: string; cellId: string; batch_id: string; generation_id: string; mode: 'auto' | 'reviewed' };
+    const chunks: HistoryRequest[][] = [];
     const visible = (zoom ? [zoom] : sectors.filter((sector) => (sector.registered_task_count ?? 0) > 0))
       .flatMap((sector) => sector.cells.filter((cell) => cell.published_run_count > 0));
     const needsDetail = selected && !visible.some((cell) => cell.id === selected.id) ? [selected] : [];
     for (const cell of [...needsDetail, ...visible]) {
-      const batch = cell.kind === 'trials' ? cell.latest_scored_batch : null;
-      if (!batch) continue;
-      let chunk = chunks.at(-1);
-      if (!chunk || chunk.length === 18) {
-        chunk = [];
-        chunks.push(chunk);
+      if (cell.kind !== 'trials') continue;
+      for (const [batch, mode] of [[cell.latest_scored_batch, 'auto'], [cell.reviewed_batch, 'reviewed']] as const) {
+        if (!batch) continue;
+        let chunk = chunks.at(-1);
+        if (!chunk || chunk.length === 18) {
+          chunk = [];
+          chunks.push(chunk);
+        }
+        chunk.push({ id: `${cell.id}:${mode}`, cellId: cell.id, batch_id: batch.batch_id, generation_id: batch.generation_id, mode });
       }
-      chunk.push({ id: cell.id, batch_id: batch.batch_id, generation_id: batch.generation_id });
     }
     return chunks;
   }, [sectors, zoom, selected]);
@@ -335,7 +340,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
     queries: batches.map((items) => ({
       queryKey: ['home-evaluation-history', viewerKey, items],
       queryFn: ({ signal }: { signal: AbortSignal }) => apiFetch<{ items: HistoryItem[] }>('/api/v1/compare/history', {
-        method: 'POST', body: JSON.stringify({ items }), signal,
+        method: 'POST', body: JSON.stringify({ items: items.map(({ cellId, ...item }) => item) }), signal,
       }),
       staleTime: 30_000,
       refetchInterval: 60_000,
@@ -343,12 +348,22 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
     })),
   });
   const history: HistoryByCell = new Map();
+  const reviewedHistory: HistoryByCell = new Map();
   batches.forEach((group, index) => {
     const query = histories[index];
     const results = new Map(query.data?.items.map((item) => [item.id, item]));
-    group.forEach(({ id }) => history.set(id, {
-      result: results.get(id), pending: query.isPending, failed: query.isError, retry: () => { void query.refetch(); },
-    }));
+    group.forEach(({ id, cellId, mode }) => {
+      const target = mode === 'reviewed' ? reviewedHistory : history;
+      target.set(cellId, {
+        result: results.get(id), pending: query.isPending, failed: query.isError, retry: () => { void query.refetch(); },
+      });
+    });
+  });
+  reviewedHistory.forEach((entry, cellId) => {
+    const previous = history.get(cellId);
+    if (!previous || ((previous.result?.reason !== null || previous.result.reference_label) && entry.result?.reason === null)) {
+      history.set(cellId, entry);
+    }
   });
 
   useEffect(() => {

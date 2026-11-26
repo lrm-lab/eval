@@ -21,6 +21,7 @@ from app.security.authz import (
     sql_task_holdout_exclude_clause,
 )
 from app.security.storage_probe import validate_safe_id
+from app.services.evaluation_reference import APPROVED_REFERENCE_EVIDENCE, EVALUATION_REFERENCES
 from app.services.evaluation_time import evaluation_recorded_at
 from app.services.methodology import METHODOLOGY_VERSION, finite, normalize_score_to_100, normalize_trial_score_to_100
 from app.services.query_service import _project_filter_sql, _sanitize_batch_row
@@ -476,6 +477,14 @@ class ProfileService:
                 cell = _evaluation_cell(row, kind="trials", source_id=run_key)
                 cell_id = cell["id"]
                 cell = cells.setdefault(cell_id, cell)
+                reference = EVALUATION_REFERENCES.get(row["batch_id"])
+                if (
+                    reference and row["generation_id"] == reference.candidate_generation and batch["scored"]
+                    and row["evidence_approval"] in APPROVED_REFERENCE_EVIDENCE and not row["is_running_placeholder"]
+                ):
+                    cell["reviewed_batch"] = {
+                        "batch_id": row["batch_id"], "generation_id": row["generation_id"],
+                    }
 
                 is_published = (
                     not row["is_running_placeholder"] and not active

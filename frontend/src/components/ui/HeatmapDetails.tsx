@@ -1,7 +1,7 @@
 import { ArrowRight, GitCompareArrows } from 'lucide-react';
 import { Link } from 'react-router-dom';
 import {
-  changeState, datasetName, groupedCompareHref, harnessName, historicalCompareHref, historyReason, modelName,
+  changeState, datasetName, groupedCompareHref, harnessName, historicalCompareHref, historyReason, modelName, referenceBadge,
   type HistoryItem, type MapCell,
 } from '../../lib/evaluationMap';
 import { fmtDateShort, fmtPct, runScopeLabel } from '../../lib/format';
@@ -26,6 +26,7 @@ export function HeatmapDetails({ cell, history, pending, failed, onRetry }: {
 }) {
   const change = changeState(history, pending);
   const compare = history && historicalCompareHref(history);
+  const reference = referenceBadge(history);
   const grouped = groupedCompareHref(cell);
   const unavailable = history?.reason === 'BATCH_UNAVAILABLE' || history?.reason === 'RELEASE_GENERATION_MISMATCH';
   const scoredBatch = unavailable ? null : cell.latest_scored_batch;
@@ -94,7 +95,7 @@ export function HeatmapDetails({ cell, history, pending, failed, onRetry }: {
       ) : (
         <section aria-label="前后成绩" className="rounded-lg bg-[var(--bg-elevated)] p-3">
           <div className="flex items-baseline justify-between gap-2">
-            <h4 className="m-0 text-sm font-bold">{compare ? '共同有效题得分' : '本次成绩'}</h4>
+            <h4 className="m-0 text-sm font-bold">{reference ?? (compare ? '共同有效题得分' : '本次成绩')}</h4>
             {change.value && <span data-tone={change.tone} className="heatmap-change font-bold tabular-nums">
               {change.symbol} {change.value}
             </span>}
@@ -102,6 +103,11 @@ export function HeatmapDetails({ cell, history, pending, failed, onRetry }: {
           {compare && (
             <p className="mt-1 mb-3 text-xs text-[var(--text-secondary)]">
               共同有效 {history?.common_valid ?? '—'} 题 · 共同覆盖 {history?.common_covered ?? '—'} 题
+            </p>
+          )}
+          {reference && (
+            <p className="mt-1 mb-3 text-xs text-[var(--text-secondary)]">
+              {history?.reference_label}{history?.reference_is_partial && ' · 有批次未完成，分差以当前已计分的共同题为准'}
             </p>
           )}
           {candidate && (

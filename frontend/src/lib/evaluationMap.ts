@@ -61,6 +61,7 @@ export interface MapCell {
   running_count: number;
   latest_batch: MapBatch | null;
   latest_scored_batch: MapBatch | null;
+  reviewed_batch?: Pick<BatchRef, 'batch_id' | 'generation_id'>;
   historical_scores: Array<{ model_col: string; score: number | null; denominator: number | null }>;
 }
 
@@ -93,6 +94,13 @@ export interface HistoryItem {
   baseline_score: number | null;
   candidate_score: number | null;
   delta_pp: number | null;
+  reference_label?: string;
+  reference_is_partial?: boolean;
+}
+
+export function referenceBadge(result: HistoryItem | undefined) {
+  if (!result?.reference_label) return null;
+  return result.reference_is_partial ? '运行快照' : '批次对照';
 }
 
 export interface Sector extends MapGroup {

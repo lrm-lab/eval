@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import JSONResponse, Response
@@ -43,6 +43,7 @@ class PreviewComparisons(BaseModel):
 
 class HistoryItem(PreviewBatch):
     id: str
+    mode: Literal["strict", "auto", "reviewed"] = "strict"
 
 
 class HistoryComparisons(BaseModel):
