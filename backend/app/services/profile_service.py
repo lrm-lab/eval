@@ -395,7 +395,7 @@ class ProfileService:
     ) -> None:
         self.settings = settings
         self.db = db
-        self.approval_registry = approval_registry or SourceApprovalRegistry(settings.source_approval_file)
+        self.approval_registry = approval_registry or SourceApprovalRegistry(settings.source_approval_file, parallel_lookup=True)
 
     def _can_see_legacy(self, user: AuthUser) -> bool:
         proj_id, owner_id, _, _ = self.approval_registry.lookup_full(self.settings.legacy_root_dir / "leaderboard.csv")

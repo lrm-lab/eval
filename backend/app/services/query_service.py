@@ -93,7 +93,7 @@ class QueryService:
     def __init__(self, settings: Settings, db: Database) -> None:
         self.settings = settings
         self.db = db
-        self.approval_registry = SourceApprovalRegistry(settings.source_approval_file)
+        self.approval_registry = SourceApprovalRegistry(settings.source_approval_file, parallel_lookup=True)
 
     def _resolve_batch_root(self, batch: dict[str, Any]) -> Path | None:
         ns = batch.get("source_namespace")
@@ -957,14 +957,15 @@ class QueryService:
     ) -> dict[str, Any]:
         batch, ep = self._load_batch_and_episode(user, batch_id, trial_id)
         require_scope(user, "trace:read")
-        if self._is_holdout_batch(batch):
-            require_scope(user, "dataset:holdout_read")
         self._require_evidence_class(batch, "atif_trajectory", "来源未批准 atif_trajectory 证据类，隐藏受限轨迹正文")
         is_vlm = batch["runner"] == "vlmevalkit"
         if is_vlm:
             require_scope(user, "direct_vlm_qa:read")
             self._require_evidence_class(batch, "direct_vlm_qa", "来源未批准 direct_vlm_qa 证据类，隐藏多模态问答轨迹正文")
         strip_vlm_answers = is_vlm and not has_scope(user, "dataset:answer_read")
+
+        if batch["generation_id"] != ep["generation_id"]:
+            raise AppError(409, "GENERATION_MISMATCH", "试验与批次发布代不一致，请刷新后重试")
 
         ev_refs = json.loads(ep.get("evidence_refs_json") or "{}")
         t_ref = ev_refs.get("trajectory")
@@ -976,10 +977,14 @@ class QueryService:
         data = json.loads(raw.decode("utf-8", errors="replace"))
         raw_steps = data.get("steps") if isinstance(data, dict) and isinstance(data.get("steps"), list) else []
 
+        matching_steps = [
+            (idx, step)
+            for idx, step in enumerate(raw_steps)
+            if isinstance(step, dict)
+            and (not only_tools or any(isinstance(call, dict) for call in step.get("tool_calls") or []))
+        ]
         paired_steps: list[dict[str, Any]] = []
-        for idx, step in enumerate(raw_steps):
-            if not isinstance(step, dict):
-                continue
+        for idx, step in matching_steps[step_offset : step_offset + step_limit]:
             obs_map: dict[str, dict[str, Any]] = {}
             for res in (step.get("observation") or {}).get("results") or []:
                 if isinstance(res, dict) and res.get("source_call_id"):
@@ -1003,8 +1008,6 @@ class QueryService:
                         else None,
                     }
                 )
-            if only_tools and not paired_tools:
-                continue
             paired_steps.append(
                 {
                     "step_id": step.get("step_id", idx + 1),
@@ -1017,19 +1020,18 @@ class QueryService:
                 }
             )
 
-        sliced = paired_steps[step_offset : step_offset + step_limit]
         return {
             "batch_id": batch_id,
             "generation_id": ep["generation_id"],
             "trial_id": trial_id,
             "trajectory_status": ep["trajectory_status"],
-            "total_steps": len(paired_steps),
+            "total_steps": len(matching_steps),
             "step_offset": step_offset,
             "step_limit": step_limit,
             "agent": data.get("agent") if isinstance(data, dict) else None,
             "token_semantics": ep["token_semantics"],
             "final_metrics": data.get("final_metrics") if isinstance(data, dict) else None,
-            "steps": sliced,
+            "steps": paired_steps,
             "methodology_version": METHODOLOGY_VERSION,
         }
 
