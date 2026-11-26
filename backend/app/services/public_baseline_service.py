@@ -14,7 +14,7 @@ from app.api.errors import AppError
 from app.db.database import Database
 from app.security.auth import AuthUser
 from app.security.authz import can_access_project, has_scope
-from app.services.public_baseline_sources import SOURCES, SOURCES_BY_ID, TEXT_LEADERS, PublicSource
+from app.services.public_baseline_sources import SOURCES, SOURCES_BY_ID, TEXT_LEADERS, PublicSource, PublicTextLeader
 
 logger = logging.getLogger(__name__)
 
@@ -83,7 +83,7 @@ class PublicBaselineService:
         try:
             while not self._stop.is_set():
                 wait = self.interval
-                for source in SOURCES:
+                for source in (*SOURCES, *(leader for leader in TEXT_LEADERS if leader.fetch is not None)):
                     if self._stop.is_set():
                         return
                     if self.db.read_only_mode:
@@ -106,10 +106,13 @@ class PublicBaselineService:
         finally:
             self.db.close_thread_connection()
 
-    def refresh(self, source: PublicSource) -> bool:
+    def refresh(self, source: PublicSource | PublicTextLeader) -> bool:
+        fetch = source.fetch
+        if fetch is None:
+            return False
         attempted = _now().isoformat()
         try:
-            rows, published = source.fetch()
+            rows, published = fetch()
             if not rows or len({row.id for row in rows}) != len(rows):
                 raise ValueError("empty or duplicate score rows")
             payload = json.dumps([asdict(row) for row in rows], ensure_ascii=False, allow_nan=False)
@@ -179,10 +182,18 @@ class PublicBaselineService:
         if include_text_leaders:
             for leader in TEXT_LEADERS:
                 item = asdict(leader)
-                item["id"] = leader.row.id.partition(":")[0]
+                item.pop("fetch")
+                item["id"] = leader.id
                 item["status"] = "snapshot"
                 item["task_count"] = leader.row.task_count
                 item["rows"] = [item.pop("row")]
+                snapshot = self._snapshot(leader.id) if leader.fetch is not None else None
+                if snapshot and (synced := snapshot["synced_at"]):
+                    overdue = self.interval and _now() - datetime.fromisoformat(synced) > timedelta(seconds=self.interval * 2)
+                    item["status"] = "ready" if snapshot["succeeded"] and not overdue else "stale"
+                    item["synced_at"] = synced
+                    item.pop("captured_on")
+                    item["rows"] = json.loads(snapshot["rows_json"])
                 result.append(item)
         return {"sources": result}
 

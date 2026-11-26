@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 from datetime import datetime
+from html.parser import HTMLParser
 from typing import Any, Callable
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -15,6 +17,7 @@ _HARBOR_ROWS = "https://api.harborframework.com/functions/v1/api/v1/leaderboards
 _HARBOR_BOARD_ID = "60330f75-0dd8-47ea-bd1d-e2ea28945731"
 _HARBOR_HEADERS = {"Harbor-API-Version": "2026-09-10.preview"}
 _DEEPSWE_FEED = "https://deepswe.datacurve.ai/artifacts/v1.1/leaderboard-live.json"
+_APEX_SHORTLIST_FEED = "https://matharena.ai/competition_tables/apex--shortlist_2025"
 _GAIA_FEED = "https://datasets-server.huggingface.co/filter?" + urlencode({
     "dataset": "gaia-benchmark/results_public", "config": "2023", "split": "test",
     "orderby": '"score" DESC', "offset": 0, "length": 100,
@@ -243,9 +246,87 @@ class PublicTextLeader:
     scoring_rule: str
     row: PublicScore
     captured_on: str = "2026-11-25"
+    reference_kind: str = "leaderboard"
+    reference_note: str = ""
+    fetch: Callable[[], tuple[list[PublicScore], str | None]] | None = None
+
+    @property
+    def id(self) -> str:
+        return self.row.id.partition(":")[0]
 
 
-# Dated, attributed rank-one observations from the evaluator's published score pages.
+class _MathArenaResults(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rows: list[dict[str, str]] = []
+        self._row: dict[str, str] | None = None
+        self._field: str | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if tag == "tr" and "model-row" in classes:
+            self._row = {"id": attributes.get("data-config") or ""}
+        if tag == "td" and self._row is not None:
+            self._field = next((field for field in ("rank", "model-name", "metric-bar-cell--accuracy")
+                                if field in classes), None)
+            if self._field == "metric-bar-cell--accuracy" and attributes.get("data-predicted") != "no":
+                self._field = None
+
+    def handle_data(self, data: str) -> None:
+        if self._row is not None and self._field is not None:
+            self._row[self._field] = self._row.get(self._field, "") + data
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "td":
+            self._field = None
+        if tag == "tr" and self._row is not None:
+            self.rows.append(self._row)
+            self._row = None
+
+
+def _fetch_apex_shortlist() -> tuple[list[PublicScore], str | None]:
+    table = _read_json(_APEX_SHORTLIST_FEED)["table"]
+    if not isinstance(table, str):
+        raise ValueError("missing MathArena accuracy table")
+    parsed = _MathArenaResults()
+    parsed.feed(table)
+    leaders = []
+    for row in parsed.rows:
+        if row.get("rank", "").strip() != "1":
+            continue
+        measured = re.match(r"\s*(\d+(?:\.\d+)?)\s*%", row.get("metric-bar-cell--accuracy", ""))
+        if measured is None:
+            continue
+        name = _text(" ".join(row.get("model-name", "").replace("⚠️", "").split()))
+        leaders.append(PublicScore(
+            f"matharena-apex-shortlist:{_id(_text(row['id']), name)}",
+            name, "", None, _percent(float(measured[1])), 47, 188,
+        ))
+    if not leaders:
+        raise ValueError("no measured rank-one result in MathArena Apex Shortlist")
+    return _ranked(leaders), None
+
+
+_LONGMEMEVAL_PAPER = (
+    "https://proceedings.iclr.cc/paper_files/paper/2025/file/"
+    "d813d324dbf0598bbdc9c8e79740ed01-Paper-Conference.pdf#page=6"
+)
+
+
+def _longmemeval_reference(split: str, label: str, score: float) -> PublicTextLeader:
+    return PublicTextLeader(
+        "longmemeval", f"longmemeval__2026-11-20__{split}", "accuracy",
+        "LongMemEval 原论文 · Figure 3b", _LONGMEMEVAL_PAPER, "2024 论文评测版", label,
+        "问答准确率",
+        "500 道题，由 GPT-4o 评判答案。取原论文 Figure 3b 该配置列的最高成绩。",
+        PublicScore(f"longmemeval-{split}:snapshot", "GPT-4o", "", None, score, 500, 500),
+        captured_on="2026-11-26", reference_kind="paper",
+        reference_note="原论文对照实验最高分。站内历史题集修订和判分配置未能逐项对齐。",
+    )
+
+
+# Published first-party leaderboard observations and dated paper references.
 # The historical CSV gives no per-configuration scoring protocol for these rows.
 TEXT_LEADERS = (
     PublicTextLeader(
@@ -282,5 +363,35 @@ TEXT_LEADERS = (
         "Google IFEval 2023", "train", "提示级严格准确率",
         "单轮 541 条提示，每条提示全部约束通过才记为正确。",
         PublicScore("ifeval-strict:snapshot", "google/gemma-4-31B-it", "lm-evaluation-harness", None, 91.3, 541, 541),
+    ),
+    PublicTextLeader(
+        "apex-shortlist", "apex-shortlist__2026-11-20__default", "accuracy", "MathArena · Apex Shortlist",
+        "https://matharena.ai/?comp=apex--shortlist_2025", "Apex Shortlist 2025", "全量", "准确率",
+        "MathArena 公布的实测准确率。47 道题，每题 4 次。",
+        PublicScore("matharena-apex-shortlist:snapshot", "GPT-5.5", "", "xhigh", 98.4, 47, 188),
+        captured_on="2026-11-26",
+        reference_note="MathArena 榜单另行标记题集公开后发布的模型。",
+        fetch=_fetch_apex_shortlist,
+    ),
+    _longmemeval_reference("oracle-direct", "Oracle · Direct", 87.0),
+    _longmemeval_reference("oracle-con", "Oracle · CoN", 92.4),
+    _longmemeval_reference("s-direct", "S · Direct", 60.6),
+    _longmemeval_reference("s-con", "S · CoN", 64.0),
+    PublicTextLeader(
+        "multi-challenge", "multi-challenge__2026-11-20__default", "overall-score", "Scale Labs · MultiChallenge",
+        "https://labs.scale.com/leaderboard/multichallenge", "2026 榜单修订版", "Large", "Overall score",
+        "Scale Labs Large 榜按置信区间排名，基于按题判定规则的自动裁判。",
+        PublicScore("scale-multichallenge-large:snapshot", "Gemini 4 Carbon", "one-pass-agent", "high", 85.90, 266, None),
+        captured_on="2026-11-26",
+        reference_note="266 为当前公开 test 题数。站内历史分与公榜修订后的题目和裁判口径尚未对齐。",
+    ),
+    PublicTextLeader(
+        "multi-lcb", "multi-lcb__2026-11-20__default", "pass@1", "Multi-LCB 官方榜 · 12 种语言",
+        "https://multi-lcb.github.io/#leaderboard", "Multi-LCB", "2025-01-26 至 2025-04-06",
+        "12 种语言平均 Pass@1",
+        "取公开榜默认时间窗口中覆盖全部 12 种语言的最高分。榜首配置覆盖窗口内 131/134 道题。",
+        PublicScore("multi-lcb-12-languages:snapshot", "GPT-OSS-120B", "", "High", 81.9, 131, None),
+        captured_on="2026-11-26",
+        reference_note="公开榜全语言组第 1，公开榜总榜第 1 仅测 Python。站内历史题目时间窗口尚未对齐。",
     ),
 )

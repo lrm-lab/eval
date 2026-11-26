@@ -7,7 +7,14 @@ import { EChartBox, glassTooltipConfig } from './EChartBox';
 import { leaderName, useComparePublicLeaders, type CompareSubject } from './comparePublicLeaders';
 
 const LEADER_SERIES = '公开榜首';
+const MIXED_REFERENCE_SERIES = '公开榜首 / 论文最佳';
 const LEADER_COLOR = '#14b8a6';
+const LONGMEMEVAL_VARIANTS: Record<string, string> = {
+  'oracle-con': 'Oracle · CoN',
+  'oracle-direct': 'Oracle · Direct',
+  's-con': 'S · CoN',
+  's-direct': 'S · Direct',
+};
 
 export function CompareScoreCharts({
   comparisonId,
@@ -34,6 +41,18 @@ export function CompareScoreCharts({
   }, []);
 
   const overlays = useComparePublicLeaders(rows, subjects, snapshot);
+  const publicSeries = overlays.some(({ point }) => point?.source.reference_kind === 'paper')
+    ? MIXED_REFERENCE_SERIES
+    : LEADER_SERIES;
+  const { axisLabels, datasetNames } = useMemo(() => {
+    const variants = rows.map((row) => row.benchmark_slug === 'longmemeval'
+      ? LONGMEMEVAL_VARIANTS[row.dataset_release_id.split('__').at(-1) ?? '']
+      : undefined);
+    return {
+      axisLabels: rows.map((row, index) => variants[index] ?? row.raw_dataset_name),
+      datasetNames: rows.map((row, index) => variants[index] ? `LongMemEval · ${variants[index]}` : row.raw_dataset_name),
+    };
+  }, [rows]);
   const hasRadar = rows.length >= 3;
   const option = useMemo<echarts.EChartsOption>(() => {
     const textColor = theme === 'dark' ? '#a1a1aa' : '#475569';
@@ -41,9 +60,8 @@ export function CompareScoreCharts({
     const radarCenter = stacked ? '50%' : '16.67%';
     const barTitleTop = stacked ? (hasRadar ? 284 : 88) : 6;
     const titleStyle = { color: textColor, fontSize: 13, fontWeight: 600 };
-    const datasetNames = rows.map((row) => row.raw_dataset_name);
     const scores = subjects.map(({ id, alias }) => ({
-      name: alias === LEADER_SERIES || subjects.some((other) => other.id !== id && other.alias === alias) ? `${alias} (${id})` : alias,
+      name: alias === publicSeries || subjects.some((other) => other.id !== id && other.alias === alias) ? `${alias} (${id})` : alias,
       color: stableColorForKey(id),
       values: rows.map((row) => row.cells[id]?.common_valid?.score ?? null),
     }));
@@ -52,30 +70,31 @@ export function CompareScoreCharts({
     const hasLeader = leaderValues.some((score) => score != null);
     const legendNames = scores.map(({ name }) => name);
     if (hasLeader) {
-      if (stacked) legendNames.unshift(LEADER_SERIES);
-      else legendNames.push(LEADER_SERIES);
+      if (stacked) legendNames.unshift(publicSeries);
+      else legendNames.push(publicSeries);
     }
     const radarY = stacked ? 148 : 158;
     const radarRadius = stacked ? 78 : 86;
 
     function leaderTooltip(index: number) {
       const { point, deltas, missing, reasons } = overlays[index];
-      if (point && visibleLegend.current[LEADER_SERIES] === false) return '';
+      if (point && visibleLegend.current[publicSeries] === false) return '';
       if (!point) return '<div>' + escapeHtml(LEADER_SERIES) + ' · ' + escapeHtml(missing) + '</div>';
       const { leader, source } = point;
+      const pointLabel = source.reference_kind === 'paper' ? '论文最佳' : LEADER_SERIES;
       const denominator = leader.task_count + ' 题 · ' + (leader.sample_count == null ? '计分次数未公布' : leader.sample_count + ' 次计分');
       const scope = [source.dataset_version, source.split, source.metric, denominator].join(' · ');
       const date = source.captured_on ? ' · 快照 ' + source.captured_on : '';
       const differences = deltas.map(({ subject, delta }) =>
         '<div>' + escapeHtml(subject) + ' · ' + escapeHtml(fmtDeltaPP(delta)) + '</div>').join('');
-      const reference = reasons.length ? '<div>未列分差的分数仅供参考</div>' : '';
-      return '<div><strong>' + escapeHtml(LEADER_SERIES) + ' · ' + escapeHtml(fmtPct(leader.score_pct)) + '</strong></div>'
+      const reference = reasons.length ? '<div>参考分 · ' + escapeHtml(source.reference_note || reasons[0]) + '</div>' : '';
+      return '<div><strong>' + escapeHtml(pointLabel + ' · ' + escapeHtml(fmtPct(leader.score_pct))) + '</strong></div>'
         + '<div>' + escapeHtml(leaderName(leader)) + '</div><div>' + escapeHtml(source.label + date) + '</div>'
         + '<div>' + escapeHtml(scope) + '</div>' + differences + reference;
     }
 
     const leaderBars: echarts.BarSeriesOption = {
-      name: LEADER_SERIES,
+      name: publicSeries,
       type: 'bar',
       itemStyle: { color: LEADER_COLOR, borderRadius: [4, 4, 0, 0] },
       data: leaderValues,
@@ -83,7 +102,7 @@ export function CompareScoreCharts({
     // Native radar layouts place missing values at the center. Connect only
     // adjacent measured axes so a gap never looks like a score of zero.
     const leaderRadar: echarts.CustomSeriesOption = {
-      name: LEADER_SERIES,
+      name: publicSeries,
       type: 'custom',
       z: 5,
       coordinateSystem: 'none',
@@ -158,7 +177,7 @@ export function CompareScoreCharts({
             return '<strong>' + escapeHtml(first.name) + '</strong>' + datasetNames.map((name, index) =>
               '<div>' + escapeHtml(name) + ' · ' + escapeHtml(fmtPct(typeof values[index] === 'number' ? values[index] : null)) + '</div>').join('');
           }
-          const scoreLines = items.filter((item) => item.seriesName !== LEADER_SERIES && typeof item.value === 'number')
+          const scoreLines = items.filter((item) => item.seriesName !== publicSeries && typeof item.value === 'number')
             .map((item) => '<div>' + escapeHtml(item.seriesName) + ' · ' + escapeHtml(fmtPct(item.value as number)) + '</div>');
           return '<strong>' + escapeHtml(datasetNames[first.dataIndex]) + '</strong>' + scoreLines.join('') + leaderTooltip(first.dataIndex);
         },
@@ -178,7 +197,7 @@ export function CompareScoreCharts({
       radar: hasRadar ? {
         center: [radarCenter, radarY],
         radius: radarRadius,
-        indicator: datasetNames.map((name) => ({ name, max: 100 })),
+        indicator: axisLabels.map((name) => ({ name, max: 100 })),
         axisName: { color: textColor, fontSize: 10, width: 68, overflow: 'truncate' },
         axisNameGap: 6,
         axisLine: { lineStyle: { color: gridColor } },
@@ -188,7 +207,7 @@ export function CompareScoreCharts({
       grid: { top: barTitleTop + 35, right: 12, bottom: 90, left: stacked ? 42 : '38%' },
       xAxis: {
         type: 'category',
-        data: datasetNames,
+        data: axisLabels,
         axisLabel: {
           color: textColor,
           fontSize: 10,
@@ -227,7 +246,7 @@ export function CompareScoreCharts({
         ...(hasRadar && hasLeader ? [leaderRadar] : []),
       ],
     };
-  }, [hasRadar, overlays, rows, stacked, subjects, theme]);
+  }, [axisLabels, datasetNames, hasRadar, overlays, publicSeries, rows, stacked, subjects, theme]);
 
   const height = stacked ? (hasRadar ? 600 : 390) : 340;
   return (
@@ -236,7 +255,7 @@ export function CompareScoreCharts({
       aria-labelledby="compare-scores-heading"
       className="rounded-xl border border-[var(--border-subtle)] bg-[var(--bg-surface)] p-4"
     >
-      <h2 id="compare-scores-heading" className="mb-2 text-sm font-bold text-[var(--text-primary)]">共同可比基准得分可视化</h2>
+      <h2 id="compare-scores-heading" className="mb-2 text-sm font-bold text-[var(--text-primary)]">评测得分与公开参考</h2>
       <EChartBox
         option={option}
         height={height}
@@ -252,7 +271,7 @@ export function CompareScoreCharts({
         <ul className="mt-2 space-y-2 p-0">
           {overlays.map(({ point, missing, deltas, reasons }, index) => (
             <li key={rows[index].dataset_release_id} className="rounded-lg bg-[var(--bg-elevated)] px-2.5 py-2">
-              <strong className="text-[var(--text-primary)]">{rows[index].raw_dataset_name}</strong>
+              <strong className="text-[var(--text-primary)]">{datasetNames[index]}</strong>
               {point ? (
                 <>
                   <div className="mt-1 text-[var(--text-secondary)]">

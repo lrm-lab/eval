@@ -30,6 +30,8 @@ interface PublicSource {
   status: 'pending' | 'ready' | 'stale' | 'unavailable' | 'snapshot';
   synced_at?: string | null;
   captured_on?: string;
+  reference_kind?: 'leaderboard' | 'paper';
+  reference_note?: string;
   rows: PublicScore[];
 }
 
@@ -108,8 +110,10 @@ export function useComparePublicLeaders(rows: CompareRow[], subjects: CompareSub
     const { point } = candidate;
     const deltas: Overlay['deltas'] = [];
     const reasons = new Set<string>();
-    if (point?.legacy) reasons.add('历史总表缺少可核验的逐题评分与计分分母');
-    else if (point && snapshot.sample_set_id) reasons.add('对比使用自定义样本集');
+    if (point?.legacy) {
+      reasons.add('历史总表缺少可核验的逐题评分与计分分母');
+      if (point.source.reference_note) reasons.add(point.source.reference_note);
+    } else if (point && snapshot.sample_set_id) reasons.add('对比使用自定义样本集');
     else if (point && rows[index].scoring_protocol !== point.source.protocol) reasons.add('站内与公开榜的评分协议不同');
     else if (point && rows[index].intersection.common_valid_scored_tasks !== point.source.task_count) {
       reasons.add(`共同有效题为 ${rows[index].intersection.common_valid_scored_tasks ?? '未知'} 题，公榜分差需完整 ${point.source.task_count} 题`);

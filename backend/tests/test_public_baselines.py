@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 
 from app.main import create_app
 from app.services import public_baseline_service as baselines
+from app.services import public_baseline_sources as sources
 from app.services.public_baseline_sources import SOURCES, PublicScore
 from conftest import create_user, login_client
 
@@ -36,6 +37,7 @@ def _episodes(db, batch_id, task_ids):
 def test_public_baseline_sync_alignment_and_default(isolated_settings, monkeypatch):
     isolated_settings.config_dir = Path(__file__).resolve().parents[2] / "config"
     isolated_settings.root_disk_min_free_gb = 0
+    isolated_settings.public_baseline_sync_seconds = 0
     app = create_app(isolated_settings, run_startup_scan=False)
     ctx = app.state.ctx
     user = "baseline_viewer"
@@ -100,12 +102,49 @@ def test_public_baseline_sync_alignment_and_default(isolated_settings, monkeypat
             for source in client.get(catalog_path, params={"include_text_leaders": True}).json()["sources"]
             if source["status"] == "snapshot"
         ]
-        assert {source["benchmark_slug"] for source in text_sources} == {"aa-lcr", "ifeval", "gpqa-diamond", "ifbench", "hle"}
+        assert len(text_sources) == 12
+        assert {source["benchmark_slug"] for source in text_sources} == {
+            "aa-lcr", "ifeval", "gpqa-diamond", "ifbench", "hle",
+            "apex-shortlist", "longmemeval", "multi-challenge", "multi-lcb",
+        }
+        longmemeval = {
+            source["legacy_release_id"].rsplit("__", 1)[-1]: source["rows"][0]["score_pct"]
+            for source in text_sources
+            if source["benchmark_slug"] == "longmemeval" and source["reference_kind"] == "paper"
+        }
+        assert longmemeval == {"oracle-direct": 87.0, "oracle-con": 92.4, "s-direct": 60.6, "s-con": 64.0}
+        assert len({source["id"] for source in text_sources}) == 12
         ifeval = next(source for source in text_sources if source["benchmark_slug"] == "ifeval")
         assert ifeval["legacy_metric"] == "Prompt-level-strict-accuracy"
         assert ifeval["rows"][0]["sample_count"] == 541
         assert "release_id" not in ifeval
         assert len(client.get(catalog_path).json()["sources"]) == 2
+        apex = next(source for source in sources.TEXT_LEADERS if source.benchmark_slug == "apex-shortlist")
+        matharena_table = """
+            <tr class="model-row" data-config="provider/measured">
+                <td class="rank">1</td><td class="model-name">Measured Model ⚠️</td>
+                <td class="metric-bar-cell--accuracy" data-predicted="no">99.10% ± 0.10%</td>
+            </tr>
+            <tr class="model-row" data-config="provider/estimated">
+                <td class="rank">1</td><td class="model-name">Estimated Model</td>
+                <td class="metric-bar-cell--accuracy" data-predicted="yes">100.00%</td>
+            </tr>
+        """
+        monkeypatch.setattr(sources, "_read_json", lambda url: {"table": matharena_table})
+        assert ctx.public_baselines.refresh(apex)
+        text_catalog = client.get(catalog_path, params={"include_text_leaders": True}).json()["sources"]
+        refreshed = next(source for source in text_catalog if source["id"] == apex.id)
+        assert refreshed["status"] == "ready"
+        assert refreshed["legacy_release_id"] == apex.legacy_release_id
+        assert len(refreshed["rows"]) == 1
+        assert refreshed["rows"][0]["model"] == "Measured Model"
+        assert refreshed["rows"][0]["score_pct"] == 99.1
+        assert "captured_on" not in refreshed
+        assert not ctx.public_baselines.refresh(replace(apex, fetch=fail))
+        stale_catalog = client.get(catalog_path, params={"include_text_leaders": True}).json()["sources"]
+        stale_apex = next(source for source in stale_catalog if source["id"] == apex.id)
+        assert stale_apex["status"] == "stale"
+        assert stale_apex["rows"] == refreshed["rows"]
         assert not ctx.public_baselines.refresh(replace(tb, fetch=fail))
         restored = client.get(catalog_path).json()["sources"][0]
         assert restored["status"] == "stale"
