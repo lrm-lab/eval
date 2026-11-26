@@ -2,11 +2,13 @@ import React, { lazy, useEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { apiFetch, getCookieValue } from './lib/api';
+import { createModuleLoader } from './lib/moduleLoader';
 import { useAppStore } from './lib/store';
 import type { AuthUser } from './types/api';
+import { preloadEChartCanvas } from './components/charts/EChartBox';
 import { ReducedMotionProvider } from './components/motion/primitives';
 import { AppShell } from './components/layout/AppShell';
-import { LazyContent } from './components/ui/LazyContent';
+import { LazyContent, LoadingContent } from './components/ui/LazyContent';
 import { LoginPage } from './pages/LoginPage';
 import { HomePage } from './pages/HomePage';
 
@@ -21,7 +23,11 @@ const ReportsPage = lazy(() => import('./pages/ReportsPage').then((module) => ({
 const BatchDetailPage = lazy(() => import('./pages/BatchDetailPage').then((module) => ({ default: module.BatchDetailPage })));
 const TrialInspectorPage = lazy(() => import('./pages/TrialInspectorPage').then((module) => ({ default: module.TrialInspectorPage })));
 const ComparePage = lazy(() => import('./pages/ComparePage').then((module) => ({ default: module.ComparePage })));
-const DiagnosticsPage = lazy(() => import('./pages/DiagnosticsPage').then((module) => ({ default: module.DiagnosticsPage })));
+const diagnosticsModule = createModuleLoader(() => {
+  const page = import('./pages/DiagnosticsPage');
+  void preloadEChartCanvas();
+  return page;
+});
 const DirectLabPage = lazy(() => import('./pages/DirectLabPage').then((module) => ({ default: module.DirectLabPage })));
 const ExecutionPage = lazy(() => import('./pages/ExecutionPage').then((module) => ({ default: module.ExecutionPage })));
 const SyntheticStudioPage = lazy(() => import('./pages/SyntheticStudioPage').then((module) => ({ default: module.SyntheticStudioPage })));
@@ -42,6 +48,11 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+function DiagnosticsRoute() {
+  const page = diagnosticsModule.useModule();
+  return page ? <page.DiagnosticsPage /> : <LoadingContent label="页面" />;
+}
 
 function AuthGuard({ children }: { children: React.ReactNode }) {
   const location = useLocation();
@@ -138,7 +149,7 @@ export function App() {
                     <Route path="/eval/compare" element={<ComparePage />} />
                     <Route path="/compare/s/:shortId" element={<ComparePage />} />
                     <Route path="/compare/1v1/:a/vs/:b" element={<ComparePage />} />
-                    <Route path="/eval/diagnostics" element={<DiagnosticsPage />} />
+                    <Route path="/eval/diagnostics" element={<DiagnosticsRoute />} />
                     <Route path="/eval/execution" element={<ExecutionPage />} />
                     <Route path="/eval/direct-lab" element={<DirectLabPage />} />
                     <Route path="/synth/datasets" element={<SyntheticStudioPage />} />
