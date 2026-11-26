@@ -252,8 +252,9 @@ def _grouped_comparison(
 
 _ACTIVE_EVALUATION_STATUSES = frozenset({
     "created", "pending", "queued", "starting", "preparing", "running", "paused", "cancelling", "retrying",
+    "finalizing",
 })
-_WITHDRAWN_EVALUATION_STATUSES = frozenset({"revoked", "withdrawn", "deleted"})
+_WITHDRAWN_EVALUATION_STATUSES = frozenset({"revoked", "withdrawn", "retracted", "deleted"})
 _EARLIEST_EVALUATION_TIME = datetime.min.replace(tzinfo=timezone.utc)
 
 
@@ -262,6 +263,10 @@ def _evaluation_run_key(row: dict[str, Any]) -> tuple[str, ...]:
     if job_id:
         return "job", row["project_id"], row["owner_id"], row["runner"], job_id
     return "batch", row["batch_id"]
+
+
+def _evaluation_history_scope(row: dict[str, Any]) -> tuple[str | None, ...]:
+    return row["dataset_release_id"], row["model_canonical"], row["harness"], row["scoring_protocol"]
 
 
 def _evaluation_group_order(batch: dict[str, Any], indexed_at: str) -> tuple[datetime, str, str]:
@@ -414,6 +419,8 @@ class ProfileService:
         cells: dict[str, dict[str, Any]] = {}
         latest: dict[str, tuple[bool, tuple[datetime, str, str]]] = {}
         latest_scored: dict[str, tuple[datetime, str, str]] = {}
+        latest_scored_runs: dict[str, tuple[str, ...]] = {}
+        scored_history_runs: dict[tuple[str | None, ...], set[tuple[str, ...]]] = defaultdict(set)
 
         def add_release(row: dict[str, Any]) -> None:
             release_id = row["dataset_release_id"]
@@ -465,11 +472,14 @@ class ProfileService:
                 ):
                     continue
                 run_key = _evaluation_run_key(row)
-                if run_key in seen_runs:
-                    continue
                 active = status in _ACTIVE_EVALUATION_STATUSES
                 batch = _evaluation_batch_projection(conn, row, can_holdout=can_holdout, active=active)
                 if batch is None:
+                    continue
+                # History may use another settings variant or another copy of a prior run.
+                if not active and not row["is_running_placeholder"] and batch["scored"]:
+                    scored_history_runs[_evaluation_history_scope(row)].add(run_key)
+                if run_key in seen_runs:
                     continue
                 seen_runs.add(run_key)
                 add_release(row)
@@ -512,6 +522,7 @@ class ProfileService:
                     if cell_id not in latest_scored or order > latest_scored[cell_id]:
                         cell["latest_scored_batch"] = batch
                         latest_scored[cell_id] = order
+                        latest_scored_runs[cell_id] = run_key
 
             historical_count = 0
             if self._can_see_legacy(user):
@@ -573,6 +584,10 @@ class ProfileService:
         for cell in cell_list:
             release = releases.get(cell["dataset_release_id"])
             cell["registered_task_count"] = release["registered_task_count"] if release else None
+            run_key = latest_scored_runs.get(cell["id"])
+            if run_key is not None:
+                peers = scored_history_runs.get(_evaluation_history_scope(cell))
+                cell["has_scored_history_peer"] = peers is not None and any(peer != run_key for peer in peers)
         cell_list.sort(key=lambda cell: (-cell["published_run_count"], cell["id"]))
         return {
             "summary": {
