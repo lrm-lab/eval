@@ -1,4 +1,4 @@
-import React, { lazy, Suspense, useEffect, useState } from 'react';
+import React, { lazy, useEffect, useState } from 'react';
 import { BrowserRouter, Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { apiFetch, getCookieValue } from './lib/api';
@@ -6,6 +6,7 @@ import { useAppStore } from './lib/store';
 import type { AuthUser } from './types/api';
 import { ReducedMotionProvider } from './components/motion/primitives';
 import { AppShell } from './components/layout/AppShell';
+import { LazyContent } from './components/ui/LazyContent';
 import { LoginPage } from './pages/LoginPage';
 import { HomePage } from './pages/HomePage';
 
@@ -82,16 +83,14 @@ function AuthGuard({ children }: { children: React.ReactNode }) {
 
   if (!user) {
     const returnTo = encodeURIComponent(location.pathname + location.search);
-    return <Navigate to={`/login?returnTo=${returnTo}`} replace />;
+    return <Navigate to={{ pathname: '/login', search: `?returnTo=${returnTo}`, hash: location.hash }} replace />;
   }
 
   return (
     <AppShell>
-      <Suspense fallback={
-        <p role="status" className="p-4 text-sm text-[var(--text-secondary)]">正在打开页面…</p>
-      }>
+      <LazyContent label="页面" resetKey={location.pathname}>
         {children}
-      </Suspense>
+      </LazyContent>
     </AppShell>
   );
 }

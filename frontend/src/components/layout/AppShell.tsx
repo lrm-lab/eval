@@ -13,11 +13,11 @@ import {
   Sun,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import { helpTopicForPath } from '../../lib/helpTopics';
 import { useAppStore } from '../../lib/store';
 import { FloatingCompareDock } from '../ui/FloatingCompareDock';
 import { ToastContainer } from '../ui/Skeletons';
 import { CommandPalette } from './CommandPalette';
-import { helpTopicForPath } from '../../pages/MethodologyPage';
 import { ApplicationNavigation, MobileNavigation } from './ApplicationNavigation';
 
 function ThemeToggleButton() {
