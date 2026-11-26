@@ -249,8 +249,16 @@ export function changeMatrix(rows: ResultRow[], selectedDataset: string | null) 
     .sort(([a], [b]) => Number(b === selectedDataset) - Number(a === selectedDataset)
       || (counts.get(b) ?? 0) - (counts.get(a) ?? 0))
     .slice(0, 4);
-  const items = all.sort((a, b) => Number(b.focusReviewed) - Number(a.focusReviewed) || b.reviewedCount - a.reviewedCount || b.count - a.count
-    || (a.row.harness || '').localeCompare(b.row.harness || '')).slice(0, 4);
+  const ranked = all.sort((a, b) => Number(b.focusReviewed) - Number(a.focusReviewed) || b.reviewedCount - a.reviewedCount || b.count - a.count
+    || (a.row.harness || '').localeCompare(b.row.harness || ''));
+  const firstByHarness = new Map<string, (typeof ranked)[number]>();
+  for (const item of ranked) {
+    const harness = item.row.harness?.toLowerCase();
+    if (harness && item.count > 0 && !firstByHarness.has(harness)) firstByHarness.set(harness, item);
+  }
+  const firstItems = [...firstByHarness.values()];
+  const firstKeys = new Set(firstItems.map((item) => item.key));
+  const items = [...firstItems, ...ranked.filter((item) => !firstKeys.has(item.key))].slice(0, 4);
   return { columns, items };
 }
 
