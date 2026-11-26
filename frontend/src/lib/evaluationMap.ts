@@ -233,7 +233,7 @@ export function changeState(result: HistoryItem | undefined, pending = false, fa
   if (delta === 0) return { tone: 'flat', symbol: '=', label: '持平', value: fmtDeltaPP(delta) };
   return delta > 0
     ? { tone: 'up', symbol: '↑', label: '上升', value: fmtDeltaPP(delta) }
-    : { tone: 'down', symbol: '↓', label: '回落', value: fmtDeltaPP(delta) };
+    : { tone: 'down', symbol: '↓', label: '下降', value: fmtDeltaPP(delta) };
 }
 
 export function historicalCompareHref(result: HistoryItem) {

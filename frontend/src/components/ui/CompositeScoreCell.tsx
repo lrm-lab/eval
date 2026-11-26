@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import { useRef, useState } from 'react';
 import { SlidersHorizontal } from 'lucide-react';
+import { useDismissibleLayer } from '../../lib/dismissibleLayer';
 import { fmtDeltaPP, fmtPct } from '../../lib/format';
 
 export interface CompositeScoreCellProps {
@@ -35,6 +36,10 @@ export function CompositeScoreCell({
   ariaLabel,
 }: CompositeScoreCellProps) {
   const [showBreakdown, setShowBreakdown] = useState(false);
+  const breakdownLayer = useRef<HTMLDivElement>(null);
+  const breakdownTrigger = useRef<HTMLButtonElement>(null);
+  const dismissBreakdown = useDismissibleLayer(breakdownLayer, showBreakdown,
+    () => setShowBreakdown(false), () => breakdownTrigger.current?.focus());
 
   if (isLoading) {
     return (
@@ -137,14 +142,16 @@ export function CompositeScoreCell({
       )}
 
       {breakdown && breakdown.length > 0 && (
-        <div className="absolute right-1 top-1 z-20">
+        <div ref={breakdownLayer} {...dismissBreakdown} className="absolute right-1 top-1 z-20">
           <button
             type="button"
+            ref={breakdownTrigger}
             onClick={(e) => {
               e.stopPropagation();
               setShowBreakdown((v) => !v);
             }}
             title="查看子指标拆解"
+            aria-expanded={showBreakdown}
             className="opacity-0 group-hover:opacity-100 focus-visible:opacity-100 rounded p-0.5 text-[var(--text-secondary)] hover:bg-[var(--bg-surface)] hover:text-[var(--brand-primary)] transition-opacity cursor-pointer"
           >
             <SlidersHorizontal className="w-3 h-3" />
@@ -158,7 +165,10 @@ export function CompositeScoreCell({
                 <span className="font-semibold text-[var(--text-primary)]">子指标拆解</span>
                 <button
                   type="button"
-                  onClick={() => setShowBreakdown(false)}
+                  onClick={() => {
+                    setShowBreakdown(false);
+                    breakdownTrigger.current?.focus();
+                  }}
                   className="text-[10px] text-[var(--text-muted)] hover:text-[var(--text-primary)] cursor-pointer"
                 >
                   关闭

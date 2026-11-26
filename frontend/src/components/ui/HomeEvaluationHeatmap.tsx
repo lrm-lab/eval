@@ -3,6 +3,7 @@ import { useQueries, useQuery } from '@tanstack/react-query';
 import { ArrowLeft, Info, LayoutGrid, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { apiFetch } from '../../lib/api';
+import { useDismissibleDetails } from '../../lib/dismissibleLayer';
 import {
   cellSearchText, cellTitle, changeState, datasetName, findMapLock, zeroBaselineHistory, historyReason, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
   type EvaluationMap, type HistoryItem, type MapAxis, type MapCell, type Rectangle, type Sector,
@@ -25,19 +26,20 @@ const subscribeToPhone = (callback: () => void) => {
 const getPhone = () => window.matchMedia(phoneQuery).matches;
 
 function ChangeLegend() {
+  const help = useDismissibleDetails();
   return (
     <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
       <ul aria-label="涨跌图例" className="m-0 flex list-none flex-wrap items-center gap-x-3 gap-y-1 p-0 text-xs font-semibold">
         <li className="heatmap-change inline-flex items-center gap-1.5" data-tone="up">
-          <span className="heatmap-scale" aria-hidden />↑ 上涨
+          <span className="heatmap-scale" aria-hidden />↑ 上升
         </li>
         <li className="heatmap-change inline-flex items-center gap-1.5" data-tone="down">
-          <span className="heatmap-scale" aria-hidden />↓ 下跌
+          <span className="heatmap-scale" aria-hidden />↓ 下降
         </li>
         <li>= 持平</li>
         <li className="text-[var(--text-secondary)]">— 暂无分差</li>
       </ul>
-      <details className="heatmap-help">
+      <details className="heatmap-help" {...help}>
         <summary className="flex min-h-8 cursor-pointer list-none items-center gap-1 rounded-md px-1.5 text-xs font-semibold text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] [&::-webkit-details-marker]:hidden">
           <Info className="size-3.5 shrink-0" aria-hidden /> 读图
         </summary>
@@ -301,6 +303,7 @@ export function useHomeEvaluationMap() {
 
 export function HomeEvaluationHeatmap({ catalogue, actions }: { catalogue: ReturnType<typeof useHomeEvaluationMap>; actions: ReactNode }) {
   const [params, setParams] = useSearchParams();
+  const filterLayer = useDismissibleDetails();
   const [axis, locks] = useMemo(() => {
     const view = params.get('view');
     return [
@@ -516,7 +519,7 @@ export function HomeEvaluationHeatmap({ catalogue, actions }: { catalogue: Retur
               {fullscreen || fallbackFullscreen ? <Minimize className="size-4" aria-hidden /> : <Maximize className="size-4" aria-hidden />}
               {fullscreen || fallbackFullscreen ? '退出全屏' : '全屏看图'}
             </button>
-            <details className="md:relative">
+            <details className="md:relative" {...filterLayer}>
               <summary className={`${action} list-none [&::-webkit-details-marker]:hidden`}>
                 <SlidersHorizontal className="size-3.5 shrink-0" aria-hidden /> 筛选
                 {filters.some(({ active }) => active) && (

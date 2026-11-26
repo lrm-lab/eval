@@ -1,5 +1,6 @@
-import React, { useState } from 'react';
+import { useRef, useState } from 'react';
 import { HelpCircle } from 'lucide-react';
+import { useDismissibleLayer } from '../../lib/dismissibleLayer';
 import { RowActionIcon } from './RowActionIcon';
 
 export function MethodologyPopover({
@@ -12,16 +13,19 @@ export function MethodologyPopover({
   anchor?: string;
 }) {
   const [open, setOpen] = useState(false);
+  const layer = useRef<HTMLSpanElement>(null);
+  const trigger = useRef<HTMLButtonElement>(null);
+  const dismiss = useDismissibleLayer(layer, open, () => setOpen(false), () => trigger.current?.focus());
 
   return (
     <span
+      ref={layer}
+      {...dismiss}
       className="relative inline-flex items-center"
-      onBlur={(event) => {
-        if (!event.currentTarget.contains(event.relatedTarget)) setOpen(false);
-      }}
     >
       <button
         type="button"
+        ref={trigger}
         onClick={(e) => {
           e.stopPropagation();
           setOpen((v) => !v);

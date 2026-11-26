@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
@@ -13,6 +13,7 @@ import {
   Sun,
 } from 'lucide-react';
 import { apiFetch } from '../../lib/api';
+import { useDismissibleLayer } from '../../lib/dismissibleLayer';
 import { helpTopicForPath } from '../../lib/helpTopics';
 import { useAppStore } from '../../lib/store';
 import { FloatingCompareDock } from '../ui/FloatingCompareDock';
@@ -49,6 +50,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pushToast = useAppStore((s) => s.pushToast);
 
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenu = useRef<HTMLDivElement>(null);
+  const userMenuTrigger = useRef<HTMLButtonElement>(null);
+  const userMenuDismiss = useDismissibleLayer(userMenu, userMenuOpen,
+    () => setUserMenuOpen(false), () => userMenuTrigger.current?.focus());
 
   const handleLogout = async () => {
     try {
@@ -137,9 +142,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           <ThemeToggleButton />
 
           {user && (
-            <div className="relative">
+            <div ref={userMenu} {...userMenuDismiss} className="relative">
               <button
                 type="button"
+                ref={userMenuTrigger}
                 onClick={() => setUserMenuOpen((v) => !v)}
                 aria-expanded={userMenuOpen}
                 aria-label="用户菜单"
