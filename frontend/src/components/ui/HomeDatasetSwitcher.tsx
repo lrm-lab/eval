@@ -1,6 +1,11 @@
 import { useId, useRef, useState } from 'react';
 import { Check, ChevronDown, ChevronLeft, ChevronRight, Database, Search, X } from 'lucide-react';
-import type { EvaluationChoice } from '../../lib/homeEvaluation';
+interface DatasetChoice {
+  key: string;
+  label: string;
+  search?: string;
+  track?: string;
+}
 
 const tracks = [
   ['agentic', 'Agentic'],
@@ -24,7 +29,7 @@ function readRecent(): string[] {
 }
 
 export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, onRetry, onChange }: {
-  choices: EvaluationChoice[];
+  choices: DatasetChoice[];
   subject: string;
   label: string;
   pending: boolean;
@@ -38,7 +43,7 @@ export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, 
   const searchInput = useRef<HTMLInputElement>(null);
   const [query, setQuery] = useState('');
   const [recent, setRecent] = useState(readRecent);
-  const groups = new Map<string, EvaluationChoice[]>([...tracks.map(([key]) => [key, []] as [string, EvaluationChoice[]]), ['other', []]]);
+  const groups = new Map<string, DatasetChoice[]>([...tracks.map(([key]) => [key, []] as [string, DatasetChoice[]]), ['other', []]]);
   for (const choice of choices) {
     const track = choice.track && trackNames.has(choice.track) ? choice.track : 'other';
     groups.get(track)?.push(choice);
@@ -69,7 +74,7 @@ export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, 
     if (key !== subject) onChange(key);
   }
 
-  function option(choice: EvaluationChoice) {
+  function option(choice: DatasetChoice) {
     return (
       <li key={choice.key}>
         <button type="button" aria-pressed={choice.key === subject} onClick={() => select(choice.key)}
@@ -134,7 +139,7 @@ export function HomeDatasetSwitcher({ choices, subject, label, pending, failed, 
                     {[...groups].map(([track, items]) => {
                       const matching = items.filter((choice) => visible.has(choice.key));
                       if (!matching.length) return null;
-                      const title = trackNames.get(track) ?? '其他';
+                      const title = trackNames.get(track) ?? (choices.some((choice) => choice.track) ? '其他' : '全部');
                       return <div key={track}>
                         <h4 className="m-0 px-3 pb-1 text-xs font-semibold text-[var(--text-secondary)]">{title}</h4>
                         <ul aria-label={title + '数据集'} className="m-0 list-none p-0">{matching.map(option)}</ul>

@@ -1,0 +1,123 @@
+.evaluation-heatmap {
+  --heatmap-canvas-height: max(400px, calc(100dvh - 13.5rem));
+}
+
+.evaluation-heatmap:fullscreen,
+.evaluation-heatmap[data-fullscreen-fallback='true'] {
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+  background: var(--bg-surface);
+  --heatmap-canvas-height: max(360px, calc(100dvh - 8rem));
+}
+
+.evaluation-heatmap[data-fullscreen-fallback='true'] {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+}
+
+.heatmap-workspace {
+  display: flex;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.heatmap-canvas {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  height: var(--heatmap-canvas-height);
+  overflow: hidden;
+  isolation: isolate;
+  background: var(--bg-elevated);
+}
+
+.heatmap-sector {
+  position: absolute;
+  overflow: hidden;
+  background: var(--bg-elevated);
+}
+
+.heatmap-sector::after {
+  position: absolute;
+  z-index: 2;
+  inset: 0;
+  pointer-events: none;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+  content: '';
+}
+
+.heatmap-tile {
+  background: var(--bg-elevated);
+  color: var(--text-primary);
+  box-shadow: inset 0 0 0 0.5px var(--border-strong);
+  transition: background-color 160ms ease;
+}
+
+.heatmap-tile[data-tone='up'] {
+  background: color-mix(in srgb, var(--sem-pass-fg) var(--heat-intensity, 26%), var(--bg-surface));
+}
+
+.heatmap-tile[data-tone='down'] {
+  background: color-mix(in srgb, var(--sem-err-fg) var(--heat-intensity, 26%), var(--bg-surface));
+}
+
+.heatmap-tile[data-tone='flat'] {
+  background: color-mix(in srgb, var(--text-muted) 27%, var(--bg-surface));
+}
+
+.heatmap-change[data-tone='up'] { color: var(--sem-pass-fg); }
+.heatmap-change[data-tone='down'] { color: var(--sem-err-fg); }
+
+.heatmap-tile:hover,
+.heatmap-tile[aria-pressed='true'] {
+  z-index: 1;
+  box-shadow: inset 0 0 0 2px var(--text-primary);
+}
+
+.heatmap-tile:focus-visible {
+  z-index: 3;
+  outline: 2px solid var(--brand-primary);
+  outline-offset: -3px;
+}
+
+.heatmap-side {
+  width: clamp(19rem, 27vw, 27rem);
+  max-height: var(--heatmap-canvas-height);
+  flex: none;
+  overflow: auto;
+  border-left: 1px solid var(--border-strong);
+}
+
+.heatmap-dialog {
+  position: fixed;
+  inset: auto 0 0;
+  margin: 0;
+  width: 100%;
+  max-width: none;
+  max-height: 82dvh;
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+
+.heatmap-dialog::backdrop {
+  background: rgb(0 0 0 / 45%);
+}
+
+@media (max-width: 767px) {
+  .evaluation-heatmap {
+    --heatmap-canvas-height: clamp(340px, 56dvh, 550px);
+  }
+
+  .evaluation-heatmap .heatmap-fullscreen-button {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .heatmap-tile {
+    transition: none;
+  }
+}
