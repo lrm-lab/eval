@@ -47,7 +47,7 @@ export async function apiFetch<T>(
 
   if (res.status === 401 && !options.skipAuthRedirect && !window.location.pathname.startsWith('/login')) {
     const returnTo = encodeURIComponent(window.location.pathname + window.location.search);
-    window.location.assign(`/login?returnTo=${returnTo}`);
+    window.location.assign(`/login?returnTo=${returnTo}${window.location.hash}`);
     throw new ApiError(401, 'UNAUTHORIZED', '会话已过期，请重新登录');
   }
 
