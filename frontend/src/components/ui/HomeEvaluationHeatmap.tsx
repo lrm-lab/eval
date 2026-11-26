@@ -4,7 +4,7 @@ import { ArrowLeft, Maximize, Minimize, Search, SlidersHorizontal, X, ZoomIn } f
 import { useSearchParams } from 'react-router-dom';
 import { apiFetch } from '../../lib/api';
 import {
-  cellSearchText, cellTitle, changeState, datasetName, findMapLock, firstScoreHistory, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
+  cellSearchText, cellTitle, changeState, datasetName, findMapLock, firstScoreHistory, historyReason, layoutTreemap, mapAxes, referenceBadge, visibleSectors,
   type EvaluationMap, type HistoryItem, type MapAxis, type MapCell, type Rectangle, type Sector,
 } from '../../lib/evaluationMap';
 import { useAppStore } from '../../lib/store';
@@ -30,7 +30,7 @@ function ChangeLegend() {
       <li className="heatmap-change" data-tone="up">↑ 上涨</li>
       <li className="heatmap-change" data-tone="down">↓ 下跌</li>
       <li>= 持平</li>
-      <li className="text-[var(--text-secondary)]">首次评测以 0 为基线</li>
+      <li className="text-[var(--text-secondary)]">首次有效评测以 0 为基线</li>
       <li className="text-[var(--text-secondary)]">批次对照 / 运行快照</li>
       <li className="text-[var(--text-secondary)]">— 尚无可比前次</li>
       <li className="text-[var(--text-secondary)]">… 等待计算</li>
@@ -57,9 +57,10 @@ function Tile({ rect, axis, cell, history, selected, onSelect }: {
 }) {
   const [primary, secondary] = cellTitle(cell, axis);
   const state = changeState(history?.result, history?.pending, history?.failed);
-  const reference = referenceBadge(history?.result);
+  const reference = referenceBadge(history?.result) ?? (history?.result?.baseline_kind === 'zero' ? '首评基线' : null);
+  const statusLabel = !cell.latest_scored_batch && !history ? historyReason(cell, undefined) : state.label;
   const intensity = Math.min(51, 21 + Math.sqrt(Math.abs(history?.result?.delta_pp ?? 0)) * 3.6);
-  const text = [datasetName(cell), primary, secondary, cell.dataset_version, cell.split, state.label, state.value, reference,
+  const text = [datasetName(cell), primary, secondary, cell.dataset_version, cell.split, statusLabel, state.value, reference,
     `${cell.published_run_count} 次已发布`].filter(Boolean).join(' · ');
   const showTitle = rect.width >= 68 && rect.height >= 34;
   const showValue = rect.width >= 73 && rect.height >= (showTitle ? 55 : 20);
@@ -85,7 +86,7 @@ function Tile({ rect, axis, cell, history, selected, onSelect }: {
       {(showValue || rect.width >= 17 && rect.height >= 19) && (
         <span className={`block w-full truncate font-semibold tabular-nums ${showValue ? 'mt-0.5 px-2 text-[11px] sm:text-xs' : 'text-center text-[10px]'}`}>
           {state.symbol}{showValue && (state.value
-            ? ` ${state.value}${reference ? ` · ${reference}` : ''}` : rect.width >= 125 ? ` ${state.label}` : null)}
+            ? ` ${state.value}${reference ? ` · ${reference}` : ''}` : rect.width >= 125 ? ` ${statusLabel}` : null)}
         </span>
       )}
     </button>
@@ -201,6 +202,7 @@ function MapSearch({ sectors, axis, history, onSector, onCell, dialogRef, unweig
                   const status = history.get(cell.id);
                   const change = changeState(status?.result,
                     status?.pending || (!status && Boolean(cell.latest_scored_batch)), status?.failed);
+                  const statusLabel = !cell.latest_scored_batch && !status ? historyReason(cell, undefined) : change.label;
                   return (
                     <li key={cell.id}>
                       <button type="button" onClick={() => submit(sector, cell)}
@@ -212,7 +214,7 @@ function MapSearch({ sectors, axis, history, onSector, onCell, dialogRef, unweig
                           </span>
                         </span>
                         <span data-tone={change.tone} className="heatmap-change shrink-0 text-xs font-semibold tabular-nums">
-                          {change.value ? `${change.symbol} ${change.value}` : change.label}
+                          {change.value ? `${change.symbol} ${change.value}` : statusLabel}
                         </span>
                       </button>
                     </li>
@@ -316,15 +318,6 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
   const unweightedCount = sectors.reduce((sum, sector) => sum + sector.cells.filter((cell) => (
     !(sector.registered_task_count && sector.registered_task_count > 0) || cell.published_run_count === 0
   )).length, 0);
-  const firstScores = useMemo(() => {
-    const scores: HistoryByCell = new Map();
-    for (const cell of catalogue.data?.cells ?? []) {
-      const result = firstScoreHistory(cell);
-      if (result) scores.set(cell.id, { result, pending: false, failed: false });
-    }
-    return scores;
-  }, [catalogue.data]);
-
   const batches = useMemo(() => {
     type HistoryRequest = { id: string; cellId: string; batch_id: string; generation_id: string; mode: 'auto' | 'reviewed' };
     const chunks: HistoryRequest[][] = [];
@@ -332,7 +325,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       .flatMap((sector) => sector.cells.filter((cell) => cell.published_run_count > 0));
     const needsDetail = selected && !visible.some((cell) => cell.id === selected.id) ? [selected] : [];
     for (const cell of [...needsDetail, ...visible]) {
-      if (cell.kind !== 'trials' || firstScores.has(cell.id)) continue;
+      if (cell.kind !== 'trials' || firstScoreHistory(cell)) continue;
       for (const [batch, mode] of [[cell.latest_scored_batch, 'auto'], [cell.reviewed_batch, 'reviewed']] as const) {
         if (!batch) continue;
         let chunk = chunks.at(-1);
@@ -344,7 +337,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       }
     }
     return chunks;
-  }, [sectors, zoom, selected, firstScores]);
+  }, [sectors, zoom, selected]);
   const histories = useQueries({
     queries: batches.map((items) => ({
       queryKey: ['home-evaluation-history', viewerKey, items],
@@ -356,7 +349,7 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       retry: 1,
     })),
   });
-  const history: HistoryByCell = new Map(firstScores);
+  const history: HistoryByCell = new Map();
   const reviewedHistory: HistoryByCell = new Map();
   batches.forEach((group, index) => {
     const query = histories[index];
@@ -374,6 +367,12 @@ export function HomeEvaluationHeatmap({ catalogue }: { catalogue: ReturnType<typ
       history.set(cellId, entry);
     }
   });
+  for (const cell of catalogue.data?.cells ?? []) {
+    const entry = history.get(cell.id);
+    if (entry && !entry.result) continue;
+    const result = firstScoreHistory(cell, entry?.result);
+    if (result) history.set(cell.id, { result, pending: false, failed: false });
+  }
 
   useEffect(() => {
     const element = canvas.current;
