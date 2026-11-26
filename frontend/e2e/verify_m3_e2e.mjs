@@ -154,8 +154,30 @@ async function verify(browser) {
   // 2. /eval/execution (Real external Runner daemon + Direct harmless task +
   //    DEFAULT submit reconciled batch drilldown HTTP 200!)
   // =========================================================================
-  await page.goto(`${BASE_URL}/eval/execution`, { waitUntil: 'domcontentloaded' });
-  await page.waitForSelector('text=受控评测执行与实时监控 (Benchmark Execution)', { timeout: 15000 });
+  const overviewUrl = (url) =>
+    url.pathname === '/api/v1/execution/capabilities' && url.searchParams.get('discover_tasks') === 'false';
+  let releaseOverview;
+  const overviewGate = new Promise((resolve) => { releaseOverview = resolve; });
+  await page.route(overviewUrl, async (route) => {
+    await overviewGate;
+    await route.continue();
+  });
+  try {
+    const historyResponse = page.waitForResponse((response) =>
+      new URL(response.url()).pathname === '/api/v1/execution/jobs' && response.request().method() === 'GET');
+    await page.goto(`${BASE_URL}/eval/execution`, { waitUntil: 'domcontentloaded' });
+    await page.waitForSelector('text=受控评测执行与实时监控 (Benchmark Execution)', { timeout: 15000 });
+    await page.getByText('正在加载评测配置…', { exact: true }).waitFor();
+    const history = page.getByRole('region', { name: '执行作业历史列表' });
+    const { items } = await (await historyResponse).json();
+    await (items.length
+      ? history.getByText(items[0].job_id, { exact: true })
+      : history.getByText('尚无受控执行作业记录', { exact: true })
+    ).waitFor();
+  } finally {
+    releaseOverview();
+    await page.unroute(overviewUrl);
+  }
   await page.waitForSelector('[aria-label="未接入评测题库列表"]', { timeout: 15000 });
   await recordCls('/eval/execution');
 
