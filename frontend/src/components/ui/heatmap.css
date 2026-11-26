@@ -140,6 +140,7 @@
   width: 100%;
   max-width: none;
   max-height: 82dvh;
+  transform-origin: center bottom;
   overflow: auto;
   overscroll-behavior: contain;
 }

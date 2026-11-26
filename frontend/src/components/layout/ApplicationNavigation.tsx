@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Link, matchPath, useLocation } from 'react-router-dom';
 import {
   Activity, BarChart3, Compass, Cpu, Database, FileSpreadsheet,
   GitCompareArrows, Home, Menu, Trophy, Wrench, X,
   type LucideIcon,
 } from 'lucide-react';
+import { useDismissibleDialog } from '../../lib/dismissibleDialog';
 
 const NAV_GROUPS: { label: string; items: { to: string; label: string; icon: LucideIcon; related?: string }[] }[] = [
   {
@@ -86,21 +87,21 @@ export function ApplicationNavigation({ collapsed = false, onNavigate }: {
 }
 
 export function MobileNavigation({ pathname }: { pathname: string }) {
-  const dialog = useRef<HTMLDialogElement>(null);
+  const { dialogProps, showModal, close } = useDismissibleDialog();
   const [open, setOpen] = useState(false);
 
   useEffect(() => {
-    dialog.current?.close();
-  }, [pathname]);
+    close();
+  }, [close, pathname]);
 
   useEffect(() => {
     const desktop = window.matchMedia('(min-width: 48rem)');
     function closeOnDesktop(event: MediaQueryListEvent) {
-      if (event.matches) dialog.current?.close();
+      if (event.matches) close();
     }
     desktop.addEventListener('change', closeOnDesktop);
     return () => desktop.removeEventListener('change', closeOnDesktop);
-  }, []);
+  }, [close]);
 
   return (
     <>
@@ -109,9 +110,9 @@ export function MobileNavigation({ pathname }: { pathname: string }) {
         aria-label="打开导航菜单"
         aria-controls="mobile-navigation"
         aria-expanded={open}
-        onClick={() => {
-          dialog.current?.showModal();
-          setOpen(true);
+        onClick={(event) => {
+          showModal(event.currentTarget);
+          setOpen(Boolean(dialogProps.ref.current?.open));
         }}
         className="grid size-9 shrink-0 cursor-pointer place-items-center rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] md:hidden"
       >
@@ -119,13 +120,10 @@ export function MobileNavigation({ pathname }: { pathname: string }) {
       </button>
       <dialog
         id="mobile-navigation"
-        ref={dialog}
+        {...dialogProps}
         aria-labelledby="mobile-navigation-title"
-        onClose={() => setOpen(false)}
-        onClick={(event) => {
-          if (event.target === event.currentTarget) dialog.current?.close();
-        }}
-        className="fixed inset-y-0 left-0 m-0 h-dvh max-h-none w-72 max-w-[calc(100vw-3rem)] overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-surface)] p-0 text-[var(--text-primary)] shadow-[var(--shadow-elevated)] backdrop:bg-[var(--bg-canvas)]/75 md:hidden"
+        onClose={(event) => setOpen(event.currentTarget.open)}
+        className="fixed inset-y-0 left-0 m-0 h-dvh max-h-none w-72 max-w-[calc(100vw-3rem)] origin-left overflow-hidden border-r border-[var(--border-subtle)] bg-[var(--bg-surface)] p-0 text-[var(--text-primary)] shadow-[var(--shadow-elevated)] backdrop:bg-[var(--bg-canvas)]/75 md:hidden"
       >
         <div className="flex h-full flex-col">
           <div className="flex h-14 shrink-0 items-center justify-between border-b border-[var(--border-subtle)] px-4">
@@ -133,14 +131,14 @@ export function MobileNavigation({ pathname }: { pathname: string }) {
             <button
               type="button"
               aria-label="关闭导航菜单"
-              onClick={() => dialog.current?.close()}
+              onClick={close}
               className="grid size-9 cursor-pointer place-items-center rounded-lg text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)]"
             >
               <X aria-hidden="true" className="size-[18px]" />
             </button>
           </div>
           <div className="min-h-0 flex-1 overflow-y-auto overscroll-contain">
-            <ApplicationNavigation onNavigate={() => dialog.current?.close()} />
+            <ApplicationNavigation onNavigate={close} />
           </div>
         </div>
       </dialog>
