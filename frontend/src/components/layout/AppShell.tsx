@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useId, useRef, useState } from 'react';
 import { Link, useLocation, useNavigate } from 'react-router-dom';
 import {
   Activity,
@@ -16,6 +16,7 @@ import { apiFetch } from '../../lib/api';
 import { useDismissibleLayer } from '../../lib/dismissibleLayer';
 import { helpTopicForPath } from '../../lib/helpTopics';
 import { useAppStore } from '../../lib/store';
+import { DismissiblePanel } from '../ui/DismissiblePanel';
 import { FloatingCompareDock } from '../ui/FloatingCompareDock';
 import { ToastContainer } from '../ui/Skeletons';
 import { CommandPalette } from './CommandPalette';
@@ -50,12 +51,14 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pushToast = useAppStore((s) => s.pushToast);
 
   const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const userMenuId = useId();
   const userMenu = useRef<HTMLDivElement>(null);
   const userMenuTrigger = useRef<HTMLButtonElement>(null);
   const userMenuDismiss = useDismissibleLayer(userMenu, userMenuOpen,
     () => setUserMenuOpen(false), () => userMenuTrigger.current?.focus());
 
   const handleLogout = async () => {
+    setUserMenuOpen(false);
     try {
       await apiFetch('/api/v1/auth/logout', { method: 'POST', skipAuthRedirect: true });
     } catch {
@@ -146,8 +149,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
               <button
                 type="button"
                 ref={userMenuTrigger}
-                onClick={() => setUserMenuOpen((v) => !v)}
+                onClick={(event) => {
+                  if (!userMenuOpen) event.currentTarget.focus({ preventScroll: true });
+                  setUserMenuOpen(!userMenuOpen);
+                }}
                 aria-expanded={userMenuOpen}
+                aria-controls={userMenuOpen ? userMenuId : undefined}
                 aria-label="用户菜单"
                 className="inline-flex items-center gap-2 rounded-lg border border-[var(--border-subtle)] bg-[var(--bg-elevated)] px-2.5 py-1.5 text-xs font-medium text-[var(--text-primary)] hover:border-[var(--border-strong)] cursor-pointer"
               >
@@ -160,45 +167,45 @@ export function AppShell({ children }: { children: React.ReactNode }) {
                 </span>
               </button>
 
-              {userMenuOpen && (
-                <div
-                  className="lrm-glass absolute right-0 top-11 z-40 w-60 rounded-xl p-2 text-xs"
-                >
-                  <div className="px-2.5 py-2 border-b border-[var(--border-subtle)]">
-                    <div className="font-semibold text-[var(--text-primary)]">{user.display_name}</div>
-                    <div className="text-[11px] text-[var(--text-muted)]">
-                      @{user.username} · 项目: {user.projects.join(', ') || '无'}
-                    </div>
+              <DismissiblePanel
+                id={userMenuId}
+                open={userMenuOpen}
+                className="lrm-glass absolute right-0 top-11 z-40 w-60 origin-top-right rounded-xl p-2 text-xs"
+              >
+                <div className="px-2.5 py-2 border-b border-[var(--border-subtle)]">
+                  <div className="font-semibold text-[var(--text-primary)]">{user.display_name}</div>
+                  <div className="text-[11px] text-[var(--text-muted)]">
+                    @{user.username} · 项目: {user.projects.join(', ') || '无'}
                   </div>
-                  <div className="py-1.5 space-y-1">
+                </div>
+                <div className="py-1.5 space-y-1">
+                  <Link
+                    to="/toolkit/manuals"
+                    onClick={() => setUserMenuOpen(false)}
+                    className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] no-underline"
+                  >
+                    <BookText className="w-3.5 h-3.5" /> 框架与平台手册
+                  </Link>
+
+                  {user.role === 'admin' && (
                     <Link
-                      to="/toolkit/manuals"
+                      to="/admin/health"
                       onClick={() => setUserMenuOpen(false)}
                       className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] no-underline"
                     >
-                      <BookText className="w-3.5 h-3.5" /> 框架与平台手册
+                      <Activity className="w-3.5 h-3.5" /> 系统监控
                     </Link>
+                  )}
 
-                    {user.role === 'admin' && (
-                      <Link
-                        to="/admin/health"
-                        onClick={() => setUserMenuOpen(false)}
-                        className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[var(--text-secondary)] hover:bg-[var(--bg-elevated)] hover:text-[var(--text-primary)] no-underline"
-                      >
-                        <Activity className="w-3.5 h-3.5" /> 系统监控
-                      </Link>
-                    )}
-
-                    <button
-                      type="button"
-                      onClick={handleLogout}
-                      className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[var(--sem-err-fg)] hover:bg-[var(--sem-err-bg)] cursor-pointer"
-                    >
-                      <LogOut className="w-3.5 h-3.5" /> 退出登录
-                    </button>
-                  </div>
+                  <button
+                    type="button"
+                    onClick={handleLogout}
+                    className="w-full flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[var(--sem-err-fg)] hover:bg-[var(--sem-err-bg)] cursor-pointer"
+                  >
+                    <LogOut className="w-3.5 h-3.5" /> 退出登录
+                  </button>
                 </div>
-              )}
+              </DismissiblePanel>
             </div>
           )}
         </div>
