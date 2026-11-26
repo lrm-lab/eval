@@ -13,7 +13,8 @@ from app.services.profile_service import _comparison_identity, _recorded_batch_s
 
 
 _NONCOMPLETED_STATUSES = {
-    "running", "queued", "pending", "preparing", "finalizing", "withdrawn", "retracted", "deleted",
+    "created", "pending", "queued", "starting", "preparing", "running", "paused", "cancelling", "retrying",
+    "finalizing", "revoked", "withdrawn", "retracted", "deleted",
 }
 _RUN_SETTINGS = (
     "suite_id", "vlmevalkit_mode", "gateway_profile_id", "temperature", "max_tokens",
@@ -47,7 +48,9 @@ def _configuration(row: dict[str, Any], identity: dict[str, Any]) -> tuple | Non
 
 
 def _visible(row, user: AuthUser, *, can_holdout: bool) -> bool:
-    if not can_access_project(user, row["project_id"], owner_id=row["owner_id"]):
+    if row["evidence_approval"] == "revoked" or not can_access_project(
+        user, row["project_id"], owner_id=row["owner_id"],
+    ):
         return False
     if str(row["batch_status"] or "").strip().lower() in _NONCOMPLETED_STATUSES:
         return False
@@ -116,9 +119,7 @@ def _compare_history_item(
     reasons = set()
     prior = []
     for peer in peers:
-        if peer is current or (
-            current["native_job_id"] and peer["native_job_id"] == current["native_job_id"]
-        ):
+        if peer["run_key"] == current["run_key"]:
             continue
         reference = _reference(conn, peer, can_holdout=can_holdout)
         when = _recorded_instant(reference["recorded_at"])
@@ -181,12 +182,16 @@ def build_evaluation_history(
     rows = conn.execute(
         f"""
         SELECT b.batch_id, b.generation_id, b.batch_name, b.benchmark_slug,
-               b.project_id, b.owner_id, b.dataset_release_id, r.split,
+               b.project_id, b.owner_id, b.evidence_approval, b.dataset_release_id, r.split,
                COALESCE(o.metric, r.metric_name) AS recorded_metric, r.metric_name,
                b.raw_dataset_name, b.model_canonical, b.model_route, b.model_provider, b.checkpoint,
                b.thinking_mode, b.harness, b.harness_version, b.runner, b.native_job_id,
                b.run_scope, b.run_config_json, b.scoring_protocol, b.fault_policy,
-               b.batch_status, b.finished_at, b.recorded, b.scored, b.has_gateway
+               b.batch_status, b.finished_at, b.recorded, b.scored, b.has_gateway,
+               (SELECT j.job_id FROM exec_jobs j
+                WHERE j.batch_id = b.batch_id AND j.project_id = b.project_id
+                  AND j.owner_id = b.owner_id AND j.kind = b.runner
+                ORDER BY j.job_id LIMIT 1) AS managed_job_id
         FROM batches b
         LEFT JOIN dataset_releases r ON r.dataset_release_id = b.dataset_release_id
         LEFT JOIN official_results o ON o.batch_id = b.batch_id
@@ -206,6 +211,11 @@ def build_evaluation_history(
         identity = _comparison_identity(row)
         row["configuration"] = _configuration(row, identity)
         row["peer_key"] = row["benchmark_slug"], identity["model_canonical"], identity["harness"]
+        job_id = row["managed_job_id"] or row["native_job_id"]
+        row["run_key"] = (
+            ("job", row["project_id"], row["owner_id"], row["runner"], job_id)
+            if job_id else ("batch", row["batch_id"])
+        )
         by_id[row["batch_id"]] = row
         by_identity[row["peer_key"]].append(row)
 
