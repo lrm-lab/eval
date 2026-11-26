@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { useNavigate, useSearchParams } from 'react-router-dom';
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowRight, Boxes, Lock, Moon, Sun, User } from 'lucide-react';
 import { apiFetch, ApiError } from '../lib/api';
 import { useAppStore } from '../lib/store';
@@ -12,6 +12,7 @@ const mobileBackdrop = new URL('./assets/login-datacenter-mobile.webp', import.m
 export function LoginPage() {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const { hash } = useLocation();
   const setUser = useAppStore((s) => s.setUser);
   const pushToast = useAppStore((s) => s.pushToast);
   const theme = useAppStore((s) => s.theme);
@@ -42,7 +43,7 @@ export function LoginPage() {
       });
       setUser(res.user);
       pushToast('success', `欢迎回来，${res.user.display_name}`);
-      navigate(safeReturnTo, { replace: true });
+      navigate(safeReturnTo.includes('#') ? safeReturnTo : safeReturnTo + hash, { replace: true });
     } catch (err) {
       const msg = err instanceof ApiError ? err.message : '登录失败，请检查账号或网络';
       setErrorMsg(msg);
