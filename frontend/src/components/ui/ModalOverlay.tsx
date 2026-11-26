@@ -103,6 +103,9 @@ function ModalSurface({
 }
 
 export function ModalOverlay({ open, ...props }: ModalOverlayProps) {
+  const reducedMotion = usePrefersReducedMotion();
+  if (!open && reducedMotion) return null;
+
   return createPortal(
     <AnimatePresence>{open && <ModalSurface {...props} />}</AnimatePresence>,
     document.body,
