@@ -203,7 +203,7 @@ def test_m2_direct_lab_native_contract_security_0600_0700_and_ab_diff(
         ctx.db,
         username="dlab_no_qa",
         password="StrongNoQaPass!26",
-        role="viewer",
+        role="researcher",
         projects=["proj_dlab"],
         scopes=[],
     )
@@ -315,7 +315,7 @@ def test_m2_direct_lab_native_contract_security_0600_0700_and_ab_diff(
     )
     assert ab_bad.status_code == 400 and ab_bad.json()["error"]["code"] == "INCOMPARABLE_PROTOCOL"
 
-    # Viewer without direct_vlm_qa:read sees status/reward ONLY (prompt/prediction/answer redacted!)
+    # Researcher without direct_vlm_qa:read sees status/reward ONLY (prompt/prediction/answer redacted!)
     det_noqa = c_noqa.get(f"/api/v1/direct-lab/runs/{run1['run_id']}")
     assert det_noqa.status_code == 200 and det_noqa.json()["qa_redacted"] is True
     assert "What is 21*2?" not in det_noqa.text and "Paris" not in det_noqa.text

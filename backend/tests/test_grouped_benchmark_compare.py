@@ -600,3 +600,54 @@ def test_reviewed_history_rechecks_active_snapshot_pins_and_access(case, monkeyp
         conn.execute("UPDATE batches SET evidence_approval = 'revoked' WHERE batch_id = 'before'")
     item = _history_request(client, headers, ("after", "gen_old"), mode="reviewed")["0"]
     assert item["reason"] == "BATCH_UNAVAILABLE" and item["baseline"] is None and item["candidate"] is None
+
+
+def test_viewer_can_read_existing_results_and_open_shared_report(case):
+    app, db, researcher, headers, _ = case
+    _insert_batch(db, "archive-a", {"ordinary": (1.0, "same")}, project="team-shared")
+    _insert_batch(db, "archive-b", {"ordinary": (0.0, "same")}, project="team-shared")
+    query = researcher.post("/api/v1/compare/query", headers=headers, json=_payload("archive-a", "archive-b"))
+    assert query.status_code == 200, query.text
+    saved = researcher.post(
+        "/api/v1/compare/saved",
+        headers=headers,
+        json={
+            "name": "Existing shared result",
+            "mode": "snapshot",
+            "project_id": "team-shared",
+            "comparison_id": query.json()["comparison_id"],
+        },
+    )
+    assert saved.status_code == 200, saved.text
+    shared_url = f"/api/v1/compare/s/{saved.json()['short_id']}"
+
+    password = "IsolatedArchiveFixture1!"
+    create_user(db, username="archive_viewer", password=password, projects=["default", "team-shared"])
+    viewer = TestClient(app)
+    login_client(viewer, "archive_viewer", password)
+
+    home = viewer.get("/api/v1/home/evaluation-map")
+    assert home.status_code == 200
+    cell = next(cell for cell in home.json()["cells"] if cell["dataset_release_id"] == RELEASE)
+    assert cell["latest_scored_batch"]["score"] == 0.0
+    assert cell["has_scored_history_peer"] is True
+
+    expected_items = (
+        ("leaderboard", "model_canonical", "fixture-model"),
+        ("datasets", "dataset_release_id", RELEASE),
+        ("batches", "batch_id", "archive-a"),
+        ("batches/archive-a/episodes", "trial_id", "archive-a-ordinary"),
+    )
+    for path, key, value in expected_items:
+        response = viewer.get(f"/api/v1/{path}")
+        assert response.status_code == 200, path
+        assert any(item.get(key) == value for item in response.json()["items"]), path
+
+    trial = viewer.get("/api/v1/batches/archive-a/trials/archive-a-ordinary")
+    assert trial.status_code == 200 and trial.json()["reward"] == 1.0
+    opened = viewer.get(shared_url)
+    assert opened.status_code == 200 and opened.json()["result"]["rows"]
+    with db.transaction() as conn:
+        conn.execute("UPDATE users SET projects_json = '[\"default\"]' WHERE username = 'archive_viewer'")
+    assert viewer.get("/api/v1/batches/archive-a").status_code == 403
+    assert viewer.get(shared_url).status_code == 403

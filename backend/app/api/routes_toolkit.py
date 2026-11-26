@@ -101,7 +101,7 @@ async def run_offline_calc(
 @router.get("/offline-reports")
 def list_offline_reports(
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.toolkit.list_offline_reports(user)
 
@@ -110,7 +110,7 @@ def list_offline_reports(
 def get_offline_report(
     report_id: str,
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.toolkit.get_offline_report(user, report_id)
 
@@ -141,7 +141,7 @@ def attach_official_result(
 @router.get("/params")
 def list_param_groups(
     request: Request,
-    user: AuthUser = Depends(get_current_user),
+    user: AuthUser = Depends(require_researcher),
 ) -> dict[str, Any]:
     return request.app.state.ctx.toolkit.list_param_groups(user)
 
