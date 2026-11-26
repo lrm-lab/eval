@@ -1,6 +1,6 @@
 # 07-2 · 全链路黄金验收矩阵（pytest + Playwright E2E）与风险预案
 
-> **后续产品验收**见 [已确认，待发布或验收](../CURRENT.md#已确认待发布或验收)。本矩阵的 M0–M3 安全与验收门槛继续适用。
+> **后续产品验收**见 [现行要求及待验收项](../CURRENT.md#待验收)。本矩阵的 M0–M3 安全与验收门槛继续适用。
 
 本文档提供可直接落为 `pytest`（后端）与 `Playwright`（前端 E2E）自动化断言的精确验收用例，**所有编号与 [`03-data-and-methodology/01-data-inventory-and-coverage.md`](../03-data-and-methodology/01-data-inventory-and-coverage.md) 中的双向数据来源总表逐条对应**，100% 基于真实 197 样本与可验证契约，零无源空壳用例。
 
